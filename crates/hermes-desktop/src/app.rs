@@ -104,6 +104,8 @@ pub struct HermesApp {
     usage: Usage,
     models: Models,
     sessions: Sessions,
+    /// Stored transcript on screen; sending is disabled until New chat.
+    viewing_history: Option<String>,
     rail_search: bool,
     rail_filter: String,
 }
@@ -145,6 +147,7 @@ impl HermesApp {
             vault: Vault::default(),
             models: Models::default(),
             sessions: Sessions::default(),
+            viewing_history: None,
             usage: Usage {
                 days: 30,
                 ..Usage::default()
@@ -327,7 +330,7 @@ impl HermesApp {
             BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
             BackendEvent::SessionMessages { id, messages } => {
                 self.lines = sessions::lines_from_messages(&messages);
-                self.session_id = Some(id);
+                self.viewing_history = Some(id);
                 self.cards.clear();
                 self.error = None;
                 self.busy = false;
@@ -629,6 +632,15 @@ impl HermesApp {
     // ---- actions --------------------------------------------------------
 
     fn submit(&mut self, cx: &mut Context<Self>) {
+        if self.viewing_history.is_some() {
+            self.lines.push(Line::new(
+                Role::System,
+                "Stored session is read-only — New chat to continue.",
+            ));
+            self.scroll.scroll_to_bottom();
+            cx.notify();
+            return;
+        }
         let prompt = self.composer.trim().to_string();
         if prompt.is_empty() {
             return;
@@ -651,6 +663,7 @@ impl HermesApp {
     fn new_chat(&mut self, cx: &mut Context<Self>) {
         self.backend.send(Command::NewSession);
         self.session_id = None;
+        self.viewing_history = None;
         self.lines.clear();
         self.cards.clear();
         self.attachments.clear();
@@ -2711,7 +2724,7 @@ impl HermesApp {
         for row in rows {
             let open_id = row.id.clone();
             let delete_id = row.id.clone();
-            let active = self.session_id.as_deref() == Some(row.id.as_str());
+            let active = self.viewing_history.as_deref() == Some(row.id.as_str());
             list = list.child(
                 div()
                     .flex()
@@ -4575,17 +4588,25 @@ impl HermesApp {
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.composer.is_empty();
         let focused = self.focused;
+        let placeholder = if self.viewing_history.is_some() {
+            "Stored session — read-only · New chat to continue".to_string()
+        } else {
+            format!(
+                "Message {}",
+                self.current_profile()
+                    .map(|profile| profile.label().to_string())
+                    .unwrap_or_else(|| self.profile_name())
+            )
+        };
 
         let mut input = div().flex().flex_col().gap_1().flex_1().min_w_0();
         if empty {
-            input = input.child(div().text_sm().text_color(rgb(TEXT_DIM)).child(
-                SharedString::from(format!(
-                        "Message {}",
-                        self.current_profile()
-                            .map(|profile| profile.label().to_string())
-                            .unwrap_or_else(|| self.profile_name())
-                    )),
-            ));
+            input = input.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(placeholder)),
+            );
         } else {
             for part in self.composer.split('\n') {
                 input = input.child(

@@ -15,8 +15,8 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
 - Full-height rail/inspector split with a centre-column composer, Hermes-style
   footer status strip, tray presence.
 - Session history: newest-first list with message/tool counts and age, search,
-  delete, and stored-transcript hydration from `/api/sessions/{id}/messages`
-  (the rail swaps between bots and sessions).
+  delete, and read-only transcript hydration from `/api/sessions/{id}/messages`
+  (the rail swaps between bots and sessions; the gateway exposes no resume).
 
 ## Gaps, in the order worth closing
 
