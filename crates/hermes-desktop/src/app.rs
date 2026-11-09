@@ -1,4 +1,8 @@
-//! The Hermes window: profile sidebar, streaming transcript, composer.
+//! The Hermes window: profile sidebar, streaming transcript, command palette
+//! and composer.
+//!
+//! Interaction design mirrors Grok Bot's: no modal dialogs, everything reachable
+//! from the keyboard, and the transcript follows the stream.
 
 use std::time::Duration;
 
@@ -12,6 +16,7 @@ use hermes_rpc::ConnectionState;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::backend::{Backend, BackendEvent, Command};
+use crate::keys::{self, Action, Chord, Focus};
 use crate::transcript::{Line, Role, append_streaming};
 use crate::tray::{self, TrayStatus};
 
@@ -24,6 +29,36 @@ const ACCENT: u32 = 0x7aa2f7;
 const USER: u32 = 0x9ece6a;
 const REASONING: u32 = 0xbb9af7;
 const WARN: u32 = 0xe0af68;
+const DANGER: u32 = 0xf7768e;
+
+const SUGGESTIONS: [&str; 3] = [
+    "What can you do?",
+    "Show cluster health",
+    "Summarise today's cron runs",
+];
+
+#[derive(Default)]
+struct Palette {
+    open: bool,
+    query: String,
+    index: usize,
+}
+
+#[derive(Clone)]
+enum PaletteAction {
+    NewChat,
+    Refresh,
+    Interrupt,
+    SwitchProfile(String),
+    Quit,
+}
+
+#[derive(Clone)]
+struct PaletteItem {
+    label: String,
+    hint: String,
+    action: PaletteAction,
+}
 
 pub struct HermesApp {
     host: HostConfig,
@@ -33,10 +68,12 @@ pub struct HermesApp {
     session_id: Option<String>,
     lines: Vec<Line>,
     composer: String,
+    palette: Palette,
     connection: ConnectionState,
     busy: bool,
     error: Option<String>,
     focus: FocusHandle,
+    focused: bool,
     scroll: ScrollHandle,
     tray: TrayStatus,
     tray_state: (bool, String),
@@ -59,12 +96,14 @@ impl HermesApp {
             profiles: Vec::new(),
             active: None,
             session_id: None,
-            lines: vec![Line::new(Role::System, "Connecting to Hermes…")],
+            lines: Vec::new(),
             composer: String::new(),
+            palette: Palette::default(),
             connection: ConnectionState::Connecting,
             busy: false,
             error: None,
             focus: cx.focus_handle(),
+            focused: false,
             scroll: ScrollHandle::new(),
             tray,
             tray_state: (false, String::new()),
@@ -125,17 +164,23 @@ impl HermesApp {
             .unwrap_or_else(|| "default".into())
     }
 
+    fn current_profile(&self) -> Option<&Profile> {
+        let name = self.profile_name();
+        self.profiles.iter().find(|profile| profile.name == name)
+    }
+
+    /// True once the user has actually exchanged a turn.
+    fn has_conversation(&self) -> bool {
+        self.lines
+            .iter()
+            .any(|line| matches!(line.role, Role::User | Role::Assistant))
+    }
+
     fn on_backend_event(&mut self, event: BackendEvent, cx: &mut Context<Self>) {
         match event {
             BackendEvent::Connection(state) => {
                 self.connection = state.clone();
-                if state == ConnectionState::Open {
-                    self.lines.clear();
-                    self.lines.push(Line::new(
-                        Role::System,
-                        format!("Connected to {}", self.host.base_url),
-                    ));
-                } else if state == ConnectionState::Closed {
+                if state == ConnectionState::Closed {
                     self.busy = false;
                 }
             }
@@ -153,54 +198,115 @@ impl HermesApp {
             BackendEvent::Delta { text } => {
                 append_streaming(&mut self.lines, Role::Assistant, &text);
                 self.busy = true;
+                self.scroll.scroll_to_bottom();
             }
             BackendEvent::Reasoning { text } => {
-                append_streaming(&mut self.lines, Role::Reasoning, &text)
+                append_streaming(&mut self.lines, Role::Reasoning, &text);
+                self.scroll.scroll_to_bottom();
             }
             BackendEvent::MessageStart => self.busy = true,
             BackendEvent::MessageComplete => self.busy = false,
-            BackendEvent::ToolActivity(text) => {
+            BackendEvent::ToolActivity(text) | BackendEvent::Notice(text) => {
                 self.lines.push(Line::new(Role::System, text));
-            }
-            BackendEvent::Notice(text) => {
-                self.lines.push(Line::new(Role::System, text));
+                self.scroll.scroll_to_bottom();
             }
             BackendEvent::Error(error) => {
                 self.error = Some(error.clone());
                 self.lines
                     .push(Line::new(Role::System, format!("⚠ {error}")));
                 self.busy = false;
+                self.scroll.scroll_to_bottom();
             }
         }
         self.sync_tray(cx);
         cx.notify();
     }
 
+    // ---- keyboard -------------------------------------------------------
+
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform {
-            return;
-        }
+        let focus = if self.palette.open {
+            Focus::Palette
+        } else {
+            Focus::Composer
+        };
+        let action = keys::resolve(
+            Chord {
+                key: &keystroke.key,
+                primary: keystroke.modifiers.control || keystroke.modifiers.platform,
+                shift: keystroke.modifiers.shift,
+                alt: keystroke.modifiers.alt,
+                text: keystroke.key_char.as_deref(),
+            },
+            focus,
+        );
+        self.dispatch(action, cx);
+    }
 
-        match keystroke.key.as_str() {
-            "enter" => self.submit(cx),
-            "backspace" => {
-                self.composer.pop();
-                cx.notify();
+    fn dispatch(&mut self, action: Action, cx: &mut Context<Self>) {
+        match action {
+            Action::Insert(text) => {
+                if self.palette.open {
+                    self.palette.query.push_str(&text);
+                    self.palette.index = 0;
+                } else {
+                    self.composer.push_str(&text);
+                }
             }
-            "escape" => {
+            Action::Backspace => {
+                if self.palette.open {
+                    self.palette.query.pop();
+                    self.palette.index = 0;
+                } else {
+                    self.composer.pop();
+                }
+            }
+            Action::Newline => self.composer.push('\n'),
+            Action::Send => {
+                if self.palette.open {
+                    self.accept_palette(cx);
+                } else {
+                    self.submit(cx);
+                }
+            }
+            Action::PaletteAccept => self.accept_palette(cx),
+            Action::PaletteUp => {
+                self.palette.index = self.palette.index.saturating_sub(1);
+            }
+            Action::PaletteDown => {
+                let count = self.palette_items().len();
+                if self.palette.index + 1 < count {
+                    self.palette.index += 1;
+                }
+            }
+            Action::OpenPalette => {
+                self.palette = Palette {
+                    open: true,
+                    query: String::new(),
+                    index: 0,
+                };
+            }
+            Action::Dismiss => self.palette = Palette::default(),
+            Action::NewChat => self.new_chat(cx),
+            Action::Refresh => self.refresh(cx),
+            Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
                 }
             }
-            _ => {
-                if let Some(text) = keystroke.key_char.as_ref() {
-                    self.composer.push_str(text);
-                    cx.notify();
+            Action::SwitchProfile(index) => {
+                if let Some(profile) = self.profiles.get(index - 1) {
+                    let name = profile.name.clone();
+                    self.select_profile(name, cx);
                 }
             }
+            Action::Nothing => return,
         }
+        cx.notify();
     }
+
+    // ---- actions --------------------------------------------------------
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let prompt = self.composer.trim().to_string();
@@ -211,6 +317,7 @@ impl HermesApp {
         self.lines.push(Line::new(Role::User, prompt.clone()));
         self.lines.push(Line::new(Role::Assistant, String::new()));
         self.busy = true;
+        self.scroll.scroll_to_bottom();
         self.backend.send(Command::Submit(prompt));
         cx.notify();
     }
@@ -225,15 +332,105 @@ impl HermesApp {
         self.session_id = None;
         self.lines.clear();
         self.busy = false;
+        self.palette = Palette::default();
         cx.notify();
     }
+
+    fn select_profile(&mut self, name: String, cx: &mut Context<Self>) {
+        self.palette = Palette::default();
+        if self.profile_name() == name {
+            return;
+        }
+        self.host.profile = Some(name.clone());
+        self.session_id = None;
+        self.lines.clear();
+        self.backend.send(Command::SwitchProfile(name.clone()));
+        self.lines
+            .push(Line::new(Role::System, format!("Switched to {name}")));
+        cx.notify();
+    }
+
+    fn palette_items(&self) -> Vec<PaletteItem> {
+        let query = self.palette.query.to_lowercase();
+        let mut items = vec![
+            PaletteItem {
+                label: "New chat".into(),
+                hint: "Ctrl+N".into(),
+                action: PaletteAction::NewChat,
+            },
+            PaletteItem {
+                label: "Refresh host".into(),
+                hint: "Ctrl+R".into(),
+                action: PaletteAction::Refresh,
+            },
+        ];
+        if self.busy {
+            items.push(PaletteItem {
+                label: "Interrupt turn".into(),
+                hint: "Esc".into(),
+                action: PaletteAction::Interrupt,
+            });
+        }
+        for (index, profile) in self.profiles.iter().enumerate() {
+            items.push(PaletteItem {
+                label: format!("Switch to {}", profile.label()),
+                hint: format!("Ctrl+{}", index + 1),
+                action: PaletteAction::SwitchProfile(profile.name.clone()),
+            });
+        }
+        items.push(PaletteItem {
+            label: "Quit".into(),
+            hint: String::new(),
+            action: PaletteAction::Quit,
+        });
+
+        if query.is_empty() {
+            return items;
+        }
+        items
+            .into_iter()
+            .filter(|item| {
+                item.label.to_lowercase().contains(&query)
+                    || item.hint.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    fn accept_palette(&mut self, cx: &mut Context<Self>) {
+        let items = self.palette_items();
+        let Some(item) = items.get(self.palette.index).cloned() else {
+            self.palette = Palette::default();
+            cx.notify();
+            return;
+        };
+        self.palette = Palette::default();
+        match item.action {
+            PaletteAction::NewChat => self.new_chat(cx),
+            PaletteAction::Refresh => self.refresh(cx),
+            PaletteAction::Interrupt => self.backend.send(Command::Interrupt),
+            PaletteAction::SwitchProfile(name) => self.select_profile(name, cx),
+            PaletteAction::Quit => cx.quit(),
+        }
+        cx.notify();
+    }
+
+    fn use_suggestion(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer = text.to_string();
+        cx.notify();
+    }
+
+    // ---- rendering ------------------------------------------------------
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (label, color) = match self.connection {
             ConnectionState::Open => ("connected", USER),
             ConnectionState::Connecting => ("connecting", WARN),
-            ConnectionState::Closed => ("offline", 0xf7768e),
+            ConnectionState::Closed => ("offline", DANGER),
         };
+        let model = self
+            .current_profile()
+            .and_then(|profile| profile.model.clone())
+            .unwrap_or_default();
 
         div()
             .flex()
@@ -265,18 +462,33 @@ impl HermesApp {
                     .on_click(cx.listener(|this, _event, _window, cx| this.refresh(cx)))
                     .child(SharedString::from(format!("● {label}"))),
             )
-            .when_some(self.active.as_ref(), |this, active| {
+            .when(!model.is_empty(), |this| {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(ACCENT))
-                        .child(SharedString::from(format!("◆ {}", active.current))),
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(model)),
                 )
             })
             .when(self.busy, |this| {
                 this.child(div().text_xs().text_color(rgb(WARN)).child("working…"))
             })
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("palette-hint")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|this| this.text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.dispatch(Action::OpenPalette, cx)
+                    }))
+                    .child("⌘K commands"),
+            )
             .child(
                 div()
                     .id("new-chat")
@@ -304,55 +516,76 @@ impl HermesApp {
             .border_r_1()
             .border_color(rgb(BORDER))
             .py_2()
+            .overflow_hidden()
             .child(
                 div()
                     .px_3()
                     .pb_2()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child(format!("PROFILES ({})", self.profiles.len())),
+                    .child(format!("BOTS ({})", self.profiles.len())),
             )
-            .children(self.profiles.iter().map(|profile| {
-                let selected = profile.name == current;
-                let name = profile.name.clone();
-                let subtitle = profile
-                    .model
-                    .clone()
-                    .or_else(|| profile.provider.clone())
-                    .unwrap_or_default();
-                let meta = format!("{} skills", profile.skill_count);
-
+            .child(
                 div()
-                    .id(SharedString::from(format!("profile-{}", profile.name)))
+                    .id("profiles")
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .cursor_pointer()
-                    .when(selected, |this| this.bg(rgb(BORDER)))
-                    .hover(|this| this.bg(rgb(0x1d2029)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.select_profile(name.clone(), cx);
-                    }))
-                    .child(
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(self.profiles.iter().enumerate().map(|(index, profile)| {
+                        let selected = profile.name == current;
+                        let name = profile.name.clone();
+                        let subtitle = profile
+                            .model
+                            .clone()
+                            .or_else(|| profile.provider.clone())
+                            .unwrap_or_default();
+                        let meta = format!("{} skills", profile.skill_count);
+
                         div()
-                            .text_sm()
-                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                            .child(SharedString::from(profile.label().to_string())),
-                    )
-                    .child(
-                        div()
+                            .id(SharedString::from(format!("profile-{}", profile.name)))
                             .flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(meta))
-                            .when(!subtitle.is_empty(), |this| {
-                                this.child(SharedString::from(subtitle))
-                            }),
-                    )
-            }))
+                            .flex_col()
+                            .gap_1()
+                            .px_3()
+                            .py_2()
+                            .cursor_pointer()
+                            .when(selected, |this| this.bg(rgb(BORDER)))
+                            .hover(|this| this.bg(rgb(0x1d2029)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.select_profile(name.clone(), cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
+                                            .child(SharedString::from(profile.label().to_string())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(SharedString::from(format!("{}", index + 1))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(meta))
+                                    .when(!subtitle.is_empty(), |this| {
+                                        this.child(SharedString::from(subtitle))
+                                    }),
+                            )
+                    })),
+            )
             .when_some(self.error.as_ref(), |this, error| {
                 this.child(
                     div()
@@ -360,72 +593,62 @@ impl HermesApp {
                         .px_3()
                         .pt_2()
                         .text_xs()
-                        .text_color(rgb(0xf7768e))
+                        .text_color(rgb(DANGER))
                         .child(SharedString::from(error.clone())),
                 )
             })
     }
 
-    fn select_profile(&mut self, name: String, cx: &mut Context<Self>) {
-        if self.profile_name() == name {
-            return;
-        }
-        self.host.profile = Some(name.clone());
-        self.session_id = None;
-        self.backend.send(Command::SwitchProfile(name.clone()));
-        self.lines.push(Line::new(
-            Role::System,
-            format!("Switched to profile {name}"),
-        ));
-        cx.notify();
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .p_8()
+            .h_full()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("What should we get done?"),
+            )
+            .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                "Talking to {} · Enter sends · Ctrl+K for commands",
+                self.profile_name()
+            )))
+            .children(SUGGESTIONS.iter().map(|suggestion| {
+                let text = suggestion.to_string();
+                div()
+                    .id(SharedString::from(format!("suggestion-{suggestion}")))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(PANEL)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.use_suggestion(&text.clone(), cx)
+                    }))
+                    .child(SharedString::from(*suggestion))
+            }))
     }
 
-    fn chat(&self) -> impl IntoElement {
-        let body = if self.lines.is_empty() {
-            div()
-                .p_6()
-                .text_sm()
-                .text_color(rgb(MUTED))
-                .child("No messages yet. Type below and press Enter.")
-                .into_any_element()
-        } else {
+    fn chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = if self.has_conversation() {
             div()
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap_4()
                 .p_5()
-                .children(self.lines.iter().map(|line| {
-                    let (prefix, color) = match line.role {
-                        Role::User => ("you", USER),
-                        Role::Assistant => ("hermes", TEXT),
-                        Role::Reasoning => ("thinking", REASONING),
-                        Role::System => ("·", MUTED),
-                    };
-                    let text = if line.text.is_empty() {
-                        "…".to_string()
-                    } else {
-                        line.text.clone()
-                    };
-
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(color))
-                                .child(SharedString::from(prefix)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(color))
-                                .child(SharedString::from(text)),
-                        )
-                }))
+                .children(self.lines.iter().map(|line| self.render_line(line)))
                 .into_any_element()
+        } else {
+            self.empty_state(cx).into_any_element()
         };
 
         div()
@@ -446,16 +669,138 @@ impl HermesApp {
             )
     }
 
-    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_line(&self, line: &Line) -> gpui::AnyElement {
+        let (speaker, color) = match line.role {
+            Role::User => ("you", USER),
+            Role::Assistant => ("hermes", TEXT),
+            Role::Reasoning => ("thinking", REASONING),
+            Role::System => ("·", MUTED),
+        };
+
+        let streaming = self.busy
+            && line.role == Role::Assistant
+            && std::ptr::eq(line, self.lines.last().unwrap_or(line));
+
+        let mut text = if line.text.is_empty() {
+            "…".to_string()
+        } else {
+            line.text.clone()
+        };
+        if streaming {
+            text.push('▍');
+        }
+
+        let mut block = div().flex().flex_col().gap_1().w_full();
+        for part in text.split('\n') {
+            block = block.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(color))
+                    .child(SharedString::from(part.to_string())),
+            );
+        }
+
         div()
             .flex()
-            .items_center()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(color))
+                    .child(SharedString::from(speaker)),
+            )
+            .child(block)
+            .into_any_element()
+    }
+
+    fn palette_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let items = self.palette_items();
+        let selected = self.palette.index.min(items.len().saturating_sub(1));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .mx_4()
+            .mb_2()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(ACCENT))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if self.palette.query.is_empty() {
+                        MUTED
+                    } else {
+                        TEXT
+                    }))
+                    .child(SharedString::from(if self.palette.query.is_empty() {
+                        "Type a command…".to_string()
+                    } else {
+                        self.palette.query.clone()
+                    })),
+            )
+            .children(items.into_iter().enumerate().map(|(index, item)| {
+                div()
+                    .id(SharedString::from(format!("palette-{index}")))
+                    .flex()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(index == selected, |this| this.bg(rgb(BORDER)))
+                    .hover(|this| this.bg(rgb(0x1d2029)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.palette.index = index;
+                        this.accept_palette(cx);
+                    }))
+                    .child(SharedString::from(item.label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(item.hint)),
+                    )
+            }))
+    }
+
+    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let empty = self.composer.is_empty();
+        let focused = self.focused;
+
+        let mut input = div().flex().flex_col().gap_0p5().flex_1();
+        if empty {
+            input = input.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("Message Hermes…  ·  Shift+Enter for a new line"),
+            );
+        } else {
+            for part in self.composer.split('\n') {
+                input = input.child(div().text_sm().child(SharedString::from(part.to_string())));
+            }
+        }
+
+        div()
+            .flex()
+            .items_end()
             .gap_2()
             .px_4()
             .py_3()
             .bg(rgb(PANEL))
             .border_t_1()
             .border_color(rgb(BORDER))
+            .when(!focused, |this| this.border_color(rgb(WARN)))
             .child(
                 div()
                     .flex_1()
@@ -465,17 +810,8 @@ impl HermesApp {
                     .bg(rgb(BG))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .text_sm()
-                    .text_color(rgb(if self.composer.is_empty() {
-                        MUTED
-                    } else {
-                        TEXT
-                    }))
-                    .child(SharedString::from(if self.composer.is_empty() {
-                        "Message Hermes… (Enter to send, Esc to interrupt)".to_string()
-                    } else {
-                        self.composer.clone()
-                    })),
+                    .text_color(rgb(TEXT))
+                    .child(input),
             )
             .child(
                 div()
@@ -483,22 +819,28 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BORDER))
                     .text_sm()
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(0x2d3140)))
+                    .when(empty, |this| this.bg(rgb(BORDER)).text_color(rgb(MUTED)))
+                    .when(!empty, |this| this.bg(rgb(ACCENT)).text_color(rgb(BG)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx)))
-                    .child("Send"),
+                    .child("Send ↵"),
             )
     }
 }
 
 impl Render for HermesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus.is_focused(window);
-        if !focused {
+        self.focused = self.focus.is_focused(window);
+        if !self.focused {
             window.focus(&self.focus, cx);
         }
+
+        let palette = if self.palette.open {
+            Some(self.palette_overlay(cx).into_any_element())
+        } else {
+            None
+        };
 
         div()
             .flex()
@@ -516,8 +858,9 @@ impl Render for HermesApp {
                     .flex_1()
                     .overflow_hidden()
                     .child(self.sidebar(cx))
-                    .child(self.chat()),
+                    .child(self.chat(cx)),
             )
+            .children(palette)
             .child(self.composer(cx))
     }
 }

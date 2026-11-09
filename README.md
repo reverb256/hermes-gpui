@@ -37,6 +37,20 @@ cargo run -p hermes-desktop
 Env vars: `HERMES_URL` (origin), `HERMES_TOKEN` (bearer), `HERMES_BASIC`
 (`user:pass`), `HERMES_PROFILE` (profile to scope the chat to).
 
+### Pointing at the hermes deployment
+
+The k3s pod serves the same dashboard and gateway, so no special mode is needed:
+
+```bash
+HERMES_URL=https://hermes.example.com \
+HERMES_BASIC=user:pass \
+HERMES_PROFILE=ops \
+cargo run -p hermes-desktop
+```
+
+The profile roster comes from the pod's `/api/profiles`, so every `fleet-*`
+profile shows up in the sidebar automatically.
+
 ## System requirements (Linux)
 
 GPUI renders through the GPU: `wayland` or `x11`, `libxkbcommon`, `vulkan-icd-loader`,
