@@ -99,9 +99,9 @@ is never called, so the client can write a secret but cannot read one back.
 ## Settings
 
 `Ctrl+Shift+V` (Vault), `Ctrl+Shift+M` (Model), `Ctrl+Shift+A` (Assignments),
-`Ctrl+Shift+K` (Skills), `Ctrl+Shift+S` (Sessions) and `Ctrl+Shift+U` (Usage &
-Billing) open their surfaces; the settings sheet keeps its sections down the
-left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
+`Ctrl+Shift+K` (Skills), `Ctrl+Shift+X` (MCP), `Ctrl+Shift+S` (Sessions) and
+`Ctrl+Shift+U` (Usage & Billing) open their surfaces; the settings sheet
+keeps its sections down the left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
 Vault.
 
 **Vault** is the host's credential catalog, grouped into one tab per category the
@@ -132,6 +132,11 @@ Opening one hydrates the stored transcript from
 `/api/sessions/{id}/messages` read-only — the gateway has no resume call, so
 sending is disabled until **New chat**. `Ctrl+Shift+S` or the header's
 **Sessions** chip toggles the rail; Escape/Bots goes back.
+
+**MCP** lists configured servers with transport, source, endpoint and auth,
+a host-side **Test** ping (`POST /api/mcp/servers/{name}/test`) and an On/Off
+toggle (`PUT /api/mcp/servers/{name}/enabled`). Server editing still belongs
+in the config, not the desktop.
 
 **Skills** lists the host's installed skills with search, category pills,
 usage counts and a live On/Off toggle (`PUT /api/skills/toggle`); the footer

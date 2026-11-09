@@ -11,16 +11,18 @@ pub enum Section {
     Model,
     Assignments,
     Skills,
+    Mcp,
     Usage,
 }
 
 impl Section {
-    pub fn all() -> [Section; 5] {
+    pub fn all() -> [Section; 6] {
         [
             Section::Vault,
             Section::Model,
             Section::Assignments,
             Section::Skills,
+            Section::Mcp,
             Section::Usage,
         ]
     }
@@ -31,6 +33,7 @@ impl Section {
             Section::Model => "Model",
             Section::Assignments => "Assignments",
             Section::Skills => "Skills",
+            Section::Mcp => "MCP",
             Section::Usage => "Usage & Billing",
         }
     }
@@ -42,6 +45,7 @@ impl Section {
             Section::Model => "◇",
             Section::Assignments => "▦",
             Section::Skills => "✦",
+            Section::Mcp => "⇄",
             Section::Usage => "▥",
         }
     }
@@ -79,7 +83,7 @@ mod tests {
     #[test]
     fn sections_are_distinct_and_labeled() {
         let sections = Section::all();
-        assert_eq!(sections.len(), 5);
+        assert_eq!(sections.len(), 6);
         for (index, section) in sections.iter().enumerate() {
             assert!(!section.label().is_empty());
             assert!(

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo,
-    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary, Skill,
-    UsageAnalytics, gateway,
+    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpServer,
+    ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary,
+    Skill, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -193,6 +193,16 @@ pub enum BackendEvent {
         name: String,
         enabled: bool,
     },
+    Mcp(Vec<McpServer>),
+    McpFailed(String),
+    McpToggled {
+        name: String,
+        enabled: bool,
+    },
+    McpTested {
+        name: String,
+        result: serde_json::Value,
+    },
     Avatar {
         profile: String,
         mime: String,
@@ -279,6 +289,14 @@ pub enum Command {
     SetSkill {
         name: String,
         enabled: bool,
+    },
+    LoadMcp,
+    SetMcp {
+        name: String,
+        enabled: bool,
+    },
+    TestMcp {
+        name: String,
     },
 }
 
@@ -523,6 +541,46 @@ async fn worker(
                                 }
                             }
                         }
+                        Command::LoadMcp => match rest.mcp_servers().await {
+                            Ok(servers) => {
+                                let _ = events.send(BackendEvent::Mcp(servers));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::McpFailed(message));
+                            }
+                        },
+                        Command::SetMcp { name, enabled } => {
+                            match rest.set_mcp_enabled(&name, enabled).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::McpToggled {
+                                        name: name.clone(),
+                                        enabled,
+                                    });
+                                    if let Ok(servers) = rest.mcp_servers().await {
+                                        let _ = events.send(BackendEvent::Mcp(servers));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                        "{name}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::TestMcp { name } => match rest.test_mcp(&name).await {
+                            Ok(result) => {
+                                let _ = events.send(BackendEvent::McpTested { name, result });
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::McpFailed(format!(
+                                    "{name}: {message}"
+                                )));
+                            }
+                        },
                         Command::LoadSkills => match rest.skills().await {
                             Ok(skills) => {
                                 let _ = events.send(BackendEvent::Skills(skills));

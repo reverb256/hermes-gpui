@@ -2,6 +2,7 @@ mod app;
 mod backend;
 mod inspector;
 mod keys;
+mod mcp;
 mod models;
 mod sessions;
 mod settings;

@@ -41,6 +41,7 @@ pub enum Action {
     ToggleModels,
     ToggleAssignments,
     ToggleSkills,
+    ToggleMcp,
     ToggleSessions,
     ToggleUsage,
     Dismiss,
@@ -82,6 +83,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
         Focus::Composer => {
             if chord.primary {
                 return match chord.key {
+                    "x" if chord.shift => Action::ToggleMcp,
                     "k" if chord.shift => Action::ToggleSkills,
                     "k" => Action::OpenPalette,
                     "n" => Action::NewChat,

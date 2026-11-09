@@ -19,6 +19,8 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
   (the rail swaps between bots and sessions; the gateway exposes no resume).
 - Skills page: searchable installed catalog with category/usage metadata and
   On/Off toggles through `PUT /api/skills/toggle`.
+- MCP page: host-level server list with transport/source/endpoint/auth, a
+  host-side reachability test, and On/Off per server.
 
 ## Gaps, in the order worth closing
 
@@ -34,13 +36,12 @@ Shipped: recency list, search, delete and transcript hydration. Still needed:
 resume the gateway runtime for an old id, rename, pin/archive, and a
 project/workspace filter.
 
-### 2. MCP toolsets — **Next**
+### 2. MCP toolsets — **Partly shipped**
 
-Surface already exists in the app under the bot inspector's Connectors tab, but
-is read-only per bot. Add a host-level Toolsets page: list servers with
-transport/command/url/enabled, toggle enabled, and edit `mcp.json` through a
-validated text buffer before saving. Verification path: `/api/mcp/*` plus a
-config round trip; no live server changes without an explicit toggle.
+Shipped: the host-level list (transport, source, endpoint, auth), host-side
+reachability test and per-server enabled toggle. Still needed: add/edit/
+delete servers through a validated config buffer, OAuth hand-off, and the
+catalog installer.
 
 ### 3. Skills hub — **Next**
 

@@ -20,6 +20,7 @@ use crate::backend::{
 };
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
+use crate::mcp::{self, Mcp};
 use crate::models::{self, Models};
 use crate::sessions::{self, Sessions};
 use crate::settings::{Section, Settings};
@@ -106,6 +107,7 @@ pub struct HermesApp {
     models: Models,
     sessions: Sessions,
     skills: Skills,
+    mcp: Mcp,
     /// Stored transcript on screen; sending is disabled until New chat.
     viewing_history: Option<String>,
     rail_search: bool,
@@ -150,6 +152,7 @@ impl HermesApp {
             models: Models::default(),
             sessions: Sessions::default(),
             skills: Skills::default(),
+            mcp: Mcp::default(),
             viewing_history: None,
             usage: Usage {
                 days: 30,
@@ -193,6 +196,7 @@ impl HermesApp {
                 "assignments" => app.load_assignments(cx),
                 "sessions" => app.open_sessions(cx),
                 "skills" => app.open_skills(cx),
+                "mcp" => app.open_mcp(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -330,6 +334,18 @@ impl HermesApp {
             BackendEvent::ModelsFailed(message) => self.models.failed(message),
             BackendEvent::ModelStatus(text) => self.models.status = Some(text),
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
+            BackendEvent::Mcp(rows) => self.mcp.loaded(rows),
+            BackendEvent::McpFailed(message) => self.mcp.failed(message),
+            BackendEvent::McpToggled { name, enabled } => {
+                self.mcp.status = Some(format!(
+                    "{name} {}",
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            BackendEvent::McpTested { name, result } => {
+                self.mcp.testing = None;
+                self.mcp.status = Some(mcp::test_summary(&name, &result));
+            }
             BackendEvent::Skills(rows) => self.skills.loaded(rows),
             BackendEvent::SkillsFailed(message) => self.skills.failed(message),
             BackendEvent::SkillToggled { name, enabled } => {
@@ -422,6 +438,7 @@ impl HermesApp {
             if (self.settings.section == Section::Vault && self.route_vault_typing(event, cx))
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
                 || (self.settings.section == Section::Skills && self.route_skills_typing(event, cx))
+                || (self.settings.section == Section::Mcp && self.route_mcp_typing(event, cx))
             {
                 return;
             }
@@ -559,6 +576,7 @@ impl HermesApp {
             Action::ToggleAssignments => self.toggle_assignments(cx),
             Action::ToggleSessions => self.toggle_sessions(cx),
             Action::ToggleSkills => self.toggle_skills(cx),
+            Action::ToggleMcp => self.toggle_mcp_page(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -825,6 +843,7 @@ impl HermesApp {
         self.settings.hide();
         self.vault.hide();
         self.skills.focus = false;
+        self.mcp.focus = false;
         self.models.focus = false;
         cx.notify();
     }
@@ -957,6 +976,328 @@ impl HermesApp {
                         cx.notify();
                     })),
             )
+    }
+
+    fn open_mcp(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Mcp);
+        self.load_mcp(cx);
+    }
+
+    fn load_mcp(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Mcp);
+        self.mcp.loaded = false;
+        self.mcp.error = None;
+        self.mcp.status = None;
+        self.mcp.testing = None;
+        self.backend.send(Command::LoadMcp);
+        cx.notify();
+    }
+
+    fn toggle_mcp_page(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Mcp {
+            self.close_settings(cx);
+        } else {
+            self.open_mcp(cx);
+        }
+    }
+
+    fn set_mcp_enabled(&mut self, name: &str, enabled: bool, cx: &mut Context<Self>) {
+        self.mcp.status = Some(format!(
+            "{} {}…",
+            name,
+            if enabled { "enabling" } else { "disabling" }
+        ));
+        self.backend.send(Command::SetMcp {
+            name: name.to_string(),
+            enabled,
+        });
+        cx.notify();
+    }
+
+    fn test_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.mcp.testing = Some(name.to_string());
+        self.mcp.status = None;
+        self.backend.send(Command::TestMcp {
+            name: name.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn route_mcp_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.mcp.focus {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" | "enter" => self.mcp.focus = false,
+            "backspace" => {
+                self.mcp.query.pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.mcp.query.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn mcp_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = mcp::filtered(&self.mcp.rows, &self.mcp.query);
+        let shown = rows.len();
+        let focus = self.mcp.focus;
+        let enabled = mcp::enabled_count(&self.mcp.rows);
+        let total = self.mcp.rows.len();
+        let testing = self.mcp.testing.clone();
+
+        let mut list = div()
+            .id("mcp-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if !self.mcp.loaded {
+            list = list.child(self.note("Loading MCP servers…"));
+        } else if let Some(error) = self.mcp.error.as_deref() {
+            list = list.child(self.note(error));
+        } else if rows.is_empty() {
+            list = list.child(self.note("No MCP servers match this search."));
+        }
+        for server in rows {
+            let toggle_name = server.name.clone();
+            let test_name = server.name.clone();
+            let is_enabled = server.enabled;
+            let is_testing = testing.as_deref() == Some(server.name.as_str());
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("mcp-{}", server.name)))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG_ELEV))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .when(is_enabled, |this| {
+                                                        this.text_color(rgb(TEXT))
+                                                    })
+                                                    .when(!is_enabled, |this| {
+                                                        this.text_color(rgb(TEXT_MUTED))
+                                                    })
+                                                    .child(SharedString::from(server.name.clone())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(rgb(SURFACE))
+                                                    .text_xs()
+                                                    .text_color(rgb(TEXT_DIM))
+                                                    .child(SharedString::from(format!(
+                                                        "{} · {}",
+                                                        mcp::transport(server),
+                                                        mcp::source(server)
+                                                    ))),
+                                            )
+                                            .when_some(mcp::auth(server), |this, auth| {
+                                                this.child(
+                                                    div()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_full()
+                                                        .bg(rgb(SURFACE))
+                                                        .text_xs()
+                                                        .text_color(rgb(TEXT_DIM))
+                                                        .child(SharedString::from(format!(
+                                                            "auth: {auth}"
+                                                        ))),
+                                                )
+                                            }),
+                                    )
+                                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                        SharedString::from(crate::transcript::clip(
+                                            &mcp::endpoint(server),
+                                            120,
+                                        )),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "mcp-test-{}",
+                                                server.name
+                                            )))
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(SURFACE))
+                                            .text_xs()
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .cursor_pointer()
+                                            .hover(|this| {
+                                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.test_mcp(&test_name, cx)
+                                                },
+                                            ))
+                                            .child(if is_testing { "Testing…" } else { "Test" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "mcp-toggle-{}",
+                                                server.name
+                                            )))
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .cursor_pointer()
+                                            .when(is_enabled, |this| {
+                                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                            })
+                                            .when(!is_enabled, |this| {
+                                                this.bg(rgb(SURFACE)).text_color(rgb(TEXT_MUTED))
+                                            })
+                                            .hover(|this| {
+                                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.set_mcp_enabled(
+                                                        &toggle_name,
+                                                        !is_enabled,
+                                                        cx,
+                                                    )
+                                                },
+                                            ))
+                                            .child(if is_enabled { "On" } else { "Off" }),
+                                    ),
+                            ),
+                    )
+                    .when_some(mcp::plugin(server), |this, plugin| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_DIM))
+                                .child(SharedString::from(format!("plugin: {plugin}"))),
+                        )
+                    }),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .id("mcp-search")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(BG))
+                            .border_1()
+                            .when(focus, |this| this.border_color(rgb(ACCENT)))
+                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.mcp.focus = true;
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .when(self.mcp.query.is_empty(), |this| {
+                                this.child(
+                                    div().text_color(rgb(TEXT_DIM)).child("Search MCP servers"),
+                                )
+                            })
+                            .when(!self.mcp.query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(self.mcp.query.clone())),
+                                )
+                            }),
+                    ),
+            )
+            .when_some(self.mcp.status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_5()
+                        .py_2()
+                        .bg(rgb(ACCENT_SOFT))
+                        .text_xs()
+                        .text_color(rgb(ACCENT))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(list)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(format!("{enabled} of {total} enabled")))
+                    .child(SharedString::from(format!(
+                        "{shown} shown · toggles apply to new turns"
+                    ))),
+            )
+            .into_any_element()
     }
 
     fn open_skills(&mut self, cx: &mut Context<Self>) {
@@ -2264,6 +2605,7 @@ impl HermesApp {
             Section::Model => self.models_body(cx),
             Section::Assignments => self.assignments_body(cx),
             Section::Skills => self.skills_body(cx),
+            Section::Mcp => self.mcp_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -2316,6 +2658,7 @@ impl HermesApp {
                                     Section::Model => this.open_models(cx),
                                     Section::Assignments => this.load_assignments(cx),
                                     Section::Skills => this.open_skills(cx),
+                                    Section::Mcp => this.open_mcp(cx),
                                     Section::Vault => this.open_vault(cx),
                                 },
                             ))

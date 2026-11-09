@@ -707,6 +707,36 @@ impl RestClient {
         self.get("/api/model/options?explicit_only=1").await
     }
 
+    /// `PUT /api/mcp/servers/{name}/enabled`.
+    pub async fn set_mcp_enabled(&self, name: &str, enabled: bool) -> Result<Value, ApiError> {
+        let path = format!("/api/mcp/servers/{name}/enabled");
+        let response = self
+            .authed(reqwest::Method::PUT, &path)
+            .json(&serde_json::json!({ "enabled": enabled }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// `POST /api/mcp/servers/{name}/test` — asks the host to reach the server.
+    pub async fn test_mcp(&self, name: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/mcp/servers/{name}/test");
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
     /// `GET /api/skills` — every installed skill with its enabled state.
     pub async fn skills(&self) -> Result<Vec<Skill>, ApiError> {
         self.get("/api/skills").await
