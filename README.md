@@ -171,9 +171,7 @@ Rust is pinned by `rust-toolchain.toml`; rustup installs the toolchain and the
 required to build and run.
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+make check   # fmt + clippy + tests, exactly what CI runs
 ```
 
 CI runs the same three commands on every push and pull request. See

@@ -17,13 +17,13 @@ and Chromium are out of scope.
 ## Commands
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+make check          # fmt + clippy + tests, exactly what CI runs
 cargo run -p hermes-desktop
 ```
 
-All three checks run in CI and must pass. Add tests for new pure logic (mapping,
+The individual commands are `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace --all-targets`. All three run in CI and must pass. Add tests for new pure logic (mapping,
 filtering, formatting, token invariants); UI-only changes still need a manual
 run and a note in the pull request.
 
@@ -38,6 +38,14 @@ run and a note in the pull request.
   testing section and keep it out of automated tests.
 - By contributing you agree that your work is licensed under the repository's
   MIT license.
+
+## Releases
+
+1. Update `CHANGELOG.md` and move the entries out of `[Unreleased]`.
+2. Bump `version` in the root `Cargo.toml` and refresh `Cargo.lock`.
+3. Commit, then tag `vX.Y.Z` and push the tag.
+4. The `Release` workflow builds the Linux x86_64 tarball, writes
+   `SHA256SUMS`, and creates the GitHub release with generated notes.
 
 ## Security
 
