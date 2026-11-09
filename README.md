@@ -62,6 +62,16 @@ HERMES_TTS_URL=http://127.0.0.1:8004 cargo run -p hermes-desktop
 a TTS model or capture audio. Dictation stays with Superwhisper: `Alt+Space`
 records, and its fcitx5 text commit pastes into the focused composer.
 
+### Omarchy theme
+
+On Omarchy the palette comes from the active theme at
+`~/.local/state/omarchy/current/theme/colors.toml`. Background, foreground,
+accent, selection, muted and the named ANSI colours fill the semantic tokens;
+missing keys fall back to the bundled palette. The file is re-read at most every
+two seconds, so `omarchy theme set …` is reflected without restarting the app.
+Set `HERMES_OMARCHY_THEME` to a theme directory or a `colors.toml` path to test a
+specific palette.
+
 ### Authentication
 
 A gated dashboard (`auth_required: true`) does not accept basic auth on its
@@ -234,7 +244,8 @@ show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
 servers and toolsets) and host secrets, session history, installed-skills
 toggles, the host-level MCP view, a memory-provider page over `/api/memory`
 with ready-provider activation, a scan-gated skills-hub browser with confirmed
-installs, and TTS playback of the last reply through `voice-models`.
+installs, TTS playback of the last reply through `voice-models`, and an Omarchy
+theme that follows the live desktop palette.
 Dictation remains Superwhisper's job (`Alt+Space`), since the client does not
 capture audio itself.
 

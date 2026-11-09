@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format follows
   `PATCH /api/sessions/{id}`, with the list refreshed from the host.
 - Memory page: active provider, discovery status and built-in file sizes from
   `GET /api/memory`, plus activation for providers the host marks ready.
+- Omarchy theme sync: the runtime palette follows the active theme's
+  `colors.toml`, with derived surfaces, colour fallbacks, and a two-second
+  refresh so theme changes apply live.
 
 ## [0.1.0] - 2026-11-09
 

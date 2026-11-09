@@ -23,14 +23,24 @@ use gpui::Image;
 use hermes_api::{EnvEntry, ProfileDetail};
 use serde_json::{Value, json};
 
-use crate::theme::{ACCENT, BOT_ACCENT_CYAN, DANGER, REASONING, USER, WARN};
+use crate::theme::{accent, bot_accent_cyan, danger, reasoning, user, warn};
 
 /// Icon choices for a bot. Deliberately monochrome glyphs: they inherit the
 /// row's ink colour, so contrast is decided by the token layer, not the glyph.
 pub const GLYPHS: [&str; 12] = ["◆", "✦", "✧", "❖", "▲", "●", "■", "◈", "∞", "☉", "☾", "⚑"];
 
 /// Accent choices, all already contrast-checked against the window planes.
-pub const ACCENT_CHOICES: [u32; 6] = [ACCENT, USER, REASONING, WARN, DANGER, BOT_ACCENT_CYAN];
+/// The active Omarchy theme can change these at runtime.
+pub fn accent_choices() -> [u32; 6] {
+    [
+        accent(),
+        user(),
+        reasoning(),
+        warn(),
+        danger(),
+        bot_accent_cyan(),
+    ]
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -101,7 +111,7 @@ impl Default for Inspector {
             focus: None,
             status: None,
             glyph: GLYPHS[0].to_string(),
-            accent: ACCENT,
+            accent: accent(),
             avatar: None,
             avatar_for: None,
         }
@@ -162,7 +172,7 @@ pub fn look_for(name: &str, meta: Option<&Value>) -> (String, u32) {
         .and_then(|meta| meta.get("accent"))
         .and_then(Value::as_str)
         .and_then(parse_hex)
-        .unwrap_or(ACCENT_CHOICES[(hash as usize / 7) % ACCENT_CHOICES.len()]);
+        .unwrap_or(accent_choices()[(hash as usize / 7) % accent_choices().len()]);
     (glyph, accent)
 }
 
@@ -178,7 +188,7 @@ pub fn look_from_meta(meta: Option<&Value>) -> (String, u32) {
         .and_then(|meta| meta.get("accent"))
         .and_then(Value::as_str)
         .and_then(parse_hex)
-        .unwrap_or(ACCENT);
+        .unwrap_or_else(accent);
     (glyph, accent)
 }
 
@@ -272,10 +282,10 @@ mod tests {
     fn missing_or_malformed_meta_falls_back_to_tokens() {
         let (glyph, accent) = look_from_meta(None);
         assert_eq!(glyph, GLYPHS[0]);
-        assert_eq!(accent, ACCENT);
+        assert_eq!(accent, crate::theme::accent());
 
         let (_, accent) = look_from_meta(Some(&json!({ "accent": "not-a-colour" })));
-        assert_eq!(accent, ACCENT);
+        assert_eq!(accent, crate::theme::accent());
         assert_eq!(parse_hex("#abc"), None);
         assert_eq!(parse_hex("0x123456"), None);
         assert_eq!(parse_hex(" #7AA2F7 "), Some(0x7aa2f7));
@@ -283,9 +293,9 @@ mod tests {
 
     #[test]
     fn accent_choices_stay_in_the_token_set() {
-        for choice in ACCENT_CHOICES {
+        for choice in accent_choices() {
             assert!(
-                [ACCENT, USER, REASONING, WARN, DANGER, BOT_ACCENT_CYAN].contains(&choice),
+                accent_choices().contains(&choice),
                 "{choice:#08x} is not a theme token"
             );
         }

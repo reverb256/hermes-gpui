@@ -97,17 +97,21 @@ polling flow and a local callback surface.
 Inline images, audio and file previews in the transcript; a canvas/artifact
 pane; export and share links. This is Grok's biggest remaining visual gap.
 
-### 10. Omarchy integration — **Next**
+### 10. Omarchy integration — **Partly shipped**
 
-See the architecture note in the README: read the active theme's `colors.toml`,
-add `--toggle` IPC and a Hyprland keybind, then an optional Quickshell bar
-widget that summons the window. No QML rewrite.
+Shipped: the runtime palette reads the active Omarchy `colors.toml` (background,
+foreground, accent, selection, muted and ANSI colours), derives surfaces and
+semantic roles, and refreshes every two seconds so `omarchy theme set` applies
+live. A missing theme falls back to the bundled palette.
+
+Still needed: `--toggle` IPC and a Hyprland keybind, then an optional Quickshell
+bar widget that summons the window. No QML rewrite.
 
 ## Sequencing
 
 1. **M1 — history:** repair `state.db`, sessions list, resume, projects.
 2. **M2 — host surfaces:** toolsets, skills, memory (read list shipped; config next).
-3. **M3 — Omarchy:** theme sync, `--toggle`, optional bar widget.
+3. **M3 — Omarchy:** theme sync shipped; `--toggle` and optional bar widget next.
 4. **M4 — breadth:** MoA, voice, cron/Kanban, provider OAuth, artifacts.
 
 ## Constraints

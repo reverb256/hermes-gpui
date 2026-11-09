@@ -12,7 +12,7 @@
 
 use hermes_api::EnvEntry;
 
-use crate::inspector::ACCENT_CHOICES;
+use crate::inspector::accent_choices;
 
 /// Which vault text field has the keystrokes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -172,7 +172,8 @@ pub fn tint(key: &str) -> u32 {
     let hash = key.bytes().fold(0u32, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(u32::from(byte))
     });
-    ACCENT_CHOICES[(hash as usize) % ACCENT_CHOICES.len()]
+    let choices = accent_choices();
+    choices[(hash as usize) % choices.len()]
 }
 
 /// The server accepts names like `OPENAI_API_KEY`; refuse obvious typos before
@@ -263,7 +264,7 @@ mod tests {
         assert_eq!(monogram("TOKEN"), "T");
         assert_eq!(monogram("_"), "?");
         assert_eq!(tint("OPENAI_API_KEY"), tint("OPENAI_API_KEY"));
-        assert!(ACCENT_CHOICES.contains(&tint("ZAI_API_KEY")));
+        assert!(accent_choices().contains(&tint("ZAI_API_KEY")));
     }
 
     #[test]

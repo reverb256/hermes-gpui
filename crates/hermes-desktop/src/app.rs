@@ -169,6 +169,7 @@ impl HermesApp {
 
         app.pump(events, cx);
         app.pump_tray(cx);
+        app.pump_theme(cx);
         // QA hook: seed a short transcript so a screenshot can review the
         // bubble styles without driving the composer (Wayland has no text
         // injection here). Never used against a real turn.
@@ -236,6 +237,26 @@ impl HermesApp {
                 }
                 if this.update(cx, |app, cx| app.sync_tray(cx)).is_err() {
                     return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn pump_theme(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                if !crate::theme::refresh() {
+                    continue;
+                }
+                if this
+                    .update(cx, |_app, cx| {
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
                 }
             }
         })
@@ -1000,18 +1021,18 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG))
+                    .bg(rgb(bg()))
                     .border_1()
-                    .when(focused, |this| this.border_color(rgb(ACCENT)))
-                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .when(focused, |this| this.border_color(rgb(accent())))
+                    .when(!focused, |this| this.border_color(rgb(border())))
                     .text_xs()
                     .cursor_pointer()
                     .when(value.is_empty(), |this| {
-                        this.text_color(rgb(TEXT_DIM))
+                        this.text_color(rgb(text_dim()))
                             .child(SharedString::from(placeholder.to_string()))
                     })
                     .when(!value.is_empty(), |this| {
-                        this.text_color(rgb(TEXT))
+                        this.text_color(rgb(text()))
                             .child(SharedString::from(value.to_string()))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -1136,19 +1157,19 @@ impl HermesApp {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(BG_ELEV))
+                        .bg(rgb(bg_elev()))
                         .child(self.section_label("ACTIVE PROVIDER"))
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(text()))
                                 .child(SharedString::from(if self.memory.active.is_empty() {
                                     "builtin (none selected)".to_string()
                                 } else {
                                     self.memory.active.clone()
                                 })),
                         )
-                        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                        .child(div().text_xs().text_color(rgb(text_muted())).child(
                             SharedString::from(memory::files_summary(
                                 self.memory.memory_bytes,
                                 self.memory.user_bytes,
@@ -1169,7 +1190,7 @@ impl HermesApp {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(BG_ELEV))
+                        .bg(rgb(bg_elev()))
                         .child(
                             div()
                                 .flex()
@@ -1182,17 +1203,17 @@ impl HermesApp {
                                         .items_center()
                                         .gap_2()
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(provider.name.clone()))
                                         .child(
                                             div()
                                                 .px_1()
                                                 .rounded_sm()
-                                                .bg(rgb(SURFACE))
+                                                .bg(rgb(surface()))
                                                 .text_color(rgb(if is_active {
-                                                    ACCENT
+                                                    accent()
                                                 } else {
-                                                    TEXT_DIM
+                                                    text_dim()
                                                 }))
                                                 .child(SharedString::from(
                                                     memory::provider_status(provider),
@@ -1202,7 +1223,7 @@ impl HermesApp {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(TEXT_MUTED))
+                                        .text_color(rgb(text_muted()))
                                         .child(SharedString::from(provider.description.clone())),
                                 ),
                         )
@@ -1213,11 +1234,11 @@ impl HermesApp {
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(ACCENT_SOFT))
+                                    .bg(rgb(accent_soft()))
                                     .text_xs()
-                                    .text_color(rgb(ACCENT))
+                                    .text_color(rgb(accent()))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .hover(|this| this.bg(rgb(surface_hi())))
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         this.activate_memory_provider(&name, cx)
                                     }))
@@ -1243,9 +1264,9 @@ impl HermesApp {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(SURFACE_HI))
+                        .bg(rgb(surface_hi()))
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(SharedString::from(status)),
                 )
             })
@@ -1292,7 +1313,7 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .child(
                         div()
                             .flex()
@@ -1316,10 +1337,10 @@ impl HermesApp {
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .when(is_enabled, |this| {
-                                                        this.text_color(rgb(TEXT))
+                                                        this.text_color(rgb(text()))
                                                     })
                                                     .when(!is_enabled, |this| {
-                                                        this.text_color(rgb(TEXT_MUTED))
+                                                        this.text_color(rgb(text_muted()))
                                                     })
                                                     .child(SharedString::from(server.name.clone())),
                                             )
@@ -1328,9 +1349,9 @@ impl HermesApp {
                                                     .px_2()
                                                     .py_0p5()
                                                     .rounded_full()
-                                                    .bg(rgb(SURFACE))
+                                                    .bg(rgb(surface()))
                                                     .text_xs()
-                                                    .text_color(rgb(TEXT_DIM))
+                                                    .text_color(rgb(text_dim()))
                                                     .child(SharedString::from(format!(
                                                         "{} · {}",
                                                         mcp::transport(server),
@@ -1343,16 +1364,16 @@ impl HermesApp {
                                                         .px_2()
                                                         .py_0p5()
                                                         .rounded_full()
-                                                        .bg(rgb(SURFACE))
+                                                        .bg(rgb(surface()))
                                                         .text_xs()
-                                                        .text_color(rgb(TEXT_DIM))
+                                                        .text_color(rgb(text_dim()))
                                                         .child(SharedString::from(format!(
                                                             "auth: {auth}"
                                                         ))),
                                                 )
                                             }),
                                     )
-                                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                    .child(div().text_xs().text_color(rgb(text_dim())).child(
                                         SharedString::from(crate::transcript::clip(
                                             &mcp::endpoint(server),
                                             120,
@@ -1373,12 +1394,12 @@ impl HermesApp {
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(SURFACE))
+                                            .bg(rgb(surface()))
                                             .text_xs()
-                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_color(rgb(text_muted()))
                                             .cursor_pointer()
                                             .hover(|this| {
-                                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                                this.bg(rgb(surface_hi())).text_color(rgb(text()))
                                             })
                                             .on_click(cx.listener(
                                                 move |this, _event, _window, cx| {
@@ -1399,13 +1420,15 @@ impl HermesApp {
                                             .text_xs()
                                             .cursor_pointer()
                                             .when(is_enabled, |this| {
-                                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                                this.bg(rgb(accent_soft()))
+                                                    .text_color(rgb(accent()))
                                             })
                                             .when(!is_enabled, |this| {
-                                                this.bg(rgb(SURFACE)).text_color(rgb(TEXT_MUTED))
+                                                this.bg(rgb(surface()))
+                                                    .text_color(rgb(text_muted()))
                                             })
                                             .hover(|this| {
-                                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                                this.bg(rgb(surface_hi())).text_color(rgb(text()))
                                             })
                                             .on_click(cx.listener(
                                                 move |this, _event, _window, cx| {
@@ -1424,7 +1447,7 @@ impl HermesApp {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_DIM))
+                                .text_color(rgb(text_dim()))
                                 .child(SharedString::from(format!("plugin: {plugin}"))),
                         )
                     }),
@@ -1441,7 +1464,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .id("mcp-search")
@@ -1451,26 +1474,28 @@ impl HermesApp {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(BG))
+                            .bg(rgb(bg()))
                             .border_1()
-                            .when(focus, |this| this.border_color(rgb(ACCENT)))
-                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .when(focus, |this| this.border_color(rgb(accent())))
+                            .when(!focus, |this| this.border_color(rgb(border())))
                             .text_xs()
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.mcp.focus = true;
                                 cx.notify();
                             }))
-                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .child(div().text_color(rgb(text_dim())).child("⌕"))
                             .when(self.mcp.query.is_empty(), |this| {
                                 this.child(
-                                    div().text_color(rgb(TEXT_DIM)).child("Search MCP servers"),
+                                    div()
+                                        .text_color(rgb(text_dim()))
+                                        .child("Search MCP servers"),
                                 )
                             })
                             .when(!self.mcp.query.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(self.mcp.query.clone())),
                                 )
                             }),
@@ -1481,9 +1506,9 @@ impl HermesApp {
                     div()
                         .px_5()
                         .py_2()
-                        .bg(rgb(ACCENT_SOFT))
+                        .bg(rgb(accent_soft()))
                         .text_xs()
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(accent()))
                         .child(SharedString::from(status)),
                 )
             })
@@ -1496,9 +1521,9 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(format!("{enabled} of {total} enabled")))
                     .child(SharedString::from(format!(
                         "{shown} shown · toggles apply to new turns"
@@ -1617,7 +1642,7 @@ impl HermesApp {
             .px_5()
             .py_2()
             .border_b_1()
-            .border_color(rgb(BORDER));
+            .border_color(rgb(border()));
         for (label, tab) in [
             ("Installed", skills::Tab::Installed),
             ("Browse hub", skills::Tab::Hub),
@@ -1632,10 +1657,10 @@ impl HermesApp {
                     .text_xs()
                     .cursor_pointer()
                     .when(selected, |this| {
-                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                        this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                     })
-                    .when(!selected, |this| this.text_color(rgb(TEXT_MUTED)))
-                    .hover(|this| this.text_color(rgb(TEXT)))
+                    .when(!selected, |this| this.text_color(rgb(text_muted())))
+                    .hover(|this| this.text_color(rgb(text())))
                     .on_click(
                         cx.listener(move |this, _event, _window, cx| this.set_skills_tab(tab, cx)),
                     )
@@ -1682,7 +1707,7 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .child(
                         div()
                             .flex()
@@ -1700,9 +1725,9 @@ impl HermesApp {
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .when(is_enabled, |this| this.text_color(rgb(TEXT)))
+                                            .when(is_enabled, |this| this.text_color(rgb(text())))
                                             .when(!is_enabled, |this| {
-                                                this.text_color(rgb(TEXT_MUTED))
+                                                this.text_color(rgb(text_muted()))
                                             })
                                             .child(SharedString::from(name)),
                                     )
@@ -1712,9 +1737,9 @@ impl HermesApp {
                                                 .px_2()
                                                 .py_0p5()
                                                 .rounded_full()
-                                                .bg(rgb(SURFACE))
+                                                .bg(rgb(surface()))
                                                 .text_xs()
-                                                .text_color(rgb(TEXT_DIM))
+                                                .text_color(rgb(text_dim()))
                                                 .child(SharedString::from(category)),
                                         )
                                     }),
@@ -1728,12 +1753,14 @@ impl HermesApp {
                                     .text_xs()
                                     .cursor_pointer()
                                     .when(is_enabled, |this| {
-                                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                        this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                                     })
                                     .when(!is_enabled, |this| {
-                                        this.bg(rgb(SURFACE)).text_color(rgb(TEXT_MUTED))
+                                        this.bg(rgb(surface())).text_color(rgb(text_muted()))
                                     })
-                                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT)))
+                                    .hover(|this| {
+                                        this.bg(rgb(surface_hi())).text_color(rgb(text()))
+                                    })
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         this.toggle_skill(&toggle_name, !is_enabled, cx)
                                     }))
@@ -1743,7 +1770,7 @@ impl HermesApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(SharedString::from(crate::transcript::clip(
                                 &skill.description,
                                 180,
@@ -1752,7 +1779,7 @@ impl HermesApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child(SharedString::from(skills::meta(skill))),
                     ),
             );
@@ -1768,7 +1795,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .id("skills-search")
@@ -1778,24 +1805,24 @@ impl HermesApp {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(BG))
+                            .bg(rgb(bg()))
                             .border_1()
-                            .when(focus, |this| this.border_color(rgb(ACCENT)))
-                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .when(focus, |this| this.border_color(rgb(accent())))
+                            .when(!focus, |this| this.border_color(rgb(border())))
                             .text_xs()
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.skills.focus = true;
                                 cx.notify();
                             }))
-                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .child(div().text_color(rgb(text_dim())).child("⌕"))
                             .when(self.skills.query.is_empty(), |this| {
-                                this.child(div().text_color(rgb(TEXT_DIM)).child("Search skills"))
+                                this.child(div().text_color(rgb(text_dim())).child("Search skills"))
                             })
                             .when(!self.skills.query.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(self.skills.query.clone())),
                                 )
                             }),
@@ -1806,9 +1833,9 @@ impl HermesApp {
                     div()
                         .px_5()
                         .py_2()
-                        .bg(rgb(ACCENT_SOFT))
+                        .bg(rgb(accent_soft()))
                         .text_xs()
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(accent()))
                         .child(SharedString::from(status)),
                 )
             })
@@ -1821,9 +1848,9 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(format!("{enabled} of {total} enabled")))
                     .child(SharedString::from(format!(
                         "{shown} shown · changes apply to new turns"
@@ -1916,9 +1943,9 @@ impl HermesApp {
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(BG_ELEV))
+                        .bg(rgb(bg_elev()))
                         .cursor_pointer()
-                        .hover(|this| this.bg(rgb(SURFACE_HI)))
+                        .hover(|this| this.bg(rgb(surface_hi())))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.preview_skill_hub(&identifier, cx)
                         }))
@@ -1932,18 +1959,20 @@ impl HermesApp {
                                     div()
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(name)),
                                 )
-                                .child(div().text_xs().text_color(rgb(ACCENT)).child("Preview →")),
+                                .child(
+                                    div().text_xs().text_color(rgb(accent())).child("Preview →"),
+                                ),
                         )
-                        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                        .child(div().text_xs().text_color(rgb(text_muted())).child(
                             SharedString::from(crate::transcript::clip(&description, 180)),
                         ))
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_DIM))
+                                .text_color(rgb(text_dim()))
                                 .child(SharedString::from(meta)),
                         ),
                 );
@@ -1958,7 +1987,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .flex()
@@ -1974,26 +2003,26 @@ impl HermesApp {
                                     .px_3()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(rgb(BG))
+                                    .bg(rgb(bg()))
                                     .border_1()
-                                    .when(focus, |this| this.border_color(rgb(ACCENT)))
-                                    .when(!focus, |this| this.border_color(rgb(BORDER)))
+                                    .when(focus, |this| this.border_color(rgb(accent())))
+                                    .when(!focus, |this| this.border_color(rgb(border())))
                                     .text_xs()
                                     .cursor_pointer()
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.skills.hub_focus = true;
                                         cx.notify();
                                     }))
-                                    .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                                    .child(div().text_color(rgb(text_dim())).child("⌕"))
                                     .when(self.skills.hub_query.is_empty(), |this| {
                                         this.child(
                                             div()
-                                                .text_color(rgb(TEXT_DIM))
+                                                .text_color(rgb(text_dim()))
                                                 .child("Search the skills hub"),
                                         )
                                     })
                                     .when(!self.skills.hub_query.is_empty(), |this| {
-                                        this.child(div().text_color(rgb(TEXT)).child(
+                                        this.child(div().text_color(rgb(text())).child(
                                             SharedString::from(self.skills.hub_query.clone()),
                                         ))
                                     }),
@@ -2004,11 +2033,11 @@ impl HermesApp {
                                     .px_3()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(rgb(ACCENT_SOFT))
+                                    .bg(rgb(accent_soft()))
                                     .text_xs()
-                                    .text_color(rgb(ACCENT))
+                                    .text_color(rgb(accent()))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .hover(|this| this.bg(rgb(surface_hi())))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.search_skill_hub(cx)
                                     }))
@@ -2021,9 +2050,9 @@ impl HermesApp {
                     div()
                         .px_5()
                         .py_2()
-                        .bg(rgb(ACCENT_SOFT))
+                        .bg(rgb(accent_soft()))
                         .text_xs()
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(accent()))
                         .child(SharedString::from(status)),
                 )
             })
@@ -2036,9 +2065,9 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(format!(
                         "{} result(s)",
                         self.skills.hub_results.len()
@@ -2063,9 +2092,9 @@ impl HermesApp {
             .as_deref()
             .is_some_and(|active| active == identifier);
         let policy_color = match policy {
-            "allow" => USER,
-            "ask" => WARN,
-            _ => DANGER,
+            "allow" => user(),
+            "ask" => warn(),
+            _ => danger(),
         };
         let action = if installing {
             "Installing…"
@@ -2088,7 +2117,7 @@ impl HermesApp {
                 findings = findings.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(SharedString::from(skills::finding_line(finding))),
                 );
             }
@@ -2108,7 +2137,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .flex()
@@ -2122,9 +2151,9 @@ impl HermesApp {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .cursor_pointer()
-                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .hover(|this| this.text_color(rgb(text())))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.skills.preview = None;
                                         this.skills.scan = None;
@@ -2136,13 +2165,13 @@ impl HermesApp {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(preview.name.clone())),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(SharedString::from(meta)),
                             ),
                     )
@@ -2154,16 +2183,16 @@ impl HermesApp {
                             .rounded_md()
                             .text_xs()
                             .when(allowed && !installing, |this| {
-                                this.bg(rgb(ACCENT))
-                                    .text_color(rgb(BG))
+                                this.bg(rgb(accent()))
+                                    .text_color(rgb(bg()))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                    .hover(|this| this.bg(rgb(accent_hi())))
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
                                         this.install_skill_hub(&install_id, cx)
                                     }))
                             })
                             .when(!allowed || installing, |this| {
-                                this.bg(rgb(SURFACE)).text_color(rgb(TEXT_DIM))
+                                this.bg(rgb(surface())).text_color(rgb(text_dim()))
                             })
                             .child(action),
                     ),
@@ -2182,13 +2211,13 @@ impl HermesApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(SharedString::from(preview.description.clone())),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child(SharedString::from(format!(
                                 "{} · {} file(s) · {}",
                                 preview.identifier,
@@ -2202,7 +2231,7 @@ impl HermesApp {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(SURFACE))
+                                .bg(rgb(surface()))
                                 .text_xs()
                                 .text_color(rgb(policy_color))
                                 .child(SharedString::from(text)),
@@ -2213,14 +2242,14 @@ impl HermesApp {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .child(SharedString::from(reason)),
                         )
                     })
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(text()))
                             .child(SharedString::from(crate::transcript::clip(
                                 &preview.skill_md,
                                 12000,
@@ -2364,9 +2393,9 @@ impl HermesApp {
                         .px_2()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(BG_ELEV))
+                        .bg(rgb(bg_elev()))
                         .cursor_pointer()
-                        .hover(|this| this.bg(rgb(SURFACE_HI)))
+                        .hover(|this| this.bg(rgb(surface_hi())))
                         .on_click(
                             cx.listener(move |this, _event, _window, cx| this.assign_to(&key, cx)),
                         )
@@ -2378,17 +2407,17 @@ impl HermesApp {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(models::task_label(&task.task))),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(TEXT_DIM))
+                                        .text_color(rgb(text_dim()))
                                         .child(SharedString::from(models::aux_line(task))),
                                 ),
                         )
-                        .child(div().text_xs().text_color(rgb(ACCENT)).child("Change")),
+                        .child(div().text_xs().text_color(rgb(accent())).child("Change")),
                 );
             }
         }
@@ -2409,12 +2438,14 @@ impl HermesApp {
                         .px_3()
                         .py_1()
                         .rounded_md()
-                        .when(selected, |this| this.bg(rgb(ACCENT)).text_color(rgb(BG)))
+                        .when(selected, |this| {
+                            this.bg(rgb(accent())).text_color(rgb(bg()))
+                        })
                         .when(!selected, |this| {
-                            this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                            this.bg(rgb(surface_hi())).text_color(rgb(text()))
                         })
                         .cursor_pointer()
-                        .hover(|this| this.bg(rgb(BORDER_HI)))
+                        .hover(|this| this.bg(rgb(border_hi())))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.set_reasoning(&level, cx)
                         }))
@@ -2436,12 +2467,12 @@ impl HermesApp {
                     .px_5()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("AUXILIARY TASKS"),
                     )
                     .child(
@@ -2450,11 +2481,11 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(SURFACE_HI))
+                            .bg(rgb(surface_hi()))
                             .text_xs()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(text()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .hover(|this| this.bg(rgb(border_hi())))
                             .on_click(cx.listener(|this, _event, _window, cx| this.reset_aux(cx)))
                             .child("Reset all to main"),
                     ),
@@ -2468,17 +2499,17 @@ impl HermesApp {
                     .px_5()
                     .py_3()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("REASONING EFFORT"),
                     )
                     .child(chips)
                     .child(
-                        div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                        div().text_xs().text_color(rgb(text_muted())).child(
                             "Default inherits the server's level (medium). New sessions only.",
                         ),
                     ),
@@ -2488,11 +2519,11 @@ impl HermesApp {
                     .px_5()
                     .py_3()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(SharedString::from(
                                 self.models
                                     .status
@@ -2541,7 +2572,7 @@ impl HermesApp {
                         .pb_1()
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(TEXT_DIM))
+                        .text_color(rgb(text_dim()))
                         .child(SharedString::from(row.provider_name.clone())),
                 );
             }
@@ -2562,22 +2593,22 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE_HI)))
-                    .when(is_current, |this| this.bg(rgb(ACCENT_SOFT)))
+                    .hover(|this| this.bg(rgb(surface_hi())))
+                    .when(is_current, |this| this.bg(rgb(accent_soft())))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.select_model(&provider, &model, cx)
                     }))
                     .child(
                         div()
                             .text_xs()
-                            .when(is_current, |this| this.text_color(rgb(ACCENT)))
-                            .when(!is_current, |this| this.text_color(rgb(TEXT)))
+                            .when(is_current, |this| this.text_color(rgb(accent())))
+                            .when(!is_current, |this| this.text_color(rgb(text())))
                             .child(SharedString::from(label)),
                     )
                     .when(is_current, |this| {
-                        this.child(div().text_xs().text_color(rgb(ACCENT)).child("Current"))
+                        this.child(div().text_xs().text_color(rgb(accent())).child("Current"))
                     }),
             );
         }
@@ -2592,7 +2623,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .id("models-search")
@@ -2602,28 +2633,28 @@ impl HermesApp {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(BG))
+                            .bg(rgb(bg()))
                             .border_1()
-                            .when(focus, |this| this.border_color(rgb(ACCENT)))
-                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .when(focus, |this| this.border_color(rgb(accent())))
+                            .when(!focus, |this| this.border_color(rgb(border())))
                             .text_xs()
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.models.focus = true;
                                 cx.notify();
                             }))
-                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .child(div().text_color(rgb(text_dim())).child("⌕"))
                             .when(self.models.query.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_color(rgb(TEXT_DIM))
+                                        .text_color(rgb(text_dim()))
                                         .child("Search providers and models"),
                                 )
                             })
                             .when(!self.models.query.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(self.models.query.clone())),
                                 )
                             }),
@@ -2638,11 +2669,11 @@ impl HermesApp {
                         .gap_3()
                         .px_5()
                         .py_2()
-                        .bg(rgb(ACCENT_SOFT))
+                        .bg(rgb(accent_soft()))
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(ACCENT))
+                                .text_color(rgb(accent()))
                                 .child(SharedString::from(format!(
                                     "Assigning {} — pick a model",
                                     models::task_label(&task)
@@ -2654,9 +2685,9 @@ impl HermesApp {
                                 .px_2()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(SURFACE))
+                                .bg(rgb(surface()))
                                 .text_xs()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(text()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.models.aux_target = None;
@@ -2678,13 +2709,13 @@ impl HermesApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child(SharedString::from(format!("Current: {current}"))),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("New sessions only"),
                     ),
             )
@@ -2694,11 +2725,11 @@ impl HermesApp {
                     .px_5()
                     .py_3()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(SharedString::from(
                             self.models
                                 .status
@@ -2766,9 +2797,9 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                    .hover(|this| this.bg(rgb(surface_hi())))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.vault.start_adding(Some(&row_key));
                         cx.notify();
@@ -2787,7 +2818,7 @@ impl HermesApp {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(BG))
+                                    .text_color(rgb(bg()))
                                     .child(SharedString::from(monogram)),
                             ),
                     )
@@ -2801,13 +2832,13 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(name.clone())),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(SharedString::from(subtitle)),
                             ),
                     )
@@ -2815,7 +2846,7 @@ impl HermesApp {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .child(SharedString::from(redacted)),
                         )
                         .child(
@@ -2825,9 +2856,9 @@ impl HermesApp {
                                 .py_1()
                                 .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(DANGER))
+                                .text_color(rgb(danger()))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                .hover(|this| this.bg(rgb(danger_soft())))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.delete_vault_item(&delete_key, cx)
                                 }))
@@ -2835,7 +2866,7 @@ impl HermesApp {
                         )
                     })
                     .when(!is_set, |this| {
-                        this.child(div().text_xs().text_color(rgb(ACCENT)).child("Set"))
+                        this.child(div().text_xs().text_color(rgb(accent())).child("Set"))
                     }),
             );
         }
@@ -2853,7 +2884,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .children(tabs.into_iter().map(|tab| {
                         let selected = selected_tab == tab.category;
                         let category = tab.category.clone();
@@ -2865,11 +2896,11 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(selected, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!selected, |this| {
-                                this.text_color(rgb(TEXT_MUTED))
-                                    .hover(|this| this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT)))
+                                this.text_color(rgb(text_muted()))
+                                    .hover(|this| this.bg(rgb(bg_elev())).text_color(rgb(text())))
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.vault.tab = category.clone();
@@ -2883,7 +2914,7 @@ impl HermesApp {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .id("vault-search")
@@ -2893,13 +2924,13 @@ impl HermesApp {
                             .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(rgb(BG))
+                            .bg(rgb(bg()))
                             .border_1()
                             .when(focus == Some(vault::Field::Search), |this| {
-                                this.border_color(rgb(ACCENT))
+                                this.border_color(rgb(accent()))
                             })
                             .when(focus != Some(vault::Field::Search), |this| {
-                                this.border_color(rgb(BORDER))
+                                this.border_color(rgb(border()))
                             })
                             .text_xs()
                             .cursor_pointer()
@@ -2907,14 +2938,14 @@ impl HermesApp {
                                 this.vault.focus = Some(vault::Field::Search);
                                 cx.notify();
                             }))
-                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .child(div().text_color(rgb(text_dim())).child("⌕"))
                             .when(self.vault.query.is_empty(), |this| {
-                                this.child(div().text_color(rgb(TEXT_DIM)).child("Search vault"))
+                                this.child(div().text_color(rgb(text_dim())).child("Search vault"))
                             })
                             .when(!self.vault.query.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(text()))
                                         .child(SharedString::from(self.vault.query.clone())),
                                 )
                             }),
@@ -2930,7 +2961,7 @@ impl HermesApp {
                         .px_5()
                         .py_3()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(border()))
                         .child(self.vault_field(
                             "KEY",
                             &self.vault.key,
@@ -2960,9 +2991,9 @@ impl HermesApp {
                                         .py_1()
                                         .rounded_md()
                                         .text_xs()
-                                        .text_color(rgb(TEXT_MUTED))
+                                        .text_color(rgb(text_muted()))
                                         .cursor_pointer()
-                                        .hover(|this| this.bg(rgb(BG_ELEV)))
+                                        .hover(|this| this.bg(rgb(bg_elev())))
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.vault.cancel_adding();
                                             cx.notify();
@@ -2975,12 +3006,12 @@ impl HermesApp {
                                         .px_3()
                                         .py_1()
                                         .rounded_md()
-                                        .bg(rgb(ACCENT))
+                                        .bg(rgb(accent()))
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(BG))
+                                        .text_color(rgb(bg()))
                                         .cursor_pointer()
-                                        .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                        .hover(|this| this.bg(rgb(accent_hi())))
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.save_vault_item(cx)
                                         }))
@@ -2998,9 +3029,9 @@ impl HermesApp {
                     .px_5()
                     .py_3()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
-                        div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                        div().text_xs().text_color(rgb(text_dim())).child(
                             "Hermes can use these values, but this client never reveals them.",
                         ),
                     )
@@ -3008,7 +3039,7 @@ impl HermesApp {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .child(SharedString::from(status)),
                         )
                     }),
@@ -3025,13 +3056,13 @@ impl HermesApp {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(label.to_string())),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .child(SharedString::from(value)),
             )
     }
@@ -3043,18 +3074,18 @@ impl HermesApp {
             .gap_1()
             .p_3()
             .rounded_md()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .min_w(px(120.))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(label.to_string())),
             )
             .child(
                 div()
                     .text_lg()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .child(SharedString::from(value)),
             )
     }
@@ -3107,7 +3138,7 @@ impl HermesApp {
                 .gap_2()
                 .p_3()
                 .rounded_md()
-                .bg(rgb(BG_ELEV))
+                .bg(rgb(bg_elev()))
                 .child(self.usage_row("Plan", plan))
                 .child(self.usage_row("Provider", provider))
                 .child(self.usage_row("Model", model_name))
@@ -3116,7 +3147,7 @@ impl HermesApp {
                     this.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child(SharedString::from(format!("Billing is managed at {url}"))),
                     )
                 }),
@@ -3139,11 +3170,11 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(selected, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!selected, |this| {
-                                this.text_color(rgb(TEXT_MUTED))
-                                    .hover(|this| this.bg(rgb(BG_ELEV)))
+                                this.text_color(rgb(text_muted()))
+                                    .hover(|this| this.bg(rgb(bg_elev())))
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.load_usage(candidate, cx)
@@ -3161,24 +3192,24 @@ impl HermesApp {
                     .gap_1()
                     .p_3()
                     .rounded_md()
-                    .bg(rgb(WARN_SOFT))
+                    .bg(rgb(warn_soft()))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(WARN))
+                            .text_color(rgb(warn()))
                             .child("Usage history unavailable"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(SharedString::from(error.clone())),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("Repair the host's state.db, then reopen this page."),
                     ),
             );
@@ -3231,7 +3262,7 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .child(
                         div()
                             .flex()
@@ -3242,10 +3273,10 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(title)),
                             )
-                            .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                            .child(div().text_xs().text_color(rgb(text_dim())).child(
                                 SharedString::from(format!(
                                     "{} calls · {} sessions",
                                     model.api_calls, model.sessions
@@ -3257,7 +3288,7 @@ impl HermesApp {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                            .child(div().text_xs().text_color(rgb(text_muted())).child(
                                 SharedString::from(format!(
                                     "{} in · {} out",
                                     usage::tokens(Some(model.input_tokens)),
@@ -3267,7 +3298,7 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .child(SharedString::from(usage::money(model.estimated_cost))),
                             ),
                     ),
@@ -3277,7 +3308,7 @@ impl HermesApp {
         body.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_DIM))
+                .text_color(rgb(text_dim()))
                 .child("Costs are the host's estimates from recorded token usage."),
         )
         .into_any_element()
@@ -3300,9 +3331,9 @@ impl HermesApp {
             .h(px(SHEET_H))
             .flex()
             .rounded_xl()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .border_1()
-            .border_color(rgb(BORDER_HI))
+            .border_color(rgb(border_hi()))
             .overflow_hidden()
             .child(
                 div()
@@ -3312,9 +3343,9 @@ impl HermesApp {
                     .flex_col()
                     .gap_1()
                     .p_3()
-                    .bg(rgb(BG_ELEV))
+                    .bg(rgb(bg_elev()))
                     .border_r_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(self.section_label("SETTINGS"))
                     .children(Section::all().into_iter().map(|candidate| {
                         let selected = candidate == section;
@@ -3332,11 +3363,11 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(selected, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!selected, |this| {
-                                this.text_color(rgb(TEXT_MUTED))
-                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                                this.text_color(rgb(text_muted()))
+                                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                             })
                             .on_click(cx.listener(
                                 move |this, _event, _window, cx| match candidate {
@@ -3367,7 +3398,7 @@ impl HermesApp {
                             .h(px(HEADER_H))
                             .px_5()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(border()))
                             .child(
                                 div()
                                     .text_lg()
@@ -3386,12 +3417,12 @@ impl HermesApp {
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_md()
-                                                .bg(rgb(ACCENT))
+                                                .bg(rgb(accent()))
                                                 .text_xs()
                                                 .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(BG))
+                                                .text_color(rgb(bg()))
                                                 .cursor_pointer()
-                                                .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                                .hover(|this| this.bg(rgb(accent_hi())))
                                                 .on_click(cx.listener(
                                                     |this, _event, _window, cx| {
                                                         this.vault.start_adding(None);
@@ -3408,10 +3439,10 @@ impl HermesApp {
                                             .py_1()
                                             .rounded_md()
                                             .text_sm()
-                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_color(rgb(text_muted()))
                                             .cursor_pointer()
                                             .hover(|this| {
-                                                this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT))
+                                                this.bg(rgb(bg_elev())).text_color(rgb(text()))
                                             })
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 this.close_settings(cx)
@@ -3431,7 +3462,7 @@ impl HermesApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(SCRIM))
+            .bg(rgba(scrim()))
             .child(self.settings_sheet(cx))
             .into_any_element()
     }
@@ -3705,9 +3736,9 @@ impl HermesApp {
     /// on the right. It sits below the pane row so every pane ends on one line.
     fn status_bar(&self) -> impl IntoElement {
         let (label, color) = match self.connection {
-            ConnectionState::Open => ("Gateway ready", USER),
-            ConnectionState::Connecting => ("Connecting…", WARN),
-            ConnectionState::Closed => ("Gateway offline", DANGER),
+            ConnectionState::Open => ("Gateway ready", user()),
+            ConnectionState::Connecting => ("Connecting…", warn()),
+            ConnectionState::Closed => ("Gateway offline", danger()),
         };
         let model = self
             .usage
@@ -3733,11 +3764,11 @@ impl HermesApp {
             .h(px(STATUS_H))
             .flex_shrink_0()
             .px_4()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .text_xs()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(text_muted()))
             .child(
                 div()
                     .flex()
@@ -3758,9 +3789,9 @@ impl HermesApp {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (label, color) = match self.connection {
-            ConnectionState::Open => ("connected", USER),
-            ConnectionState::Connecting => ("connecting", WARN),
-            ConnectionState::Closed => ("offline", DANGER),
+            ConnectionState::Open => ("connected", user()),
+            ConnectionState::Connecting => ("connecting", warn()),
+            ConnectionState::Closed => ("offline", danger()),
         };
         let model = self
             .current_profile()
@@ -3773,27 +3804,27 @@ impl HermesApp {
             .gap_3()
             .h(px(HEADER_H))
             .px_4()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_sm().text_color(rgb(ACCENT)).child("◆"))
+                    .child(div().text_sm().text_color(rgb(accent())).child("◆"))
                     .child(
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(text()))
                             .child("Hermes"),
                     ),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(self.host.base_url.clone())),
             )
             .child(
@@ -3805,12 +3836,12 @@ impl HermesApp {
                     .px_2()
                     .py_1()
                     .rounded_full()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                    .hover(|this| this.bg(rgb(surface_hi())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.refresh(cx)))
                     .child(div().text_xs().text_color(rgb(color)).child("●"))
-                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(label)),
+                    .child(div().text_xs().text_color(rgb(text_muted())).child(label)),
             )
             .when(!model.is_empty(), |this| {
                 this.child(
@@ -3818,9 +3849,9 @@ impl HermesApp {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(SURFACE))
+                        .bg(rgb(surface()))
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(SharedString::from(model)),
                 )
             })
@@ -3833,9 +3864,9 @@ impl HermesApp {
                         .px_2()
                         .py_1()
                         .rounded_full()
-                        .bg(rgb(ACCENT_SOFT))
-                        .child(div().text_xs().text_color(rgb(ACCENT)).child("◐"))
-                        .child(div().text_xs().text_color(rgb(ACCENT)).child("working")),
+                        .bg(rgb(accent_soft()))
+                        .child(div().text_xs().text_color(rgb(accent())).child("◐"))
+                        .child(div().text_xs().text_color(rgb(accent())).child("working")),
                 )
             })
             .when(!self.cards.is_empty(), |this| {
@@ -3844,9 +3875,9 @@ impl HermesApp {
                         .px_2()
                         .py_1()
                         .rounded_full()
-                        .bg(rgb(WARN_SOFT))
+                        .bg(rgb(warn_soft()))
                         .text_xs()
-                        .text_color(rgb(WARN))
+                        .text_color(rgb(warn()))
                         .child(format!("{} awaiting you", self.cards.len())),
                 )
             })
@@ -3856,9 +3887,9 @@ impl HermesApp {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(SURFACE))
+                        .bg(rgb(surface()))
                         .text_xs()
-                        .text_color(rgb(TEXT_DIM))
+                        .text_color(rgb(text_dim()))
                         .child(SharedString::from(crate::transcript::clip(&status, 56))),
                 )
             })
@@ -3872,11 +3903,11 @@ impl HermesApp {
                     .text_xs()
                     .cursor_pointer()
                     .when(self.inspector.open, |this| {
-                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                        this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                     })
                     .when(!self.inspector.open, |this| {
-                        this.text_color(rgb(TEXT_MUTED))
-                            .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                        this.text_color(rgb(text_muted()))
+                            .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                     })
                     .on_click(cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)))
                     .child("⚙ Bot"),
@@ -3888,9 +3919,9 @@ impl HermesApp {
                     .py_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.pick_attachment(cx)))
                     .child("＋ Attach"),
             )
@@ -3901,9 +3932,9 @@ impl HermesApp {
                     .py_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.speak_last(cx)))
                     .child("▷ Speak"),
             )
@@ -3914,9 +3945,9 @@ impl HermesApp {
                     .py_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.dispatch(Action::OpenPalette, cx)
                     }))
@@ -3928,11 +3959,11 @@ impl HermesApp {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.toggle_sessions(cx)))
                     .child("Sessions"),
             )
@@ -3942,11 +3973,11 @@ impl HermesApp {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(SURFACE_HI))
+                    .bg(rgb(surface_hi()))
                     .text_xs()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(BORDER_HI)))
+                    .hover(|this| this.bg(rgb(border_hi())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.new_chat(cx)))
                     .child("New chat"),
             )
@@ -4072,7 +4103,7 @@ impl HermesApp {
                     .px_1()
                     .py_1()
                     .rounded_md()
-                    .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
+                    .when(active, |this| this.bg(rgb(accent_soft())))
                     .child(
                         div()
                             .id(SharedString::from(format!("session-{}", row.id)))
@@ -4085,21 +4116,21 @@ impl HermesApp {
                             .py_1()
                             .rounded_md()
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .hover(|this| this.bg(rgb(surface_hi())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.open_session(&open_id, cx)
                             }))
                             .child(
                                 div()
                                     .text_xs()
-                                    .when(active, |this| this.text_color(rgb(ACCENT)))
-                                    .when(!active, |this| this.text_color(rgb(TEXT)))
+                                    .when(active, |this| this.text_color(rgb(accent())))
+                                    .when(!active, |this| this.text_color(rgb(text())))
                                     .child(SharedString::from(sessions::title(&row))),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .child(SharedString::from(sessions::meta(&row, now))),
                             ),
                     )
@@ -4110,9 +4141,9 @@ impl HermesApp {
                             .py_1()
                             .rounded_md()
                             .text_xs()
-                            .text_color(rgb(if pinned { ACCENT } else { TEXT_MUTED }))
+                            .text_color(rgb(if pinned { accent() } else { text_muted() }))
                             .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(TEXT)))
+                            .hover(|this| this.text_color(rgb(text())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.pin_session(&pin_id, !pinned, cx)
                             }))
@@ -4125,9 +4156,9 @@ impl HermesApp {
                             .py_1()
                             .rounded_md()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(TEXT)))
+                            .hover(|this| this.text_color(rgb(text())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.archive_session(&archive_id, cx)
                             }))
@@ -4140,9 +4171,9 @@ impl HermesApp {
                             .py_1()
                             .rounded_md()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(DANGER)))
+                            .hover(|this| this.text_color(rgb(danger())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.delete_session(&delete_id, cx)
                             }))
@@ -4157,9 +4188,9 @@ impl HermesApp {
             .w(px(RAIL_W))
             .flex_shrink_0()
             .h_full()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .flex()
@@ -4173,7 +4204,7 @@ impl HermesApp {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("SESSIONS"),
                     )
                     .child(
@@ -4188,9 +4219,9 @@ impl HermesApp {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .cursor_pointer()
-                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .hover(|this| this.text_color(rgb(text())))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.refresh_sessions(cx)
                                     }))
@@ -4203,9 +4234,9 @@ impl HermesApp {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .cursor_pointer()
-                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .hover(|this| this.text_color(rgb(text())))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.sessions.open = false;
                                         this.sessions.focus = false;
@@ -4225,24 +4256,24 @@ impl HermesApp {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(BG))
+                        .bg(rgb(bg()))
                         .border_1()
-                        .when(focus, |this| this.border_color(rgb(ACCENT)))
-                        .when(!focus, |this| this.border_color(rgb(BORDER)))
+                        .when(focus, |this| this.border_color(rgb(accent())))
+                        .when(!focus, |this| this.border_color(rgb(border())))
                         .text_xs()
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.sessions.focus = true;
                             cx.notify();
                         }))
-                        .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                        .child(div().text_color(rgb(text_dim())).child("⌕"))
                         .when(self.sessions.query.is_empty(), |this| {
-                            this.child(div().text_color(rgb(TEXT_DIM)).child("Search sessions"))
+                            this.child(div().text_color(rgb(text_dim())).child("Search sessions"))
                         })
                         .when(!self.sessions.query.is_empty(), |this| {
                             this.child(
                                 div()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(self.sessions.query.clone())),
                             )
                         }),
@@ -4254,9 +4285,9 @@ impl HermesApp {
                     .px_4()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(SharedString::from(format!(
                         "{} of {} sessions",
                         self.sessions.rows.len(),
@@ -4285,9 +4316,9 @@ impl HermesApp {
             .w(px(RAIL_W))
             .flex_shrink_0()
             .h_full()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .flex()
@@ -4301,7 +4332,7 @@ impl HermesApp {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("BOTS"),
                     )
                     .child(
@@ -4318,9 +4349,9 @@ impl HermesApp {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(rgb(SURFACE))
+                                    .bg(rgb(surface()))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .hover(|this| this.bg(rgb(surface_hi())))
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.rail_search = !this.rail_search;
                                         if !this.rail_search {
@@ -4328,12 +4359,14 @@ impl HermesApp {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("⌕")),
+                                    .child(
+                                        div().text_xs().text_color(rgb(text_muted())).child("⌕"),
+                                    ),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(format!("{}", visible.len())),
                             ),
                     ),
@@ -4346,15 +4379,15 @@ impl HermesApp {
                         .px_3()
                         .py_2()
                         .rounded_full()
-                        .bg(rgb(SURFACE))
+                        .bg(rgb(surface()))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(border()))
                         .text_xs()
                         .when(self.rail_filter.is_empty(), |this| {
-                            this.text_color(rgb(TEXT_DIM)).child("Search bots…")
+                            this.text_color(rgb(text_dim())).child("Search bots…")
                         })
                         .when(!self.rail_filter.is_empty(), |this| {
-                            this.text_color(rgb(TEXT))
+                            this.text_color(rgb(text()))
                                 .child(SharedString::from(self.rail_filter.clone()))
                         }),
                 )
@@ -4386,8 +4419,8 @@ impl HermesApp {
                             .py_2()
                             .rounded_md()
                             .cursor_pointer()
-                            .when(selected, |this| this.bg(rgb(SURFACE)))
-                            .when(!selected, |this| this.hover(|this| this.bg(rgb(SURFACE))))
+                            .when(selected, |this| this.bg(rgb(surface())))
+                            .when(!selected, |this| this.hover(|this| this.bg(rgb(surface()))))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.select_profile(name.clone(), cx);
                             }))
@@ -4406,7 +4439,7 @@ impl HermesApp {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(rgb(ACCENT_SOFT))
+                                    .bg(rgb(accent_soft()))
                                     .border_1()
                                     .border_color(rgb(accent))
                                     .child(
@@ -4435,10 +4468,10 @@ impl HermesApp {
                                                     .min_w_0()
                                                     .text_sm()
                                                     .when(selected, |this| {
-                                                        this.text_color(rgb(ACCENT))
+                                                        this.text_color(rgb(crate::theme::accent()))
                                                     })
                                                     .when(!selected, |this| {
-                                                        this.text_color(rgb(TEXT))
+                                                        this.text_color(rgb(text()))
                                                     })
                                                     .child(SharedString::from(
                                                         profile.label().to_string(),
@@ -4449,10 +4482,10 @@ impl HermesApp {
                                         div()
                                             .text_xs()
                                             .when(has_history, |this| {
-                                                this.text_color(rgb(TEXT_MUTED))
+                                                this.text_color(rgb(text_muted()))
                                             })
                                             .when(!has_history, |this| {
-                                                this.text_color(rgb(TEXT_DIM))
+                                                this.text_color(rgb(text_dim()))
                                             })
                                             .child(SharedString::from(preview)),
                                     ),
@@ -4463,12 +4496,12 @@ impl HermesApp {
                 this.child(
                     div()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(border()))
                         .mt_2()
                         .px_4()
                         .pt_2()
                         .text_xs()
-                        .text_color(rgb(TEXT_DIM))
+                        .text_color(rgb(text_dim()))
                         .child(SharedString::from(self.attachments.join(" · "))),
                 )
             })
@@ -4480,9 +4513,9 @@ impl HermesApp {
                         .px_2()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(DANGER_SOFT))
+                        .bg(rgb(danger_soft()))
                         .text_xs()
-                        .text_color(rgb(DANGER))
+                        .text_color(rgb(danger()))
                         .child(SharedString::from(error.clone())),
                 )
             })
@@ -4496,7 +4529,7 @@ impl HermesApp {
                     .mb_2()
                     .pt_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .flex()
@@ -4513,8 +4546,10 @@ impl HermesApp {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(rgb(SURFACE_HI))
-                                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("◍")),
+                                    .bg(rgb(surface_hi()))
+                                    .child(
+                                        div().text_xs().text_color(rgb(text_muted())).child("◍"),
+                                    ),
                             )
                             .child(
                                 div()
@@ -4522,9 +4557,9 @@ impl HermesApp {
                                     .flex_col()
                                     .gap_1()
                                     .min_w_0()
-                                    .child(div().text_xs().text_color(rgb(TEXT)).child("You"))
+                                    .child(div().text_xs().text_color(rgb(text())).child("You"))
                                     .child(
-                                        div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                        div().text_xs().text_color(rgb(text_dim())).child(
                                             SharedString::from(clip(&self.host.base_url, 24)),
                                         ),
                                     ),
@@ -4540,13 +4575,13 @@ impl HermesApp {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(surface()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .hover(|this| this.bg(rgb(surface_hi())))
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)),
                             )
-                            .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("⊞")),
+                            .child(div().text_xs().text_color(rgb(text_muted())).child("⊞")),
                     ),
             )
     }
@@ -4576,8 +4611,8 @@ impl HermesApp {
                             .items_center()
                             .justify_center()
                             .rounded_xl()
-                            .bg(rgb(ACCENT_SOFT))
-                            .child(div().text_lg().text_color(rgb(ACCENT)).child("◆")),
+                            .bg(rgb(accent_soft()))
+                            .child(div().text_lg().text_color(rgb(accent())).child("◆")),
                     )
                     .child(
                         div()
@@ -4589,10 +4624,10 @@ impl HermesApp {
                                 div()
                                     .text_xl()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child("What should we get done?"),
                             )
-                            .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child(
+                            .child(div().text_sm().text_color(rgb(text_muted())).child(
                                 SharedString::from(format!("Talking to {}", self.profile_name())),
                             )),
                     )
@@ -4609,20 +4644,22 @@ impl HermesApp {
                                 .py_2()
                                 .rounded_lg()
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .bg(rgb(SURFACE))
+                                .border_color(rgb(border()))
+                                .bg(rgb(surface()))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(SURFACE_HI)).border_color(rgb(BORDER_HI)))
+                                .hover(|this| {
+                                    this.bg(rgb(surface_hi())).border_color(rgb(border_hi()))
+                                })
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.use_suggestion(&text.clone(), cx)
                                 }))
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(crate::theme::text()))
                                         .child(SharedString::from(*suggestion)),
                                 )
-                                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("↵"))
+                                .child(div().text_xs().text_color(rgb(text_dim())).child("↵"))
                         }),
                     ))
                     .child(
@@ -4631,7 +4668,7 @@ impl HermesApp {
                             .items_center()
                             .gap_2()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("Enter to send")
                             .child("·")
                             .child("Shift+Enter newline")
@@ -4664,7 +4701,7 @@ impl HermesApp {
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
-            .bg(rgb(BG))
+            .bg(rgb(bg()))
             .child(
                 div()
                     .flex()
@@ -4707,9 +4744,9 @@ impl HermesApp {
                         .px_4()
                         .py_3()
                         .rounded_xl()
-                        .bg(rgb(USER))
+                        .bg(rgb(user()))
                         .text_sm()
-                        .text_color(rgb(BG))
+                        .text_color(rgb(bg()))
                         .child(SharedString::from(text)),
                 )
                 .into_any_element(),
@@ -4727,7 +4764,7 @@ impl HermesApp {
                     body = body.child(
                         div()
                             .text_sm()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(crate::theme::text()))
                             .child(SharedString::from(part.to_string())),
                     );
                 }
@@ -4749,18 +4786,18 @@ impl HermesApp {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_full()
-                                    .bg(rgb(ACCENT_SOFT))
+                                    .bg(rgb(accent_soft()))
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(ACCENT))
+                                            .text_color(rgb(accent()))
                                             .child(SharedString::from(bot_glyph)),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .child(SharedString::from(format!("Messaged {bot_name}"))),
                             ),
                     )
@@ -4773,7 +4810,7 @@ impl HermesApp {
                             .px_4()
                             .py_3()
                             .rounded_xl()
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(surface()))
                             .child(body),
                     )
                     .into_any_element()
@@ -4787,21 +4824,21 @@ impl HermesApp {
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(REASONING))
+                        .text_color(rgb(reasoning()))
                         .child("THINKING"),
                 )
                 .child(
                     div()
                         .pl_3()
                         .border_l_2()
-                        .border_color(rgb(REASONING_SOFT))
+                        .border_color(rgb(reasoning_soft()))
                         .flex()
                         .flex_col()
                         .gap_1()
                         .children(text.split('\n').map(|part| {
                             div()
                                 .text_xs()
-                                .text_color(rgb(REASONING))
+                                .text_color(rgb(reasoning()))
                                 .child(SharedString::from(part.to_string()))
                         })),
                 )
@@ -4811,13 +4848,13 @@ impl HermesApp {
                 .items_start()
                 .gap_2()
                 .w_full()
-                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("·"))
+                .child(div().text_xs().text_color(rgb(text_dim())).child("·"))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .text_xs()
-                        .text_color(rgb(TEXT_DIM))
+                        .text_color(rgb(text_dim()))
                         .child(SharedString::from(text)),
                 )
                 .into_any_element(),
@@ -4869,9 +4906,9 @@ impl HermesApp {
             .gap_3()
             .p_4()
             .rounded_xl()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .flex()
@@ -4883,16 +4920,16 @@ impl HermesApp {
                             .px_2()
                             .py_1()
                             .rounded_full()
-                            .bg(rgb(WARN_SOFT))
+                            .bg(rgb(warn_soft()))
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(WARN))
+                            .text_color(rgb(warn()))
                             .child("APPROVAL"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child(if allow_permanent {
                                 "can be remembered"
                             } else {
@@ -4905,16 +4942,16 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG))
+                    .bg(rgb(bg()))
                     .text_sm()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .child(SharedString::from(body)),
             )
             .when_some(detail, |this, detail| {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(SharedString::from(detail)),
                 )
             })
@@ -4929,12 +4966,12 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(ACCENT))
+                            .bg(rgb(accent()))
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(BG))
+                            .text_color(rgb(bg()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(ACCENT_HI)))
+                            .hover(|this| this.bg(rgb(accent_hi())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.approve(&id_once, ApprovalChoice::Once, cx)
                             }))
@@ -4948,11 +4985,11 @@ impl HermesApp {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(SURFACE_HI))
+                                .bg(rgb(surface_hi()))
                                 .text_xs()
-                                .text_color(rgb(USER))
+                                .text_color(rgb(user()))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(BORDER_HI)))
+                                .hover(|this| this.bg(rgb(border_hi())))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.approve(&id_always, ApprovalChoice::Always, cx)
                                 }))
@@ -4965,11 +5002,11 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(SURFACE_HI))
+                            .bg(rgb(surface_hi()))
                             .text_xs()
-                            .text_color(rgb(DANGER))
+                            .text_color(rgb(danger()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                            .hover(|this| this.bg(rgb(danger_soft())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.approve(&id_deny, ApprovalChoice::Deny, cx)
                             }))
@@ -4979,7 +5016,7 @@ impl HermesApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("Esc to dismiss"),
                     ),
             )
@@ -5006,11 +5043,11 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(BG))
+                    .bg(rgb(bg()))
                     .text_xs()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(ACCENT)))
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(accent())))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.answer(&card_id, answer.clone(), cx)
                     }))
@@ -5025,24 +5062,24 @@ impl HermesApp {
             .gap_3()
             .p_4()
             .rounded_xl()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .px_2()
                     .py_1()
                     .rounded_full()
-                    .bg(rgb(ACCENT_SOFT))
+                    .bg(rgb(accent_soft()))
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(ACCENT))
+                    .text_color(rgb(accent()))
                     .child("QUESTION"),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(text()))
                     .child(SharedString::from(request.question.clone())),
             )
             .child(choices)
@@ -5060,12 +5097,12 @@ impl HermesApp {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(ACCENT))
+                                .bg(rgb(accent()))
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(BG))
+                                .text_color(rgb(bg()))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                .hover(|this| this.bg(rgb(accent_hi())))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.answer(&card_id, answer.clone(), cx)
                                 }))
@@ -5078,11 +5115,11 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(SURFACE_HI))
+                            .bg(rgb(surface_hi()))
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(BORDER_HI)).text_color(rgb(TEXT)))
+                            .hover(|this| this.bg(rgb(border_hi())).text_color(rgb(text())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.dismiss_card(&id_skip, cx)
                             }))
@@ -5093,7 +5130,7 @@ impl HermesApp {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_DIM))
+                                .text_color(rgb(text_dim()))
                                 .child("Type an answer, then Enter"),
                         )
                     }),
@@ -5113,9 +5150,9 @@ impl HermesApp {
             .mx_auto()
             .mb_2()
             .rounded_xl()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .border_1()
-            .border_color(rgb(BORDER_HI))
+            .border_color(rgb(border_hi()))
             .overflow_hidden()
             .child(
                 div()
@@ -5125,18 +5162,18 @@ impl HermesApp {
                     .px_3()
                     .py_3()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_sm().text_color(rgb(ACCENT)).child("›"))
+                    .border_color(rgb(border()))
+                    .child(div().text_sm().text_color(rgb(accent())).child("›"))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .text_sm()
                             .when(self.palette.query.is_empty(), |this| {
-                                this.text_color(rgb(TEXT_DIM))
+                                this.text_color(rgb(text_dim()))
                             })
                             .when(!self.palette.query.is_empty(), |this| {
-                                this.text_color(rgb(TEXT))
+                                this.text_color(rgb(text()))
                             })
                             .child(SharedString::from(if self.palette.query.is_empty() {
                                 "Type a command…".to_string()
@@ -5144,7 +5181,7 @@ impl HermesApp {
                                 self.palette.query.clone()
                             })),
                     )
-                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("esc")),
+                    .child(div().text_xs().text_color(rgb(text_dim())).child("esc")),
             )
             .child(
                 div()
@@ -5166,9 +5203,9 @@ impl HermesApp {
                             .py_2()
                             .rounded_md()
                             .cursor_pointer()
-                            .when(index == selected, |this| this.bg(rgb(ACCENT_SOFT)))
+                            .when(index == selected, |this| this.bg(rgb(accent_soft())))
                             .when(index != selected, |this| {
-                                this.hover(|this| this.bg(rgb(SURFACE_HI)))
+                                this.hover(|this| this.bg(rgb(surface_hi())))
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.palette.index = index;
@@ -5179,14 +5216,14 @@ impl HermesApp {
                                     .flex_1()
                                     .min_w_0()
                                     .text_sm()
-                                    .when(index == selected, |this| this.text_color(rgb(ACCENT)))
-                                    .when(index != selected, |this| this.text_color(rgb(TEXT)))
+                                    .when(index == selected, |this| this.text_color(rgb(accent())))
+                                    .when(index != selected, |this| this.text_color(rgb(text())))
                                     .child(SharedString::from(item.label)),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(SharedString::from(item.hint)),
                             )
                     })),
@@ -5205,9 +5242,9 @@ impl HermesApp {
             .mx_auto()
             .mb_2()
             .rounded_xl()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .border_1()
-            .border_color(rgb(BORDER_HI))
+            .border_color(rgb(border_hi()))
             .overflow_hidden()
             .child(
                 div()
@@ -5218,17 +5255,17 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(REASONING))
+                            .text_color(rgb(reasoning()))
                             .child(SharedString::from(format!("@{}", self.mention.query))),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("↑↓ · Enter"),
                     ),
             )
@@ -5250,11 +5287,11 @@ impl HermesApp {
                             .text_sm()
                             .cursor_pointer()
                             .when(index == selected, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(index != selected, |this| {
-                                this.text_color(rgb(TEXT))
-                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                this.text_color(rgb(text()))
+                                    .hover(|this| this.bg(rgb(surface_hi())))
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.mention.index = index;
@@ -5269,7 +5306,7 @@ impl HermesApp {
         div()
             .text_xs()
             .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(TEXT_DIM))
+            .text_color(rgb(text_dim()))
             .child(SharedString::from(text.to_string()))
     }
 
@@ -5278,9 +5315,9 @@ impl HermesApp {
             .px_3()
             .py_2()
             .rounded_md()
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .text_xs()
-            .text_color(rgb(TEXT_DIM))
+            .text_color(rgb(text_dim()))
             .child(SharedString::from(text.to_string()))
     }
 
@@ -5293,13 +5330,13 @@ impl HermesApp {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(label.to_string())),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(SharedString::from(value)),
             )
     }
@@ -5318,9 +5355,9 @@ impl HermesApp {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG_ELEV))
+            .bg(rgb(bg_elev()))
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .child(
                 div()
                     .flex()
@@ -5329,12 +5366,12 @@ impl HermesApp {
                     .h(px(HEADER_H))
                     .px_4()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(TEXT_DIM))
+                            .text_color(rgb(text_dim()))
                             .child("BOT INSPECTOR"),
                     )
                     .child(
@@ -5344,9 +5381,9 @@ impl HermesApp {
                             .py_1()
                             .rounded_md()
                             .text_sm()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                            .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)),
                             )
@@ -5361,7 +5398,7 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .children(Tab::all().into_iter().map(|candidate| {
                         let selected = candidate == tab;
                         div()
@@ -5375,11 +5412,11 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(selected, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!selected, |this| {
-                                this.text_color(rgb(TEXT_MUTED))
-                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                                this.text_color(rgb(text_muted()))
+                                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.inspector.tab = candidate;
@@ -5393,9 +5430,9 @@ impl HermesApp {
                     div()
                         .px_4()
                         .py_2()
-                        .bg(rgb(SURFACE))
+                        .bg(rgb(surface()))
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(SharedString::from(status)),
                 )
             })
@@ -5431,7 +5468,7 @@ impl HermesApp {
             .flex_shrink_0()
             .rounded_xl()
             .overflow_hidden()
-            .bg(rgb(SURFACE_HI))
+            .bg(rgb(surface_hi()))
             .border_1()
             .border_color(rgb(accent));
         if let Some(image) = avatar {
@@ -5461,7 +5498,7 @@ impl HermesApp {
                             div()
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(text()))
                                 .child(SharedString::from(profile.clone())),
                         )
                         .child(
@@ -5475,12 +5512,12 @@ impl HermesApp {
                                         .px_2()
                                         .py_1()
                                         .rounded_md()
-                                        .bg(rgb(SURFACE))
+                                        .bg(rgb(surface()))
                                         .text_xs()
-                                        .text_color(rgb(TEXT_MUTED))
+                                        .text_color(rgb(text_muted()))
                                         .cursor_pointer()
                                         .hover(|this| {
-                                            this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                            this.bg(rgb(surface_hi())).text_color(rgb(text()))
                                         })
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.pick_avatar(cx)
@@ -5495,9 +5532,9 @@ impl HermesApp {
                                             .py_1()
                                             .rounded_md()
                                             .text_xs()
-                                            .text_color(rgb(DANGER))
+                                            .text_color(rgb(danger()))
                                             .cursor_pointer()
-                                            .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                            .hover(|this| this.bg(rgb(danger_soft())))
                                             .on_click(cx.listener(|this, _event, _window, cx| {
                                                 this.remove_avatar(cx)
                                             }))
@@ -5524,16 +5561,16 @@ impl HermesApp {
                             .items_center()
                             .justify_center()
                             .rounded_md()
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(surface()))
                             .text_sm()
                             .when(selected, |this| {
                                 this.border_1()
                                     .border_color(rgb(accent))
                                     .text_color(rgb(accent))
                             })
-                            .when(!selected, |this| this.text_color(rgb(TEXT_MUTED)))
+                            .when(!selected, |this| this.text_color(rgb(text_muted())))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .hover(|this| this.bg(rgb(surface_hi())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.inspector.glyph = value.clone();
                                 cx.notify();
@@ -5543,16 +5580,16 @@ impl HermesApp {
             )
             .child(self.section_label("ACCENT"))
             .child(div().flex().items_center().gap_2().children(
-                inspector::ACCENT_CHOICES.iter().map(|choice| {
-                    let selected = *choice == accent;
-                    let value = *choice;
+                inspector::accent_choices().into_iter().map(|choice| {
+                    let selected = choice == accent;
+                    let value = choice;
                     div()
                         .id(SharedString::from(format!("accent-{value:06x}")))
                         .w(px(22.))
                         .h(px(22.))
                         .rounded_full()
                         .bg(rgb(value))
-                        .when(selected, |this| this.border_2().border_color(rgb(TEXT)))
+                        .when(selected, |this| this.border_2().border_color(rgb(text())))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.inspector.accent = value;
@@ -5566,12 +5603,12 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(ACCENT))
+                    .bg(rgb(crate::theme::accent()))
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(BG))
+                    .text_color(rgb(bg()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                    .hover(|this| this.bg(rgb(accent_hi())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.save_look(cx)))
                     .child("Save look"),
             )
@@ -5618,7 +5655,7 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .child(
                         div()
                             .flex()
@@ -5629,13 +5666,13 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(name.clone())),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(SharedString::from(format!("MCP · {transport}"))),
                             ),
                     )
@@ -5648,12 +5685,12 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(enabled, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!enabled, |this| {
-                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                                this.bg(rgb(surface_hi())).text_color(rgb(text_dim()))
                             })
-                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .hover(|this| this.bg(rgb(border_hi())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.toggle_mcp(&name, cx)
                             }))
@@ -5683,7 +5720,7 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .child(
                         div()
                             .flex()
@@ -5694,10 +5731,10 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(label)),
                             )
-                            .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                            .child(div().text_xs().text_color(rgb(text_dim())).child(
                                 SharedString::from(format!("{} tools", toolset.tool_count)),
                             )),
                     )
@@ -5710,12 +5747,12 @@ impl HermesApp {
                             .text_xs()
                             .cursor_pointer()
                             .when(enabled, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                             })
                             .when(!enabled, |this| {
-                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                                this.bg(rgb(surface_hi())).text_color(rgb(text_dim()))
                             })
-                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .hover(|this| this.bg(rgb(border_hi())))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.toggle_toolset(&name, cx)
                             }))
@@ -5747,18 +5784,18 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .border_1()
-                    .when(focused, |this| this.border_color(rgb(ACCENT)))
-                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .when(focused, |this| this.border_color(rgb(accent())))
+                    .when(!focused, |this| this.border_color(rgb(border())))
                     .text_xs()
                     .cursor_pointer()
                     .when(value.is_empty(), |this| {
-                        this.text_color(rgb(TEXT_DIM))
+                        this.text_color(rgb(text_dim()))
                             .child(SharedString::from(placeholder.to_string()))
                     })
                     .when(!value.is_empty(), |this| {
-                        this.text_color(rgb(TEXT))
+                        this.text_color(rgb(text()))
                             .child(SharedString::from(value.to_string()))
                     })
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -5813,7 +5850,7 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .child(
                         div()
                             .flex()
@@ -5824,13 +5861,13 @@ impl HermesApp {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(text()))
                                     .child(SharedString::from(name.clone())),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
+                                    .text_color(rgb(text_dim()))
                                     .child(SharedString::from(shown)),
                             ),
                     )
@@ -5842,9 +5879,9 @@ impl HermesApp {
                                 .py_1()
                                 .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(DANGER))
+                                .text_color(rgb(danger()))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                .hover(|this| this.bg(rgb(danger_soft())))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.delete_secret(&name_for_delete, cx)
                                 }))
@@ -5877,9 +5914,9 @@ impl HermesApp {
                                     .py_1()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
                                     .on_click(
                                         cx.listener(|this, _event, _window, cx| {
                                             this.open_vault(cx)
@@ -5896,11 +5933,11 @@ impl HermesApp {
                                     .text_xs()
                                     .cursor_pointer()
                                     .when(self.inspector.show_all, |this| {
-                                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                        this.bg(rgb(accent_soft())).text_color(rgb(accent()))
                                     })
                                     .when(!self.inspector.show_all, |this| {
-                                        this.text_color(rgb(TEXT_MUTED))
-                                            .hover(|this| this.bg(rgb(SURFACE)))
+                                        this.text_color(rgb(text_muted()))
+                                            .hover(|this| this.bg(rgb(surface())))
                                     })
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         this.inspector.show_all = !this.inspector.show_all;
@@ -5942,12 +5979,12 @@ impl HermesApp {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(ACCENT))
+                    .bg(rgb(crate::theme::accent()))
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(BG))
+                    .text_color(rgb(bg()))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                    .hover(|this| this.bg(rgb(accent_hi())))
                     .on_click(cx.listener(|this, _event, _window, cx| this.add_secret(cx)))
                     .child("Save secret"),
             )
@@ -5973,7 +6010,7 @@ impl HermesApp {
             input = input.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(text_dim()))
                     .child(SharedString::from(placeholder)),
             );
         } else {
@@ -5981,7 +6018,7 @@ impl HermesApp {
                 input = input.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(text()))
                         .child(SharedString::from(part.to_string())),
                 );
             }
@@ -5993,7 +6030,7 @@ impl HermesApp {
             .px_4()
             .pt_3()
             .pb_4()
-            .bg(rgb(BG))
+            .bg(rgb(bg()))
             .child(
                 div()
                     .flex()
@@ -6005,10 +6042,10 @@ impl HermesApp {
                     .px_2()
                     .py_2()
                     .rounded_xl()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .border_1()
-                    .when(focused, |this| this.border_color(rgb(ACCENT)))
-                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .when(focused, |this| this.border_color(rgb(accent())))
+                    .when(!focused, |this| this.border_color(rgb(border())))
                     .child(
                         div()
                             .id("composer-attach")
@@ -6019,13 +6056,13 @@ impl HermesApp {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(rgb(SURFACE_HI))
+                            .bg(rgb(surface_hi()))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .hover(|this| this.bg(rgb(border_hi())))
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| this.pick_attachment(cx)),
                             )
-                            .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child("＋")),
+                            .child(div().text_sm().text_color(rgb(text_muted())).child("＋")),
                     )
                     .child(input)
                     .child(
@@ -6040,17 +6077,18 @@ impl HermesApp {
                             .rounded_full()
                             .cursor_pointer()
                             .when(empty, |this| {
-                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                                this.bg(rgb(surface_hi())).text_color(rgb(text_dim()))
                             })
                             .when(!empty, |this| {
-                                this.bg(rgb(ACCENT)).hover(|this| this.bg(rgb(ACCENT_HI)))
+                                this.bg(rgb(accent()))
+                                    .hover(|this| this.bg(rgb(accent_hi())))
                             })
                             .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx)))
                             .child(
                                 div()
                                     .text_sm()
-                                    .when(empty, |this| this.text_color(rgb(TEXT_DIM)))
-                                    .when(!empty, |this| this.text_color(rgb(BG)))
+                                    .when(empty, |this| this.text_color(rgb(text_dim())))
+                                    .when(!empty, |this| this.text_color(rgb(bg())))
                                     .child("↑"),
                             ),
                     ),
@@ -6083,8 +6121,8 @@ impl Render for HermesApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(bg()))
+            .text_color(rgb(text()))
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key(event, cx)),
             )
