@@ -137,9 +137,24 @@ impl HermesApp {
 
         app.pump(events, cx);
         app.pump_tray(cx);
+        // QA hook: seed a short transcript so a screenshot can review the
+        // bubble styles without driving the composer (Wayland has no text
+        // injection here). Never used against a real turn.
+        if std::env::var("HERMES_DEMO").is_ok() {
+            app.lines
+                .push(Line::new(Role::User, "Show me the cluster health."));
+            app.lines.push(Line::new(
+                Role::Reasoning,
+                "Check node readiness, then pods with rising restart counts.",
+            ));
+            app.lines.push(Line::new(
+                Role::Assistant,
+                "All four nodes are Ready. Nexus has one pod restarting; everything else is stable. Forge is at 78% GPU memory and worker-1 at 41%.",
+            ));
+        }
         // QA hook: open the inspector (optionally on a given tab) at launch so
         // a screenshot run can review the panel without input automation.
-        if std::env::var("HERMES_OPEN_INSPECTOR").is_ok() {
+        if matches!(std::env::var("HERMES_OPEN_INSPECTOR").as_deref(), Ok("1")) {
             app.inspector.tab = match std::env::var("HERMES_INSPECTOR_TAB").ok().as_deref() {
                 Some("connectors") => Tab::Connectors,
                 Some("secrets") => Tab::Secrets,
@@ -1150,7 +1165,8 @@ impl HermesApp {
                     .children(visible.iter().map(|profile| {
                         let selected = profile.name == current;
                         let name = profile.name.clone();
-                        let (glyph, accent) = inspector::look_from_meta(profile.ui_meta.as_ref());
+                        let (glyph, accent) =
+                            inspector::look_for(&profile.name, profile.ui_meta.as_ref());
                         let preview = clip(profile.preview(), 58);
                         let has_history = profile.last_session.is_some();
 
@@ -1493,10 +1509,10 @@ impl HermesApp {
                 )
                 .into_any_element(),
             Role::Assistant => {
-                let (bot_glyph, _) = inspector::look_from_meta(
-                    self.current_profile()
-                        .and_then(|profile| profile.ui_meta.as_ref()),
-                );
+                let (bot_glyph, _) = self
+                    .current_profile()
+                    .map(|profile| inspector::look_for(&profile.name, profile.ui_meta.as_ref()))
+                    .unwrap_or_else(|| inspector::look_for(&self.profile_name(), None));
                 let bot_name = self
                     .current_profile()
                     .map(|profile| profile.label().to_string())

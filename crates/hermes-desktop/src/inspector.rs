@@ -146,6 +146,26 @@ impl Inspector {
     }
 }
 
+/// Look for a roster row: an explicit `ui_meta` wins; otherwise a stable
+/// per-bot choice from the token palettes, so a fresh fleet is not monochrome.
+pub fn look_for(name: &str, meta: Option<&Value>) -> (String, u32) {
+    let hash = name.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    let glyph = meta
+        .and_then(|meta| meta.get("icon"))
+        .and_then(Value::as_str)
+        .filter(|icon| !icon.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| GLYPHS[(hash as usize) % GLYPHS.len()].to_string());
+    let accent = meta
+        .and_then(|meta| meta.get("accent"))
+        .and_then(Value::as_str)
+        .and_then(parse_hex)
+        .unwrap_or(ACCENT_CHOICES[(hash as usize / 7) % ACCENT_CHOICES.len()]);
+    (glyph, accent)
+}
+
 /// Read the glyph and accent a bot stored in `ui_meta`, with fallbacks.
 pub fn look_from_meta(meta: Option<&Value>) -> (String, u32) {
     let glyph = meta
@@ -233,6 +253,17 @@ mod tests {
         // `look_patch` is configure params; the reader sees the `ui_meta` block.
         let patch = look_patch("✦", 0x9ed072);
         let (glyph, accent) = look_from_meta(patch.get("ui_meta"));
+        assert_eq!(glyph, "✦");
+        assert_eq!(accent, 0x9ed072);
+    }
+
+    #[test]
+    fn derived_looks_are_stable_and_explicit_meta_wins() {
+        assert_eq!(look_for("analyst", None), look_for("analyst", None));
+        assert_ne!(look_for("analyst", None), look_for("clipbot", None));
+
+        let meta = look_patch("✦", 0x9ed072);
+        let (glyph, accent) = look_for("analyst", meta.get("ui_meta"));
         assert_eq!(glyph, "✦");
         assert_eq!(accent, 0x9ed072);
     }

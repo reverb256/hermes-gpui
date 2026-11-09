@@ -96,8 +96,9 @@ PNG/JPEG/WebP up to 2 MB. Secret values arrive redacted and the reveal endpoint
 is never called, so the client can write a secret but cannot read one back.
 
 `HERMES_OPEN_INSPECTOR=1` opens the panel at launch, and
-`HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab — that is how
-screenshot runs review the panel without input automation.
+`HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab. `HERMES_DEMO=1`
+seeds a short local transcript. Both are QA hooks for screenshot runs, which is
+how the panel and message styling are reviewed without input automation.
 
 ## System requirements (Linux)
 
