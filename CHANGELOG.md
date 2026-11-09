@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Skills-hub browser: source-wide search, SKILL.md and manifest preview, the
   installer's security verdict, and confirmed installs by identifier.
+- Voice playback: `▷ Speak` synthesizes the last assistant reply through the
+  stack's `voice-models` service and plays it through PipeWire/Pulse.
 
 ## [0.1.0] - 2026-11-09
 

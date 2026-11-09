@@ -95,6 +95,7 @@ pub struct HermesApp {
     connection: ConnectionState,
     busy: bool,
     error: Option<String>,
+    voice_status: Option<String>,
     focus: FocusHandle,
     focused: bool,
     scroll: ScrollHandle,
@@ -141,6 +142,7 @@ impl HermesApp {
             connection: ConnectionState::Connecting,
             busy: false,
             error: None,
+            voice_status: None,
             focus: cx.focus_handle(),
             focused: false,
             scroll: ScrollHandle::new(),
@@ -421,6 +423,12 @@ impl HermesApp {
                 self.lines
                     .push(Line::new(Role::System, format!("attached {name}")));
                 self.scroll.scroll_to_bottom();
+            }
+            BackendEvent::Spoken => {
+                self.voice_status = Some("spoke last reply".into());
+            }
+            BackendEvent::SpeakFailed(message) => {
+                self.voice_status = Some(format!("voice: {message}"));
             }
         }
         self.sync_tray(cx);
@@ -708,6 +716,23 @@ impl HermesApp {
         self.busy = false;
         self.palette = Palette::default();
         self.mention = Mention::default();
+        cx.notify();
+    }
+
+    fn speak_last(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .lines
+            .iter()
+            .rev()
+            .find(|line| line.role == Role::Assistant && !line.text.trim().is_empty())
+            .map(|line| line.text.clone());
+        match text {
+            Some(text) => {
+                self.voice_status = Some("synthesizing…".into());
+                self.backend.send(Command::Speak { text });
+            }
+            None => self.voice_status = Some("no assistant reply to speak".into()),
+        }
         cx.notify();
     }
 
@@ -3648,6 +3673,18 @@ impl HermesApp {
                         .child(format!("{} awaiting you", self.cards.len())),
                 )
             })
+            .when_some(self.voice_status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(SURFACE))
+                        .text_xs()
+                        .text_color(rgb(TEXT_DIM))
+                        .child(SharedString::from(crate::transcript::clip(&status, 56))),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -3679,6 +3716,19 @@ impl HermesApp {
                     .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.pick_attachment(cx)))
                     .child("＋ Attach"),
+            )
+            .child(
+                div()
+                    .id("speak-last")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.speak_last(cx)))
+                    .child("▷ Speak"),
             )
             .child(
                 div()

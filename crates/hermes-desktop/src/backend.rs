@@ -153,6 +153,8 @@ pub enum BackendEvent {
     Attached {
         name: String,
     },
+    Spoken,
+    SpeakFailed(String),
     /// `profiles.describe` answer for the inspector.
     ProfileDetail(ProfileDetail),
     /// The host `.env`, redacted server-side.
@@ -245,6 +247,9 @@ pub enum Command {
         session_id: Option<String>,
     },
     Attach(PathBuf),
+    Speak {
+        text: String,
+    },
     /// Load a profile's connectors, secrets and avatar.
     Inspect {
         profile: String,
@@ -446,6 +451,56 @@ async fn worker(
                         Command::Decline { id, session_id } => {
                             let _ = session_id;
                             client.respond(&id, json!({ "answers": {}, "outcome": "cancelled" }));
+                        }
+                        Command::Speak { text } => {
+                            let Some(config) = crate::voice::TtsConfig::from_env() else {
+                                let _ = events.send(BackendEvent::SpeakFailed(
+                                    "set HERMES_TTS_URL to the voice-models service".into(),
+                                ));
+                                continue;
+                            };
+                            match crate::voice::synthesize(&config, &text).await {
+                                Ok(bytes) => {
+                                    let path = crate::voice::temp_wav_path();
+                                    if let Err(err) = tokio::fs::write(&path, &bytes).await {
+                                        let _ = events.send(BackendEvent::SpeakFailed(format!(
+                                            "write tts wav: {err}"
+                                        )));
+                                        continue;
+                                    }
+                                    let Some(player) = crate::voice::player() else {
+                                        let _ = tokio::fs::remove_file(&path).await;
+                                        let _ = events.send(BackendEvent::SpeakFailed(
+                                            "no audio player (install pw-play, paplay or aplay)"
+                                                .into(),
+                                        ));
+                                        continue;
+                                    };
+                                    let played = tokio::process::Command::new(player)
+                                        .arg(&path)
+                                        .status()
+                                        .await;
+                                    let _ = tokio::fs::remove_file(&path).await;
+                                    match played {
+                                        Ok(status) if status.success() => {
+                                            let _ = events.send(BackendEvent::Spoken);
+                                        }
+                                        Ok(status) => {
+                                            let _ = events.send(BackendEvent::SpeakFailed(format!(
+                                                "{player} exited with {status}"
+                                            )));
+                                        }
+                                        Err(err) => {
+                                            let _ = events.send(BackendEvent::SpeakFailed(format!(
+                                                "{player}: {err}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                Err(message) => {
+                                    let _ = events.send(BackendEvent::SpeakFailed(message));
+                                }
+                            }
                         }
                         Command::Attach(path) => {
                             if session.is_none() {

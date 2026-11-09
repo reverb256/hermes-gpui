@@ -12,6 +12,7 @@ mod transcript;
 mod tray;
 mod usage;
 mod vault;
+mod voice;
 
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use hermes_api::HostConfig;

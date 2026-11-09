@@ -39,7 +39,28 @@ cargo run -p hermes-desktop
 
 Env vars: `HERMES_URL` (origin), `HERMES_TOKEN` (bearer), `HERMES_BASIC`
 (`user:pass`), `HERMES_COOKIE` (a ready-made `hermes_session_at=…` cookie, skips
-login), `HERMES_PROFILE` (profile to scope the chat to).
+login), `HERMES_PROFILE` (profile to scope the chat to), and the optional voice
+pair `HERMES_TTS_URL` / `HERMES_TTS_VOICE`.
+
+### Voice
+
+`▷ Speak` in the header reads the last assistant answer through the stack's
+`voice-models` service (`POST /tts`, Chatterbox Turbo by default) and plays the
+returned WAV with the first of `pw-play`, `paplay` or `aplay` on `PATH`. Point it
+at the service in one of the usual ways:
+
+```bash
+# LAN NodePort (use your node address)
+HERMES_TTS_URL=http://NODE_IP:30805 cargo run -p hermes-desktop
+
+# or a local port-forward
+kubectl -n voice-models port-forward svc/voice-models 8004:8004 &
+HERMES_TTS_URL=http://127.0.0.1:8004 cargo run -p hermes-desktop
+```
+
+`HERMES_TTS_VOICE` defaults to `en-US-AndrewNeural`. The desktop does not bundle
+a TTS model or capture audio. Dictation stays with Superwhisper: `Alt+Space`
+records, and its fcitx5 text commit pastes into the focused composer.
 
 ### Authentication
 
@@ -211,8 +232,10 @@ and a pill composer, prompt submission, interrupt, approval cards
 skills, file and image attachments, cron routines read-out, tray icon with
 show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
 servers and toolsets) and host secrets, session history, installed-skills
-toggles, the host-level MCP view, and a scan-gated skills-hub browser with
-confirmed installs.
+toggles, the host-level MCP view, a scan-gated skills-hub browser with
+confirmed installs, and TTS playback of the last reply through `voice-models`.
+Dictation remains Superwhisper's job (`Alt+Space`), since the client does not
+capture audio itself.
 
 Not yet wired: file browser, voice mode, multi-host switching, markdown
 rendering, MoA presets, artifacts/media, cron and Kanban writes, and resuming a

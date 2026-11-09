@@ -64,10 +64,16 @@ read-only memory list plus provider settings; reset stays behind a confirm.
 is strict (half-filled slots are rejected with 422) and an editor is a sizeable
 surface. Build it after the single-model flow settles.
 
-### 6. Voice — **Later**
+### 6. Voice — **Partly shipped**
 
-TTS/STT and audio capture need platform work (PipeWire capture, playback) that
-GPUI does not give us for free. Keep it out until the text client is complete.
+Shipped: `▷ Speak` synthesizes the last assistant reply through the existing
+`voice-models` service and plays the WAV via PipeWire/Pulse. Between
+Superwhisper's `Alt+Space` dictation and the client's composer, the everyday
+speak/listen loop is covered without bundling models.
+
+Still needed: in-app microphone capture, streaming TTS playback, voice
+selection UI, and routing STT through the host instead of the desktop's
+dictation stack.
 
 ### 7. Cron and Kanban — **Later**
 
