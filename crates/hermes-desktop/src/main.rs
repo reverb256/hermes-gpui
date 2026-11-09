@@ -3,6 +3,7 @@ mod backend;
 mod inspector;
 mod keys;
 mod mcp;
+mod memory;
 mod models;
 mod sessions;
 mod settings;

@@ -232,8 +232,9 @@ and a pill composer, prompt submission, interrupt, approval cards
 skills, file and image attachments, cron routines read-out, tray icon with
 show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
 servers and toolsets) and host secrets, session history, installed-skills
-toggles, the host-level MCP view, a scan-gated skills-hub browser with
-confirmed installs, and TTS playback of the last reply through `voice-models`.
+toggles, the host-level MCP view, a memory-provider page over `/api/memory`
+with ready-provider activation, a scan-gated skills-hub browser with confirmed
+installs, and TTS playback of the last reply through `voice-models`.
 Dictation remains Superwhisper's job (`Alt+Space`), since the client does not
 capture audio itself.
 

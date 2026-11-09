@@ -199,6 +199,43 @@ pub struct McpServer {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// `GET /api/memory` — the active provider, discovered providers and the
+/// built-in file sizes. Provider detail is kept raw beyond the stable fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryStatus {
+    #[serde(default)]
+    pub active: String,
+    #[serde(default)]
+    pub providers: Vec<MemoryProvider>,
+    #[serde(default)]
+    pub builtin_files: MemoryFiles,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryProvider {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub configured: bool,
+    /// `ready`, `needs_config`, `unavailable` or `missing`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryFiles {
+    #[serde(default)]
+    pub memory: u64,
+    #[serde(default)]
+    pub user: u64,
+}
+
 /// One row of `GET /api/env`. Values arrive redacted; this client never asks
 /// for the reveal endpoint, so plaintext secrets never enter the process.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -743,6 +780,26 @@ impl RestClient {
             servers: Vec<McpServer>,
         }
         Ok(self.get::<Response>("/api/mcp/servers").await?.servers)
+    }
+
+    /// `GET /api/memory` — active provider, discovered providers and file sizes.
+    pub async fn memory_status(&self) -> Result<MemoryStatus, ApiError> {
+        self.get("/api/memory").await
+    }
+
+    /// `PUT /api/memory/provider` — the host rejects providers that are not ready.
+    pub async fn set_memory_provider(&self, provider: &str) -> Result<Value, ApiError> {
+        let path = "/api/memory/provider";
+        let response = self
+            .authed(reqwest::Method::PUT, path)
+            .json(&serde_json::json!({ "provider": provider }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.to_string(),
+                source,
+            })?;
+        self.decode_response(path, response).await
     }
 
     pub async fn cron_jobs(&self) -> Result<Value, ApiError> {

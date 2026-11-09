@@ -21,6 +21,7 @@ use crate::backend::{
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
 use crate::mcp::{self, Mcp};
+use crate::memory::{self, Memory};
 use crate::models::{self, Models};
 use crate::sessions::{self, Sessions};
 use crate::settings::{Section, Settings};
@@ -109,6 +110,7 @@ pub struct HermesApp {
     sessions: Sessions,
     skills: Skills,
     mcp: Mcp,
+    memory: Memory,
     /// Stored transcript on screen; sending is disabled until New chat.
     viewing_history: Option<String>,
     rail_search: bool,
@@ -155,6 +157,7 @@ impl HermesApp {
             sessions: Sessions::default(),
             skills: Skills::default(),
             mcp: Mcp::default(),
+            memory: Memory::default(),
             viewing_history: None,
             usage: Usage {
                 days: 30,
@@ -347,6 +350,11 @@ impl HermesApp {
             BackendEvent::McpTested { name, result } => {
                 self.mcp.testing = None;
                 self.mcp.status = Some(mcp::test_summary(&name, &result));
+            }
+            BackendEvent::Memory(status) => self.memory.loaded(status),
+            BackendEvent::MemoryFailed(message) => self.memory.failed(message),
+            BackendEvent::MemoryProviderSet(provider) => {
+                self.memory.status = Some(format!("switching to {provider}…"));
             }
             BackendEvent::Skills(rows) => self.skills.loaded(rows),
             BackendEvent::SkillsFailed(message) => self.skills.failed(message),
@@ -1013,6 +1021,28 @@ impl HermesApp {
             )
     }
 
+    fn open_memory(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Memory);
+        self.load_memory(cx);
+    }
+
+    fn load_memory(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Memory);
+        self.memory.loaded = false;
+        self.memory.error = None;
+        self.memory.status = None;
+        self.backend.send(Command::LoadMemory);
+        cx.notify();
+    }
+
+    fn activate_memory_provider(&mut self, provider: &str, cx: &mut Context<Self>) {
+        self.memory.status = Some(format!("activating {provider}…"));
+        self.backend.send(Command::SetMemoryProvider {
+            provider: provider.to_string(),
+        });
+        cx.notify();
+    }
+
     fn open_mcp(&mut self, cx: &mut Context<Self>) {
         self.settings.show(Section::Mcp);
         self.load_mcp(cx);
@@ -1079,6 +1109,148 @@ impl HermesApp {
         }
         cx.notify();
         true
+    }
+
+    fn memory_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut list = div()
+            .id("memory-list")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+        if !self.memory.loaded {
+            list = list.child(self.note("Loading memory providers…"));
+        } else if let Some(error) = self.memory.error.as_deref() {
+            list = list.child(self.note(error));
+        } else {
+            list = list
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(BG_ELEV))
+                        .child(self.section_label("ACTIVE PROVIDER"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .child(SharedString::from(if self.memory.active.is_empty() {
+                                    "builtin (none selected)".to_string()
+                                } else {
+                                    self.memory.active.clone()
+                                })),
+                        )
+                        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                            SharedString::from(memory::files_summary(
+                                self.memory.memory_bytes,
+                                self.memory.user_bytes,
+                            )),
+                        )),
+                )
+                .child(self.section_label("DISCOVERED"));
+            for provider in &self.memory.providers {
+                let name = provider.name.clone();
+                let can_activate = memory::can_activate(provider, &self.memory.active);
+                let is_active = provider.name == self.memory.active;
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(BG_ELEV))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(provider.name.clone()))
+                                        .child(
+                                            div()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(rgb(SURFACE))
+                                                .text_color(rgb(if is_active {
+                                                    ACCENT
+                                                } else {
+                                                    TEXT_DIM
+                                                }))
+                                                .child(SharedString::from(
+                                                    memory::provider_status(provider),
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .child(SharedString::from(provider.description.clone())),
+                                ),
+                        )
+                        .when(can_activate, |this| {
+                            this.child(
+                                div()
+                                    .id(SharedString::from(format!("memory-use-{name}")))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(ACCENT_SOFT))
+                                    .text_xs()
+                                    .text_color(rgb(ACCENT))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.activate_memory_provider(&name, cx)
+                                    }))
+                                    .child("Use"),
+                            )
+                        }),
+                );
+            }
+            if self.memory.providers.is_empty() {
+                list = list.child(self.note("No memory providers discovered."));
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .when_some(self.memory.status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .mx_5()
+                        .mt_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(SURFACE_HI))
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(list)
+            .into_any_element()
     }
 
     fn mcp_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3119,6 +3291,7 @@ impl HermesApp {
             Section::Assignments => self.assignments_body(cx),
             Section::Skills => self.skills_body(cx),
             Section::Mcp => self.mcp_body(cx),
+            Section::Memory => self.memory_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -3172,6 +3345,7 @@ impl HermesApp {
                                     Section::Assignments => this.load_assignments(cx),
                                     Section::Skills => this.open_skills(cx),
                                     Section::Mcp => this.open_mcp(cx),
+                                    Section::Memory => this.open_memory(cx),
                                     Section::Vault => this.open_vault(cx),
                                 },
                             ))

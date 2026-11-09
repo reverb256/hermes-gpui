@@ -14,6 +14,8 @@ All notable changes to this project are documented here. The format follows
   stack's `voice-models` service and plays it through PipeWire/Pulse.
 - Session controls: pin/unpin and archive rows through the host's
   `PATCH /api/sessions/{id}`, with the list refreshed from the host.
+- Memory page: active provider, discovery status and built-in file sizes from
+  `GET /api/memory`, plus activation for providers the host marks ready.
 
 ## [0.1.0] - 2026-11-09
 

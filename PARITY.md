@@ -22,6 +22,9 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
   On/Off toggles through `PUT /api/skills/toggle`.
 - MCP page: host-level server list with transport/source/endpoint/auth, a
   host-side reachability test, and On/Off per server.
+- Memory page over `GET /api/memory`: active provider, discovered backends with
+  their availability/configuration status, built-in file sizes, and activation
+  for providers the host marks ready (`PUT /api/memory/provider`).
 - Skills hub: search across the host's configured sources, read the actual
   SKILL.md and file manifest, run the installer's security scan, and install by
   identifier only after a visible confirmation.
@@ -54,10 +57,12 @@ back a Browse-hub tab: server-side search, the full SKILL.md and manifest,
 the same security verdict the installer uses, and a confirmed install by
 identifier. Uninstall/update remain CLI work.
 
-### 4. Memory — **Next**
+### 4. Memory — **Partly shipped**
 
-Memory providers have declared config surfaces the desktop already uses. Add a
-read-only memory list plus provider settings; reset stays behind a confirm.
+Shipped: the active provider, the discovery list with availability and
+configuration status, built-in file sizes, and activation for ready providers.
+Still needed: generic config forms from each provider's declared schema and a
+confirmed reset. Reset is destructive, so it stays out until that flow exists.
 
 ### 5. MoA presets — **Later**
 
@@ -101,7 +106,7 @@ widget that summons the window. No QML rewrite.
 ## Sequencing
 
 1. **M1 — history:** repair `state.db`, sessions list, resume, projects.
-2. **M2 — host surfaces:** toolsets, skills, memory (all read-first).
+2. **M2 — host surfaces:** toolsets, skills, memory (read list shipped; config next).
 3. **M3 — Omarchy:** theme sync, `--toggle`, optional bar widget.
 4. **M4 — breadth:** MoA, voice, cron/Kanban, provider OAuth, artifacts.
 

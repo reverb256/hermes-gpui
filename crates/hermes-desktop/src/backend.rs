@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use hermes_api::{
     ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpServer,
-    ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary,
-    Skill, SkillHubPreview, SkillHubResult, SkillHubScan, UsageAnalytics, gateway,
+    MemoryStatus, ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient,
+    SessionSummary, Skill, SkillHubPreview, SkillHubResult, SkillHubScan, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -215,6 +215,9 @@ pub enum BackendEvent {
         name: String,
         result: serde_json::Value,
     },
+    Memory(MemoryStatus),
+    MemoryFailed(String),
+    MemoryProviderSet(String),
     Avatar {
         profile: String,
         mime: String,
@@ -325,6 +328,10 @@ pub enum Command {
     },
     TestMcp {
         name: String,
+    },
+    LoadMemory,
+    SetMemoryProvider {
+        provider: String,
     },
 }
 
@@ -614,6 +621,33 @@ async fn worker(
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::LoadMemory => match rest.memory_status().await {
+                            Ok(status) => {
+                                let _ = events.send(BackendEvent::Memory(status));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::MemoryFailed(message));
+                            }
+                        },
+                        Command::SetMemoryProvider { provider } => {
+                            match rest.set_memory_provider(&provider).await {
+                                Ok(_) => {
+                                    let _ = events
+                                        .send(BackendEvent::MemoryProviderSet(provider.clone()));
+                                    if let Ok(status) = rest.memory_status().await {
+                                        let _ = events.send(BackendEvent::Memory(status));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::MemoryFailed(format!(
+                                        "{provider}: {message}"
                                     )));
                                 }
                             }
