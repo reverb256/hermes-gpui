@@ -10,9 +10,8 @@ maintained.
 Report privately through GitHub's **Report a vulnerability** flow:
 https://github.com/reverb256/hermes-gpui/security/advisories/new
 
-If that flow is unavailable for this private repository, contact
-[@reverb256](https://github.com/reverb256) and ask for a private channel before
-sending details.
+If the form is unavailable, contact [@reverb256](https://github.com/reverb256)
+and ask for a private channel before sending details.
 
 Do not open a public issue, and do not include live credentials, cookies,
 session tickets or private hostnames. If you must demonstrate a leak, use a
