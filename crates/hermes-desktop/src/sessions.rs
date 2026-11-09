@@ -159,10 +159,8 @@ pub fn lines_from_messages(messages: &[Value]) -> Vec<Line> {
                     format!("⚙ {name}: {}", clip(body, 400)),
                 ));
             }
-            "system" => {
-                if !content.is_empty() {
-                    lines.push(Line::new(Role::System, content));
-                }
+            "system" if !content.is_empty() => {
+                lines.push(Line::new(Role::System, content));
             }
             _ => {}
         }

@@ -45,25 +45,25 @@ impl HostConfig {
         if let Ok(url) = std::env::var("HERMES_URL") {
             cfg.base_url = url.trim_end_matches('/').to_string();
         }
-        if let Ok(token) = std::env::var("HERMES_TOKEN") {
-            if !token.is_empty() {
-                cfg.token = Some(token);
-            }
+        if let Ok(token) = std::env::var("HERMES_TOKEN")
+            && !token.is_empty()
+        {
+            cfg.token = Some(token);
         }
-        if let Ok(basic) = std::env::var("HERMES_BASIC") {
-            if let Some((user, pass)) = basic.split_once(':') {
-                cfg.basic = Some((user.to_string(), pass.to_string()));
-            }
+        if let Ok(basic) = std::env::var("HERMES_BASIC")
+            && let Some((user, pass)) = basic.split_once(':')
+        {
+            cfg.basic = Some((user.to_string(), pass.to_string()));
         }
-        if let Ok(cookie) = std::env::var("HERMES_COOKIE") {
-            if !cookie.is_empty() {
-                cfg.cookie = Some(cookie);
-            }
+        if let Ok(cookie) = std::env::var("HERMES_COOKIE")
+            && !cookie.is_empty()
+        {
+            cfg.cookie = Some(cookie);
         }
-        if let Ok(profile) = std::env::var("HERMES_PROFILE") {
-            if !profile.is_empty() {
-                cfg.profile = Some(profile);
-            }
+        if let Ok(profile) = std::env::var("HERMES_PROFILE")
+            && !profile.is_empty()
+        {
+            cfg.profile = Some(profile);
         }
         cfg
     }
@@ -946,10 +946,10 @@ impl RestClient {
     async fn password_provider(&self) -> Option<String> {
         let payload: Value = self.get("/api/auth/providers").await.ok()?;
         for provider in payload.get("providers")?.as_array()? {
-            if provider.get("supports_password").and_then(Value::as_bool) == Some(true) {
-                if let Some(name) = provider.get("name").and_then(Value::as_str) {
-                    return Some(name.to_string());
-                }
+            if provider.get("supports_password").and_then(Value::as_bool) == Some(true)
+                && let Some(name) = provider.get("name").and_then(Value::as_str)
+            {
+                return Some(name.to_string());
             }
         }
         None

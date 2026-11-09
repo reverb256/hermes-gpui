@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a parity surface or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can the Electron client do that this client cannot, or what workflow is awkward?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The smallest change that would solve it.
+    validations:
+      required: true
+  - type: input
+    id: wire
+    attributes:
+      label: Host surface
+      description: Endpoint or RPC method, if known (for example `/api/skills`).
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This does not require Electron or Chromium.
+          required: true
+        - label: I checked `PARITY.md` for whether this is already planned or blocked.
+          required: false

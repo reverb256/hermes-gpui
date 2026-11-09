@@ -1,5 +1,8 @@
 # hermes-gpui
 
+[![CI](https://github.com/reverb256/hermes-gpui/actions/workflows/ci.yml/badge.svg)](https://github.com/reverb256/hermes-gpui/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A native GPUI desktop client for a Hermes host — no Electron, no Chromium.
 
 It talks to the same two surfaces the official desktop app does:
@@ -155,17 +158,48 @@ reports and links out instead of moving money.
 
 `HERMES_OPEN_INSPECTOR=1` opens the panel at launch,
 `HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab, and
-`HERMES_OPEN_SETTINGS=vault|model|assignments|usage` opens the settings sheet
-on that section; `HERMES_OPEN_SETTINGS=sessions|skills` opens those rails.
+`HERMES_OPEN_SETTINGS=vault|model|assignments|skills|mcp|sessions|usage` opens
+the settings sheet on that section or rail.
 `HERMES_DEMO=1` seeds a short local transcript. Those are QA hooks for screenshot
 runs, which is how the panel, sheet and message styling are reviewed without
 input automation.
+
+## Development
+
+Rust is pinned by `rust-toolchain.toml`; rustup installs the toolchain and the
+`rustfmt`/`clippy` components automatically. The Linux libraries below are
+required to build and run.
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
+
+CI runs the same three commands on every push and pull request. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR flow and
+[`STYLE.md`](STYLE.md) for UI rules.
 
 ## System requirements (Linux)
 
 GPUI renders through the GPU: `wayland` or `x11`, `libxkbcommon`, `vulkan-icd-loader`,
 `fontconfig`, `freetype2`. On Arch: `pacman -S base-devel wayland libxkbcommon
 vulkan-icd-loader vulkan-headers fontconfig freetype2`.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
+and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md); all three CI checks must pass.
+
+## Security
+
+Report vulnerabilities privately through the repository's Security tab as
+described in [`SECURITY.md`](SECURITY.md). Never include live credentials or
+session cookies in an issue.
+
+## Changelog
+
+Released changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Status
 
@@ -175,9 +209,12 @@ gated hosts, profile roster with last-message previews and search, bot switching
 and a pill composer, prompt submission, interrupt, approval cards
 (allow once / always allow / deny), clarify cards, `@`-mentions for bots and
 skills, file and image attachments, cron routines read-out, tray icon with
-show/quit and minimise-on-close, and a per-bot inspector for look, connectors
-(MCP servers and toolsets) and host secrets.
+show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
+servers and toolsets) and host secrets, session history, installed-skills
+toggles, and the host-level MCP view.
 
-Not yet wired: file browser, voice mode, multi-host switching, session history
-and markdown rendering. The composer handles printable keys, backspace and
-enter; there is no IME composition or text selection yet.
+Not yet wired: file browser, voice mode, multi-host switching, markdown
+rendering, MoA presets, artifacts/media, cron and Kanban writes, and resuming a
+stored session (the gateway exposes no resume call). The composer handles
+printable keys, backspace and enter; there is no IME composition or text
+selection yet.

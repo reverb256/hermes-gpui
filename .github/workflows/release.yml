@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (must already exist)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libdbus-1-dev
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+
+      - name: Build release binary
+        run: cargo build --release --locked -p hermes-desktop
+
+      - name: Package
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          mkdir -p dist/pkg
+          cp target/release/hermes-desktop dist/pkg/
+          cp README.md LICENSE NOTICE dist/pkg/
+          tar -C dist/pkg -czf "dist/hermes-gpui-${TAG}-x86_64-linux.tar.gz" .
+          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --title "hermes-gpui $TAG" \
+            --generate-notes \
+            --notes "Linux x86_64 build. Runtime requirements: Wayland or X11, \
+          libxkbcommon, Vulkan ICD loader, fontconfig and freetype. See README.md."

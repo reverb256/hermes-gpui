@@ -147,8 +147,8 @@ mod tests {
         assert!((560. ..=760.).contains(&READ_W), "reading measure drifted");
         assert!((220. ..=300.).contains(&RAIL_W), "rail drifted");
         assert!((300. ..=420.).contains(&PANEL_W), "inspector drifted");
-        assert!(BUBBLE_W <= READ_W);
-        assert!(HEADER_H >= 44., "header must stay a comfortable hit target");
+        const { assert!(BUBBLE_W <= READ_W) };
+        const { assert!(HEADER_H >= 44., "header must stay a comfortable hit target") };
         assert!(
             (22. ..=32.).contains(&STATUS_H),
             "status strip must stay a strip"

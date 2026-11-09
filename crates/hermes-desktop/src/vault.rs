@@ -31,6 +31,7 @@ pub struct Tab {
     pub count: usize,
 }
 
+#[derive(Default)]
 pub struct Vault {
     pub open: bool,
     pub query: String,
@@ -42,21 +43,6 @@ pub struct Vault {
     pub value: String,
     pub focus: Option<Field>,
     pub status: Option<String>,
-}
-
-impl Default for Vault {
-    fn default() -> Self {
-        Self {
-            open: false,
-            query: String::new(),
-            tab: None,
-            adding: false,
-            key: String::new(),
-            value: String::new(),
-            focus: None,
-            status: None,
-        }
-    }
 }
 
 impl Vault {

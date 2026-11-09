@@ -2904,25 +2904,25 @@ impl HermesApp {
     }
 
     fn approve(&mut self, id: &str, choice: ApprovalChoice, cx: &mut Context<Self>) {
-        if let Some(card) = self.cards.iter().find(|card| card.id == id) {
-            if let CardKind::Approval(request) = &card.kind {
-                self.backend.send(Command::Approve {
-                    request: request.clone(),
-                    choice,
-                });
-            }
+        if let Some(card) = self.cards.iter().find(|card| card.id == id)
+            && let CardKind::Approval(request) = &card.kind
+        {
+            self.backend.send(Command::Approve {
+                request: request.clone(),
+                choice,
+            });
         }
         self.resolve_card(id, cx);
     }
 
     fn answer(&mut self, id: &str, answer: String, cx: &mut Context<Self>) {
-        if let Some(card) = self.cards.iter().find(|card| card.id == id) {
-            if let CardKind::Clarify(request) = &card.kind {
-                self.backend.send(Command::Answer {
-                    request: request.clone(),
-                    answer,
-                });
-            }
+        if let Some(card) = self.cards.iter().find(|card| card.id == id)
+            && let CardKind::Clarify(request) = &card.kind
+        {
+            self.backend.send(Command::Answer {
+                request: request.clone(),
+                answer,
+            });
         }
         self.resolve_card(id, cx);
     }

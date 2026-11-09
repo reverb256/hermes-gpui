@@ -395,11 +395,10 @@ async fn worker(
                             let _ = events.send(BackendEvent::MessageComplete);
                         }
                         Command::Interrupt => {
-                            if let Some(session_id) = &session {
-                                if let Err(err) = gateway::interrupt(&client, session_id).await {
+                            if let Some(session_id) = &session
+                                && let Err(err) = gateway::interrupt(&client, session_id).await {
                                     let _ = events.send(BackendEvent::Error(err.to_string()));
                                 }
-                            }
                         }
                         Command::Approve { request, choice } => {
                             let wire = choice.as_wire();

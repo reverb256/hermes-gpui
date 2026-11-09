@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible defect in the desktop client.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove credentials and hostnames before posting logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `git rev-parse --short HEAD` or the release tag.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Distro, session type (Wayland/X11), GPU, and Rust version.
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Hermes host
+      description: Which deployment (local dashboard, k3s pod, etc.) and whether auth is enabled. Do not paste secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch with ...
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the terminal output or log excerpt, with secrets removed.
+    validations:
+      required: true
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed credentials, cookies, tokens and private hostnames.
+          required: true
+        - label: I checked that this is not a host-side outage (dashboard 5xx) rather than a client bug.
+          required: false
