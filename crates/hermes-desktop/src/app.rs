@@ -372,10 +372,47 @@ impl HermesApp {
                 self.mcp.testing = None;
                 self.mcp.status = Some(mcp::test_summary(&name, &result));
             }
+            BackendEvent::McpCatalog(catalog) => self.mcp.catalog_loaded(catalog),
+            BackendEvent::McpCatalogFailed(message) => self.mcp.catalog_failed(message),
+            BackendEvent::McpCreated(name) => {
+                self.mcp.form = None;
+                self.mcp.status = Some(format!("{name} added"));
+            }
+            BackendEvent::McpDeleted(name) => {
+                self.mcp.confirm_delete = None;
+                self.mcp.status = Some(format!("{name} deleted"));
+            }
+            BackendEvent::McpEdited(name) => {
+                self.mcp.form = None;
+                self.mcp.status = Some(format!("{name} saved"));
+            }
+            BackendEvent::McpConfig { name, config } => {
+                self.mcp.begin_edit(&name, config);
+                self.mcp.status = None;
+            }
+            BackendEvent::McpInstalled { name, background } => {
+                self.mcp.install = None;
+                self.mcp.status = Some(if background {
+                    format!("{name}: cloning and building in the background")
+                } else {
+                    format!("{name} installed")
+                });
+            }
             BackendEvent::Memory(status) => self.memory.loaded(status),
             BackendEvent::MemoryFailed(message) => self.memory.failed(message),
             BackendEvent::MemoryProviderSet(provider) => {
                 self.memory.status = Some(format!("switching to {provider}…"));
+            }
+            BackendEvent::MemoryConfig(config) => self.memory.config_loaded(config),
+            BackendEvent::MemoryConfigFailed(message) => self.memory.config_failed(message),
+            BackendEvent::MemoryConfigSaved(name) => self.memory.saved(&name),
+            BackendEvent::MemoryReset(files) => {
+                self.memory.confirm_reset = None;
+                self.memory.status = Some(if files.is_empty() {
+                    "nothing to reset".to_string()
+                } else {
+                    format!("reset {}", files.join(" and "))
+                });
             }
             BackendEvent::Skills(rows) => self.skills.loaded(rows),
             BackendEvent::SkillsFailed(message) => self.skills.failed(message),
@@ -485,6 +522,7 @@ impl HermesApp {
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
                 || (self.settings.section == Section::Skills && self.route_skills_typing(event, cx))
                 || (self.settings.section == Section::Mcp && self.route_mcp_typing(event, cx))
+                || (self.settings.section == Section::Memory && self.route_memory_typing(event, cx))
             {
                 return;
             }
@@ -1069,6 +1107,93 @@ impl HermesApp {
         cx.notify();
     }
 
+    fn configure_memory(&mut self, provider: &str, cx: &mut Context<Self>) {
+        self.memory.form = None;
+        self.memory.begin_config(provider);
+        self.memory.config_loading = true;
+        self.backend.send(Command::LoadMemoryConfig {
+            provider: provider.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn save_memory_config(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.memory.form.as_ref() else {
+            return;
+        };
+        match form.values() {
+            Ok(values) => {
+                let provider = form.name.clone();
+                self.memory.status = Some(format!("saving {provider}…"));
+                self.backend
+                    .send(Command::UpdateMemoryConfig { provider, values });
+                cx.notify();
+            }
+            Err(message) => {
+                if let Some(form) = self.memory.form.as_mut() {
+                    form.error = Some(message);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn reset_memory(&mut self, target: &str, cx: &mut Context<Self>) {
+        if self.memory.confirm_reset.as_deref() != Some(target) {
+            self.memory.confirm_reset = Some(target.to_string());
+            self.memory.status = Some(format!(
+                "click {} again to delete the file",
+                memory::reset_label(target).to_lowercase()
+            ));
+        } else {
+            self.memory.status = Some("resetting memory…".into());
+            self.backend.send(Command::ResetMemory {
+                target: target.to_string(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn route_memory_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.memory.form.is_none() {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        let Some(form) = self.memory.form.as_mut() else {
+            return false;
+        };
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.memory.form = None;
+                self.memory.status = None;
+            }
+            "enter" => self.save_memory_config(cx),
+            "tab" => form.focus_next(),
+            "backspace" => form.backspace(),
+            "space" => {
+                if form
+                    .focus
+                    .and_then(|index| form.fields.get(index))
+                    .is_some_and(|field| !field.kind.is_text())
+                {
+                    form.cycle_focused();
+                } else {
+                    form.typed(" ");
+                }
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    form.typed(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
     fn open_mcp(&mut self, cx: &mut Context<Self>) {
         self.settings.show(Section::Mcp);
         self.load_mcp(cx);
@@ -1080,8 +1205,131 @@ impl HermesApp {
         self.mcp.error = None;
         self.mcp.status = None;
         self.mcp.testing = None;
+        self.mcp.form = None;
+        self.mcp.install = None;
+        self.mcp.confirm_delete = None;
         self.backend.send(Command::LoadMcp);
+        if self.mcp.tab == mcp::Tab::Catalog {
+            self.load_mcp_catalog(cx);
+        }
         cx.notify();
+    }
+
+    fn load_mcp_catalog(&mut self, cx: &mut Context<Self>) {
+        self.mcp.catalog_loading = true;
+        self.mcp.catalog_error = None;
+        self.backend.send(Command::LoadMcpCatalog);
+        cx.notify();
+    }
+
+    fn begin_mcp_create(&mut self, cx: &mut Context<Self>) {
+        self.mcp.begin_create();
+        cx.notify();
+    }
+
+    fn edit_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.mcp.status = Some(format!("loading {name}…"));
+        self.backend.send(Command::LoadMcpConfig {
+            name: name.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn save_mcp_form(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.mcp.form.as_ref() else {
+            return;
+        };
+        if form.is_edit() {
+            match form.edit_config() {
+                Ok(config) => {
+                    let old_name = form
+                        .old_name
+                        .clone()
+                        .unwrap_or_else(|| form.name.trim().to_string());
+                    let name = form.name.trim().to_string();
+                    self.mcp.status = Some(format!("saving {name}…"));
+                    self.backend.send(Command::SaveMcp {
+                        old_name,
+                        name,
+                        config,
+                    });
+                    cx.notify();
+                }
+                Err(message) => {
+                    if let Some(form) = self.mcp.form.as_mut() {
+                        form.error = Some(message);
+                    }
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        match form.create_body() {
+            Ok(body) => {
+                let name = form.name.trim().to_string();
+                self.mcp.status = Some(format!("adding {name}…"));
+                self.backend.send(Command::CreateMcp { body });
+                cx.notify();
+            }
+            Err(message) => {
+                if let Some(form) = self.mcp.form.as_mut() {
+                    form.error = Some(message);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn delete_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.mcp.confirm_delete.as_deref() != Some(name) {
+            self.mcp.confirm_delete = Some(name.to_string());
+            self.mcp.status = Some(format!("click Delete again to remove {name}"));
+        } else {
+            self.mcp.status = Some(format!("deleting {name}…"));
+            self.backend.send(Command::DeleteMcp {
+                name: name.to_string(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn install_catalog(&mut self, entry: &hermes_api::McpCatalogEntry, cx: &mut Context<Self>) {
+        if entry.required_env.iter().any(|field| field.required) {
+            self.mcp.begin_install(entry);
+            cx.notify();
+            return;
+        }
+        self.mcp.status = Some(format!("installing {}…", entry.name));
+        self.backend.send(Command::InstallMcp {
+            name: entry.name.clone(),
+            env: serde_json::json!({}),
+            enable: true,
+        });
+        cx.notify();
+    }
+
+    fn submit_catalog_install(&mut self, cx: &mut Context<Self>) {
+        let Some(install) = self.mcp.install.as_ref() else {
+            return;
+        };
+        match install.values() {
+            Ok(env) => {
+                let name = install.name.clone();
+                self.mcp.status = Some(format!("installing {name}…"));
+                self.backend.send(Command::InstallMcp {
+                    name,
+                    env,
+                    enable: true,
+                });
+                cx.notify();
+            }
+            Err(message) => {
+                if let Some(install) = self.mcp.install.as_mut() {
+                    install.error = Some(message);
+                }
+                cx.notify();
+            }
+        }
     }
 
     fn toggle_mcp_page(&mut self, cx: &mut Context<Self>) {
@@ -1115,11 +1363,55 @@ impl HermesApp {
     }
 
     fn route_mcp_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        if !self.mcp.focus {
-            return false;
-        }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        if let Some(form) = self.mcp.form.as_mut() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.mcp.form = None;
+                    self.mcp.status = None;
+                }
+                "enter" => {
+                    self.save_mcp_form(cx);
+                }
+                "tab" => form.focus_next(),
+                "backspace" => form.backspace(),
+                _ => {
+                    if let Some(chars) = keystroke.key_char.as_deref() {
+                        form.typed(chars);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        if let Some(install) = self.mcp.install.as_mut() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.mcp.install = None;
+                    self.mcp.status = None;
+                }
+                "enter" => self.submit_catalog_install(cx),
+                "tab" => install.focus_next(),
+                "backspace" => {
+                    if let Some(field) = install.env.get_mut(install.focus) {
+                        field.value.pop();
+                    }
+                }
+                _ => {
+                    if let Some(chars) = keystroke.key_char.as_deref()
+                        && let Some(field) = install.env.get_mut(install.focus)
+                    {
+                        field.value.push_str(chars);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        if !self.mcp.focus {
             return false;
         }
         match keystroke.key.as_str() {
@@ -1138,6 +1430,9 @@ impl HermesApp {
     }
 
     fn memory_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.memory.form.is_some() {
+            return self.memory_form_body(cx);
+        }
         let mut list = div()
             .id("memory-list")
             .flex()
@@ -1148,6 +1443,30 @@ impl HermesApp {
             .overflow_y_scroll()
             .px_5()
             .py_3();
+        let mut reset_row = div().flex().items_center().gap_2();
+        for (target, label) in [
+            ("memory", "Reset MEMORY.md"),
+            ("user", "Reset USER.md"),
+            ("all", "Reset both"),
+        ] {
+            let confirming = self.memory.confirm_reset.as_deref() == Some(target);
+            reset_row = reset_row.child(
+                div()
+                    .id(SharedString::from(format!("memory-reset-{target}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(if confirming { accent_soft() } else { surface() }))
+                    .text_xs()
+                    .text_color(rgb(if confirming { accent() } else { text_muted() }))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+                    .on_click(
+                        cx.listener(move |this, _event, _window, cx| this.reset_memory(target, cx)),
+                    )
+                    .child(if confirming { "Confirm reset" } else { label }),
+            );
+        }
         if !self.memory.loaded {
             list = list.child(self.note("Loading memory providers…"));
         } else if let Some(error) = self.memory.error.as_deref() {
@@ -1179,11 +1498,14 @@ impl HermesApp {
                                 self.memory.memory_bytes,
                                 self.memory.user_bytes,
                             )),
-                        )),
+                        ))
+                        .child(reset_row),
                 )
                 .child(self.section_label("DISCOVERED"));
             for provider in &self.memory.providers {
                 let name = provider.name.clone();
+                let use_name = name.clone();
+                let config_name = name.clone();
                 let can_activate = memory::can_activate(provider, &self.memory.active);
                 let is_active = provider.name == self.memory.active;
                 list = list.child(
@@ -1232,24 +1554,50 @@ impl HermesApp {
                                         .child(SharedString::from(provider.description.clone())),
                                 ),
                         )
-                        .when(can_activate, |this| {
-                            this.child(
-                                div()
-                                    .id(SharedString::from(format!("memory-use-{name}")))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(rgb(accent_soft()))
-                                    .text_xs()
-                                    .text_color(rgb(accent()))
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(surface_hi())))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.activate_memory_provider(&name, cx)
-                                    }))
-                                    .child("Use"),
-                            )
-                        }),
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .when(can_activate, |this| {
+                                    this.child(
+                                        div()
+                                            .id(SharedString::from(format!("memory-use-{name}")))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(accent_soft()))
+                                            .text_xs()
+                                            .text_color(rgb(accent()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(surface_hi())))
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.activate_memory_provider(&use_name, cx)
+                                                },
+                                            ))
+                                            .child("Use"),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("memory-config-{name}")))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(surface()))
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .cursor_pointer()
+                                        .hover(|this| {
+                                            this.bg(rgb(surface_hi())).text_color(rgb(text()))
+                                        })
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.configure_memory(&config_name, cx)
+                                        }))
+                                        .child("Configure"),
+                                ),
+                        ),
                 );
             }
             if self.memory.providers.is_empty() {
@@ -1280,12 +1628,22 @@ impl HermesApp {
     }
 
     fn mcp_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.mcp.form.is_some() {
+            return self.mcp_form_body(cx);
+        }
+        if self.mcp.install.is_some() {
+            return self.mcp_install_body(cx);
+        }
+        if self.mcp.tab == mcp::Tab::Catalog {
+            return self.mcp_catalog_body(cx);
+        }
         let rows = mcp::filtered(&self.mcp.rows, &self.mcp.query);
         let shown = rows.len();
         let focus = self.mcp.focus;
         let enabled = mcp::enabled_count(&self.mcp.rows);
         let total = self.mcp.rows.len();
         let testing = self.mcp.testing.clone();
+        let confirm_delete = self.mcp.confirm_delete.clone();
 
         let mut list = div()
             .id("mcp-list")
@@ -1307,8 +1665,11 @@ impl HermesApp {
         for server in rows {
             let toggle_name = server.name.clone();
             let test_name = server.name.clone();
+            let edit_name = server.name.clone();
+            let delete_name = server.name.clone();
             let is_enabled = server.enabled;
             let is_testing = testing.as_deref() == Some(server.name.as_str());
+            let is_deleting = confirm_delete.as_deref() == Some(server.name.as_str());
             list = list.child(
                 div()
                     .id(SharedString::from(format!("mcp-{}", server.name)))
@@ -1445,6 +1806,56 @@ impl HermesApp {
                                                 },
                                             ))
                                             .child(if is_enabled { "On" } else { "Off" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "mcp-edit-{}",
+                                                server.name
+                                            )))
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(surface()))
+                                            .text_xs()
+                                            .text_color(rgb(text_muted()))
+                                            .cursor_pointer()
+                                            .hover(|this| {
+                                                this.bg(rgb(surface_hi())).text_color(rgb(text()))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.edit_mcp(&edit_name, cx)
+                                                },
+                                            ))
+                                            .child("Edit"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "mcp-delete-{}",
+                                                server.name
+                                            )))
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(surface()))
+                                            .text_xs()
+                                            .text_color(rgb(if is_deleting {
+                                                accent()
+                                            } else {
+                                                text_muted()
+                                            }))
+                                            .cursor_pointer()
+                                            .hover(|this| {
+                                                this.bg(rgb(surface_hi())).text_color(rgb(text()))
+                                            })
+                                            .on_click(cx.listener(
+                                                move |this, _event, _window, cx| {
+                                                    this.delete_mcp(&delete_name, cx)
+                                                },
+                                            ))
+                                            .child(if is_deleting { "Confirm" } else { "Delete" }),
                                     ),
                             ),
                     )
@@ -1464,6 +1875,7 @@ impl HermesApp {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .child(self.mcp_tabs(cx))
             .child(
                 div()
                     .px_5()
@@ -6208,6 +6620,894 @@ impl HermesApp {
                             ),
                     ),
             )
+    }
+}
+
+impl HermesApp {
+    fn memory_form_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(form) = self.memory.form.clone() else {
+            return div().into_any_element();
+        };
+        let visible = form.visible_indices();
+        let mut body = div()
+            .id("memory-form")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(SharedString::from(format!("Configure {}", form.label))),
+                            )
+                            .when(!form.docs_url.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_dim()))
+                                        .child(SharedString::from(form.docs_url.clone())),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("Tab moves · Space toggles · Enter saves · Esc cancels"),
+                    ),
+            );
+        for index in visible {
+            let field = form.fields[index].clone();
+            let focused = form.focus == Some(index);
+            let mut input = div()
+                .id(SharedString::from(format!("memory-field-{}", field.key)))
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(bg()))
+                .border_1()
+                .text_xs()
+                .cursor_pointer()
+                .when(focused, |this| this.border_color(rgb(accent())))
+                .when(!focused, |this| this.border_color(rgb(border())))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if let Some(form) = this.memory.form.as_mut() {
+                        form.focus_field(index);
+                        if !form
+                            .fields
+                            .get(index)
+                            .is_some_and(|field| field.kind.is_text())
+                        {
+                            form.cycle_focused();
+                        }
+                    }
+                    cx.notify();
+                }));
+            if field.kind.is_text() {
+                let display = if field.text.is_empty()
+                    && field.kind == memory::Kind::Secret
+                    && field.is_set
+                {
+                    field.display()
+                } else if field.text.is_empty() {
+                    field.placeholder.clone()
+                } else {
+                    field.text.clone()
+                };
+                input = input.child(
+                    div()
+                        .text_color(rgb(if field.text.is_empty() {
+                            text_dim()
+                        } else {
+                            text()
+                        }))
+                        .child(SharedString::from(display)),
+                );
+            } else {
+                input = input
+                    .justify_between()
+                    .child(SharedString::from(field.display()))
+                    .child("click to change");
+            }
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_xs().text_color(rgb(text_dim())).child(
+                            SharedString::from(format!(
+                                "{}{}",
+                                field.label,
+                                if field.required { " *" } else { "" }
+                            )),
+                        ))
+                        .when(field.kind == memory::Kind::Secret && field.is_set, |this| {
+                            this.child(div().text_xs().text_color(rgb(accent())).child("set"))
+                        }),
+                )
+                .child(input);
+            if !field.description.is_empty() {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(text_dim()))
+                        .child(SharedString::from(field.description.clone())),
+                );
+            }
+            if let (Some(minimum), Some(maximum)) = (field.minimum, field.maximum) {
+                let range = match field.step {
+                    Some(step) => format!("range {minimum}–{maximum} · step {step}"),
+                    None => format!("range {minimum}–{maximum}"),
+                };
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(text_dim()))
+                        .child(SharedString::from(range)),
+                );
+            }
+            body = body.child(row);
+        }
+        body = body
+            .when_some(form.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(surface_hi()))
+                        .text_xs()
+                        .text_color(rgb(accent()))
+                        .child(SharedString::from(error)),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("memory-save")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(accent_hi())))
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.save_memory_config(cx)
+                                }),
+                            )
+                            .child("Save"),
+                    )
+                    .child(
+                        div()
+                            .id("memory-cancel")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.memory.form = None;
+                                this.memory.status = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(border()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("MEMORY PROVIDER"),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    fn mcp_tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let tab = self.mcp.tab;
+        let servers = div()
+            .id("mcp-tab-servers")
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .when(tab == mcp::Tab::Servers, |this| {
+                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
+            })
+            .when(tab != mcp::Tab::Servers, |this| {
+                this.text_color(rgb(text_muted()))
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+            })
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                this.mcp.tab = mcp::Tab::Servers;
+                this.mcp.form = None;
+                this.mcp.install = None;
+                cx.notify();
+            }))
+            .child(SharedString::from(format!(
+                "Servers · {}",
+                self.mcp.rows.len()
+            )));
+        let catalog = div()
+            .id("mcp-tab-catalog")
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .when(tab == mcp::Tab::Catalog, |this| {
+                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
+            })
+            .when(tab != mcp::Tab::Catalog, |this| {
+                this.text_color(rgb(text_muted()))
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+            })
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                this.mcp.tab = mcp::Tab::Catalog;
+                this.mcp.form = None;
+                this.mcp.install = None;
+                this.load_mcp_catalog(cx);
+            }))
+            .child("Catalog");
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_5()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(border()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(servers)
+                    .child(catalog),
+            )
+            .child(
+                div()
+                    .id("mcp-new")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(accent()))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(bg()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(accent_hi())))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.begin_mcp_create(cx)))
+                    .child("＋ Add server"),
+            )
+    }
+
+    fn mcp_input(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+        field: mcp::Field,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut input = div()
+            .id(SharedString::from(format!("mcp-field-{field:?}")))
+            .flex()
+            .items_center()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(bg()))
+            .border_1()
+            .text_xs()
+            .cursor_pointer()
+            .when(focused, |this| this.border_color(rgb(accent())))
+            .when(!focused, |this| this.border_color(rgb(border())))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if let Some(form) = this.mcp.form.as_mut() {
+                    form.focus = field;
+                }
+                cx.notify();
+            }));
+        if value.is_empty() {
+            input = input.child(
+                div()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(placeholder.to_string())),
+            );
+        } else {
+            input = input.child(
+                div()
+                    .text_color(rgb(text()))
+                    .child(SharedString::from(value.to_string())),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(input)
+    }
+
+    fn mcp_form_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(form) = self.mcp.form.clone() else {
+            return div().into_any_element();
+        };
+        let is_edit = form.is_edit();
+        let body = div()
+            .id("mcp-form")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(if is_edit {
+                                "Edit MCP server"
+                            } else {
+                                "Add MCP server"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("Tab moves · Enter saves · Esc cancels"),
+                    ),
+            )
+            .child(self.mcp_input(
+                "Name",
+                &form.name,
+                "server-name",
+                form.focus == mcp::Field::Name,
+                mcp::Field::Name,
+                cx,
+            ))
+            .child(self.mcp_input(
+                "URL (HTTP/SSE)",
+                &form.url,
+                "https://host/mcp",
+                form.focus == mcp::Field::Url,
+                mcp::Field::Url,
+                cx,
+            ))
+            .child(self.mcp_input(
+                "Command (stdio)",
+                &form.command,
+                "uvx",
+                form.focus == mcp::Field::Command,
+                mcp::Field::Command,
+                cx,
+            ))
+            .child(self.mcp_input(
+                "Arguments",
+                &form.args,
+                "package==1 --flag",
+                form.focus == mcp::Field::Args,
+                mcp::Field::Args,
+                cx,
+            ))
+            .child(self.mcp_input(
+                "Environment",
+                &form.env,
+                "KEY=VALUE; OTHER=VALUE",
+                form.focus == mcp::Field::Env,
+                mcp::Field::Env,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("HTTP authentication"),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-auth")
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(bg()))
+                            .border_1()
+                            .when(form.focus == mcp::Field::Auth, |this| {
+                                this.border_color(rgb(accent()))
+                            })
+                            .when(form.focus != mcp::Field::Auth, |this| {
+                                this.border_color(rgb(border()))
+                            })
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                if let Some(form) = this.mcp.form.as_mut() {
+                                    form.focus = mcp::Field::Auth;
+                                    form.cycle_auth();
+                                }
+                                cx.notify();
+                            }))
+                            .child(SharedString::from(match form.auth.as_str() {
+                                "header" => "header · bearer token in the profile .env",
+                                "oauth" => "oauth · authorize from the host",
+                                _ => "none",
+                            }))
+                            .child("click to cycle"),
+                    ),
+            )
+            .when(form.auth == "header", |this| {
+                this.child(self.mcp_input(
+                    if is_edit {
+                        "Bearer token (blank keeps existing)"
+                    } else {
+                        "Bearer token"
+                    },
+                    &form.token,
+                    "token",
+                    form.focus == mcp::Field::Token,
+                    mcp::Field::Token,
+                    cx,
+                ))
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child("HTTP uses URL; stdio uses command, args and env. Arguments are space-separated; env entries are KEY=VALUE separated by semicolons."),
+            )
+            .when_some(form.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(surface_hi()))
+                        .text_xs()
+                        .text_color(rgb(accent()))
+                        .child(SharedString::from(error)),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("mcp-save")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(accent_hi())))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.save_mcp_form(cx)
+                            }))
+                            .child(if is_edit { "Save" } else { "Add" }),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-cancel")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.mcp.form = None;
+                                this.mcp.status = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.mcp_tabs(cx))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn mcp_catalog_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut list = div()
+            .id("mcp-catalog")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+        if self.mcp.catalog_loading {
+            list = list.child(self.note("Loading the MCP catalog…"));
+        } else if let Some(error) = self.mcp.catalog_error.as_deref() {
+            list = list.child(self.note(error));
+        } else if let Some(catalog) = &self.mcp.catalog {
+            if catalog.entries.is_empty() {
+                list = list.child(self.note("The host has no catalog entries."));
+            }
+            for entry in &catalog.entries {
+                let install = entry.clone();
+                let requirements = entry
+                    .required_env
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let endpoint = entry
+                    .url
+                    .clone()
+                    .or_else(|| entry.command.clone())
+                    .unwrap_or_else(|| "(no endpoint)".into());
+                let mut row =
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(bg_elev()))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(rgb(text()))
+                                                .child(SharedString::from(entry.name.clone())),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_full()
+                                                .bg(rgb(surface()))
+                                                .text_xs()
+                                                .text_color(rgb(text_dim()))
+                                                .child(SharedString::from(format!(
+                                                    "{} · auth {}",
+                                                    entry.transport, entry.auth_type
+                                                ))),
+                                        )
+                                        .when(entry.needs_install, |this| {
+                                            this.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(rgb(accent_soft()))
+                                                    .text_xs()
+                                                    .text_color(rgb(accent()))
+                                                    .child("clone + build"),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(SharedString::from(entry.description.clone())),
+                                )
+                                .child(div().text_xs().text_color(rgb(text_dim())).child(
+                                    SharedString::from(crate::transcript::clip(&endpoint, 120)),
+                                ))
+                                .when(!requirements.is_empty(), |this| {
+                                    this.child(div().text_xs().text_color(rgb(text_dim())).child(
+                                        SharedString::from(format!("requires: {requirements}")),
+                                    ))
+                                })
+                                .when(!entry.post_install.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_dim()))
+                                            .child(SharedString::from(entry.post_install.clone())),
+                                    )
+                                }),
+                        );
+                if entry.installed {
+                    row = row.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(if entry.enabled {
+                                accent()
+                            } else {
+                                text_muted()
+                            }))
+                            .child(if entry.enabled {
+                                "Installed · On"
+                            } else {
+                                "Installed · Off"
+                            }),
+                    );
+                } else {
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("mcp-install-{}", entry.name)))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(accent_hi())))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.install_catalog(&install, cx)
+                            }))
+                            .child(if entry.needs_install {
+                                "Install"
+                            } else {
+                                "Add"
+                            }),
+                    );
+                }
+                list = list.child(row);
+            }
+            if !catalog.diagnostics.is_empty() {
+                list = list.child(self.section_label("CATALOG DIAGNOSTICS"));
+                for diagnostic in &catalog.diagnostics {
+                    list = list.child(self.note(&format!(
+                        "{}: {} — {}",
+                        diagnostic.name, diagnostic.kind, diagnostic.message
+                    )));
+                }
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.mcp_tabs(cx))
+            .when_some(self.mcp.status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_5()
+                        .py_2()
+                        .bg(rgb(accent_soft()))
+                        .text_xs()
+                        .text_color(rgb(accent()))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(list)
+            .into_any_element()
+    }
+
+    fn mcp_install_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(install) = self.mcp.install.clone() else {
+            return div().into_any_element();
+        };
+        let mut body = div()
+            .id("mcp-install-form")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(SharedString::from(format!("Install {}", install.name))),
+            )
+            .child(div().text_xs().text_color(rgb(text_dim())).child(
+                "These values are written to the profile .env; they never enter config.yaml.",
+            ));
+        for (index, field) in install.env.iter().enumerate() {
+            let mut input = div()
+                .id(SharedString::from(format!("mcp-install-env-{index}")))
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(bg()))
+                .border_1()
+                .text_xs()
+                .cursor_pointer()
+                .when(install.focus == index, |this| {
+                    this.border_color(rgb(accent()))
+                })
+                .when(install.focus != index, |this| {
+                    this.border_color(rgb(border()))
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if let Some(install) = this.mcp.install.as_mut() {
+                        install.focus = index;
+                    }
+                    cx.notify();
+                }));
+            if field.value.is_empty() {
+                input = input.child(
+                    div()
+                        .text_color(rgb(text_dim()))
+                        .child(SharedString::from(field.prompt.clone())),
+                );
+            } else {
+                input = input.child(
+                    div()
+                        .text_color(rgb(text()))
+                        .child(SharedString::from(field.value.clone())),
+                );
+            }
+            body =
+                body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_xs().text_color(rgb(text_dim())).child(
+                            SharedString::from(format!(
+                                "{}{}",
+                                field.key,
+                                if field.required { " (required)" } else { "" }
+                            )),
+                        ))
+                        .child(input),
+                );
+        }
+        body = body
+            .when_some(install.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(surface_hi()))
+                        .text_xs()
+                        .text_color(rgb(accent()))
+                        .child(SharedString::from(error)),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("mcp-install-save")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.submit_catalog_install(cx)
+                            }))
+                            .child("Install"),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-install-cancel")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.mcp.install = None;
+                                this.mcp.status = None;
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.mcp_tabs(cx))
+            .child(body)
+            .into_any_element()
     }
 }
 

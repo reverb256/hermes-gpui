@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpServer,
-    MemoryStatus, ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient,
-    SessionSummary, Skill, SkillHubPreview, SkillHubResult, SkillHubScan, UsageAnalytics, gateway,
+    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpCatalog,
+    McpServer, MemoryStatus, ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail,
+    RestClient, SessionSummary, Skill, SkillHubPreview, SkillHubResult, SkillHubScan,
+    UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -215,6 +216,23 @@ pub enum BackendEvent {
         name: String,
         result: serde_json::Value,
     },
+    McpCatalog(McpCatalog),
+    McpCatalogFailed(String),
+    MemoryConfig(hermes_api::MemoryProviderConfig),
+    MemoryConfigFailed(String),
+    MemoryConfigSaved(String),
+    MemoryReset(Vec<String>),
+    McpCreated(String),
+    McpDeleted(String),
+    McpEdited(String),
+    McpConfig {
+        name: String,
+        config: serde_json::Value,
+    },
+    McpInstalled {
+        name: String,
+        background: bool,
+    },
     Memory(MemoryStatus),
     MemoryFailed(String),
     MemoryProviderSet(String),
@@ -329,9 +347,39 @@ pub enum Command {
     TestMcp {
         name: String,
     },
+    CreateMcp {
+        body: Value,
+    },
+    LoadMcpConfig {
+        name: String,
+    },
+    SaveMcp {
+        old_name: String,
+        name: String,
+        config: Value,
+    },
+    DeleteMcp {
+        name: String,
+    },
+    LoadMcpCatalog,
+    InstallMcp {
+        name: String,
+        env: Value,
+        enable: bool,
+    },
     LoadMemory,
     SetMemoryProvider {
         provider: String,
+    },
+    LoadMemoryConfig {
+        provider: String,
+    },
+    UpdateMemoryConfig {
+        provider: String,
+        values: Value,
+    },
+    ResetMemory {
+        target: String,
     },
 }
 
@@ -652,6 +700,65 @@ async fn worker(
                                 }
                             }
                         }
+                        Command::LoadMemoryConfig { provider } => {
+                            match rest.memory_config(&provider).await {
+                                Ok(config) => {
+                                    let _ = events.send(BackendEvent::MemoryConfig(config));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::MemoryConfigFailed(format!(
+                                        "{provider}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::UpdateMemoryConfig { provider, values } => {
+                            match rest.set_memory_config(&provider, values).await {
+                                Ok(_) => {
+                                    let _ = events
+                                        .send(BackendEvent::MemoryConfigSaved(provider.clone()));
+                                    if let Ok(status) = rest.memory_status().await {
+                                        let _ = events.send(BackendEvent::Memory(status));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::MemoryConfigFailed(format!(
+                                        "{provider}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::ResetMemory { target } => {
+                            match rest.reset_memory(&target).await {
+                                Ok(result) => {
+                                    let deleted = result
+                                        .get("deleted")
+                                        .and_then(Value::as_array)
+                                        .map(|rows| {
+                                            rows.iter()
+                                                .filter_map(Value::as_str)
+                                                .map(str::to_string)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+                                    let _ = events.send(BackendEvent::MemoryReset(deleted));
+                                    if let Ok(status) = rest.memory_status().await {
+                                        let _ = events.send(BackendEvent::Memory(status));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::MemoryFailed(format!(
+                                        "reset {target}: {message}"
+                                    )));
+                                }
+                            }
+                        }
                         Command::LoadMcp => match rest.mcp_servers().await {
                             Ok(servers) => {
                                 let _ = events.send(BackendEvent::Mcp(servers));
@@ -659,6 +766,144 @@ async fn worker(
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
                                 let _ = events.send(BackendEvent::McpFailed(message));
+                            }
+                        },
+                        Command::CreateMcp { body } => {
+                            let name = body
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            match rest.add_mcp_server(body).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::McpCreated(name));
+                                    if let Ok(servers) = rest.mcp_servers().await {
+                                        let _ = events.send(BackendEvent::Mcp(servers));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                        "create {name}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::LoadMcpConfig { name } => {
+                            match rest.raw_config().await {
+                                Ok(config) => match RestClient::mcp_config_entry(&config, &name) {
+                                    Some(entry) => {
+                                        let _ = events
+                                            .send(BackendEvent::McpConfig { name, config: entry });
+                                    }
+                                    None => {
+                                        let _ = events.send(BackendEvent::McpFailed(format!(
+                                            "{name}: server not found in config"
+                                        )));
+                                    }
+                                },
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                        "read {name}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::SaveMcp {
+                            old_name,
+                            name,
+                            config,
+                        } => {
+                            match rest.raw_config().await {
+                                Ok(raw) => {
+                                    let root = raw.get("config").unwrap_or(&raw);
+                                    let mut servers = root
+                                        .get("mcp_servers")
+                                        .and_then(Value::as_object)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if old_name != name && servers.contains_key(&name) {
+                                        let _ = events.send(BackendEvent::McpFailed(format!(
+                                            "{name}: a server with that name already exists"
+                                        )));
+                                        continue;
+                                    }
+                                    servers.remove(&old_name);
+                                    servers.insert(name.clone(), config);
+                                    match rest.replace_mcp_servers(servers).await {
+                                        Ok(_) => {
+                                            let _ = events.send(BackendEvent::McpEdited(name));
+                                            if let Ok(rows) = rest.mcp_servers().await {
+                                                let _ = events.send(BackendEvent::Mcp(rows));
+                                            }
+                                        }
+                                        Err(err) => {
+                                            let message =
+                                                err.detail().unwrap_or_else(|| err.to_string());
+                                            let _ = events.send(BackendEvent::McpFailed(format!(
+                                                "save {name}: {message}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                        "read config: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::DeleteMcp { name } => match rest.delete_mcp_server(&name).await {
+                            Ok(_) => {
+                                let _ = events.send(BackendEvent::McpDeleted(name));
+                                if let Ok(servers) = rest.mcp_servers().await {
+                                    let _ = events.send(BackendEvent::Mcp(servers));
+                                }
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::McpFailed(format!(
+                                    "delete {name}: {message}"
+                                )));
+                            }
+                        },
+                        Command::LoadMcpCatalog => match rest.mcp_catalog().await {
+                            Ok(catalog) => {
+                                let _ = events.send(BackendEvent::McpCatalog(catalog));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::McpCatalogFailed(message));
+                            }
+                        },
+                        Command::InstallMcp { name, env, enable } => {
+                            match rest.install_mcp_catalog(&name, env, enable).await {
+                                Ok(result) => {
+                                    let background = result
+                                        .get("background")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false);
+                                    let _ = events
+                                        .send(BackendEvent::McpInstalled { name, background });
+                                    if let Ok(servers) = rest.mcp_servers().await {
+                                        let _ = events.send(BackendEvent::Mcp(servers));
+                                    }
+                                    if let Ok(catalog) = rest.mcp_catalog().await {
+                                        let _ = events.send(BackendEvent::McpCatalog(catalog));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                        "install {name}: {message}"
+                                    )));
+                                }
                             }
                         },
                         Command::SetMcp { name, enabled } => {

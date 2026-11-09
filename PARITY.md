@@ -21,10 +21,12 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
 - Skills page: searchable installed catalog with category/usage metadata and
   On/Off toggles through `PUT /api/skills/toggle`.
 - MCP page: host-level server list with transport/source/endpoint/auth, a
-  host-side reachability test, and On/Off per server.
+  host-side reachability test, On/Off per server, validated add/edit/delete
+  through the config API, and catalog installs with required env prompts.
 - Memory page over `GET /api/memory`: active provider, discovered backends with
-  their availability/configuration status, built-in file sizes, and activation
-  for providers the host marks ready (`PUT /api/memory/provider`).
+  their availability/configuration status, built-in file sizes, activation for
+  ready providers (`PUT /api/memory/provider`), generic config forms from each
+  provider's declared schema, and a confirmed reset (`POST /api/memory/reset`).
 - Skills hub: search across the host's configured sources, read the actual
   SKILL.md and file manifest, run the installer's security scan, and install by
   identifier only after a visible confirmation.
@@ -43,12 +45,12 @@ Shipped: recency list, search, delete, transcript hydration, inline rename, and
 pin/archive through `PATCH /api/sessions/{id}`. Still needed: resume the gateway
 runtime for an old id and a project/workspace filter.
 
-### 2. MCP toolsets — **Partly shipped**
+### 2. MCP toolsets — **Shipped** (OAuth hand-off remains)
 
 Shipped: the host-level list (transport, source, endpoint, auth), host-side
-reachability test and per-server enabled toggle. Still needed: add/edit/
-delete servers through a validated config buffer, OAuth hand-off, and the
-catalog installer.
+reachability test, per-server enabled toggle, validated add/edit/delete through
+`POST/PUT/DELETE /api/mcp/servers`, and the catalog installer with required env
+prompts. Still needed: the browser OAuth hand-off for `auth: oauth` servers.
 
 ### 3. Skills hub — **Shipped**
 
@@ -57,12 +59,13 @@ back a Browse-hub tab: server-side search, the full SKILL.md and manifest,
 the same security verdict the installer uses, and a confirmed install by
 identifier. Uninstall/update remain CLI work.
 
-### 4. Memory — **Partly shipped**
+### 4. Memory — **Shipped**
 
 Shipped: the active provider, the discovery list with availability and
-configuration status, built-in file sizes, and activation for ready providers.
-Still needed: generic config forms from each provider's declared schema and a
-confirmed reset. Reset is destructive, so it stays out until that flow exists.
+configuration status, built-in file sizes, activation for ready providers,
+generic config forms from each provider's declared schema (including
+conditional and typed fields) and a confirmed reset for MEMORY.md, USER.md or
+both.
 
 ### 5. MoA presets — **Later**
 

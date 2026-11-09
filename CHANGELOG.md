@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format follows
   stack's `voice-models` service and plays it through PipeWire/Pulse.
 - Session controls: pin/unpin, archive and inline rename through the host's
   `PATCH /api/sessions/{id}`, with the list refreshed from the host.
+- MCP management: validated add/edit/delete through the host's config API,
+  preserving unknown keys on edit, plus a catalog browser that prompts for
+  required environment variables and reports background clone/build jobs.
+- Memory configuration: schema-driven forms for every declared provider,
+  including typed/conditional fields and write-only secrets, with a confirmed
+  reset for MEMORY.md, USER.md or both.
 - Memory page: active provider, discovery status and built-in file sizes from
   `GET /api/memory`, plus activation for providers the host marks ready.
 - Omarchy theme sync: the runtime palette follows the active theme's

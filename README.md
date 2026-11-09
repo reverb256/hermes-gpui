@@ -169,8 +169,18 @@ sending is disabled until **New chat**. `Ctrl+Shift+S` or the header's
 
 **MCP** lists configured servers with transport, source, endpoint and auth,
 a host-side **Test** ping (`POST /api/mcp/servers/{name}/test`) and an On/Off
-toggle (`PUT /api/mcp/servers/{name}/enabled`). Server editing still belongs
-in the config, not the desktop.
+toggle (`PUT /api/mcp/servers/{name}/enabled`). **Add server** opens a validated
+HTTP/stdio form; **Edit** reads the raw entry and saves through the host's
+whole-map `PUT /api/mcp/servers`, preserving tool selection and unknown keys.
+**Delete** requires a second click. The **Catalog** tab installs curated
+entries, prompts for required env vars, and reports clone/build jobs.
+
+**Memory** lists discovered providers, opens a schema-driven **Configure** form
+for every declared provider (text, secret, boolean, number, select and JSON
+fields, including conditional fields), and saves through
+`PUT /api/memory/providers/{name}/config`. Built-in memory files have separate
+reset buttons; each requires a second confirming click before
+`POST /api/memory/reset`.
 
 **Skills** lists the host's installed skills with search, category pills,
 usage counts and a live On/Off toggle (`PUT /api/skills/toggle`); the footer
@@ -242,8 +252,9 @@ and a pill composer, prompt submission, interrupt, approval cards
 skills, file and image attachments, cron routines read-out, tray icon with
 show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
 servers and toolsets) and host secrets, session history, installed-skills
-toggles, the host-level MCP view, a memory-provider page over `/api/memory`
-with ready-provider activation, a scan-gated skills-hub browser with confirmed
+toggles, MCP add/edit/delete plus the catalog installer, a memory-provider page
+with generic schema-driven configuration and confirmed resets, a scan-gated
+skills-hub browser with confirmed
 installs, TTS playback of the last reply through `voice-models`, and an Omarchy
 theme that follows the live desktop palette.
 Dictation remains Superwhisper's job (`Alt+Space`), since the client does not

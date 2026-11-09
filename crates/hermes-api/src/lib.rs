@@ -199,6 +199,77 @@ pub struct McpServer {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// `GET /api/mcp/catalog` — the curated optional-MCP manifests plus loader
+/// diagnostics. Entries are already annotated with whether this profile has
+/// installed and enabled them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpCatalog {
+    #[serde(default)]
+    pub entries: Vec<McpCatalogEntry>,
+    #[serde(default)]
+    pub diagnostics: Vec<McpCatalogDiagnostic>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpCatalogEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub auth_type: String,
+    #[serde(default)]
+    pub required_env: Vec<McpCatalogEnv>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub install_url: Option<String>,
+    #[serde(default)]
+    pub install_ref: Option<String>,
+    #[serde(default)]
+    pub bootstrap: Vec<String>,
+    #[serde(default)]
+    pub default_enabled: Option<Vec<String>>,
+    #[serde(default)]
+    pub post_install: String,
+    #[serde(default)]
+    pub needs_install: bool,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpCatalogEnv {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpCatalogDiagnostic {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub message: String,
+}
+
 /// `GET /api/memory` — the active provider, discovered providers and the
 /// built-in file sizes. Provider detail is kept raw beyond the stable fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -234,6 +305,67 @@ pub struct MemoryFiles {
     pub memory: u64,
     #[serde(default)]
     pub user: u64,
+}
+
+/// `GET /api/memory/providers/{name}/config` — the provider's declared config
+/// surface. Secrets are write-only: `value` is empty and `is_set` says whether
+/// one already exists. `kind` may be `text`, `secret`, `boolean`, `integer`,
+/// `number`, `select` or `json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryProviderConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub docs_url: String,
+    #[serde(default)]
+    pub fields: Vec<MemoryProviderField>,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryProviderField {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub placeholder: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub value: Value,
+    #[serde(default)]
+    pub is_set: bool,
+    #[serde(default)]
+    pub options: Vec<MemoryFieldOption>,
+    #[serde(default)]
+    pub url: String,
+    /// Conditional visibility: every key/value pair must match the form.
+    #[serde(default)]
+    pub when: Option<Value>,
+    #[serde(default)]
+    pub minimum: Option<f64>,
+    #[serde(default)]
+    pub maximum: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryFieldOption {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// One row of `GET /api/env`. Values arrive redacted; this client never asks
@@ -787,6 +919,47 @@ impl RestClient {
         self.get("/api/memory").await
     }
 
+    /// `GET /api/memory/providers/{name}/config` — declared fields and values.
+    pub async fn memory_config(&self, name: &str) -> Result<MemoryProviderConfig, ApiError> {
+        self.get(&format!(
+            "/api/memory/providers/{}/config",
+            percent_encode(name)
+        ))
+        .await
+    }
+
+    /// `PUT /api/memory/providers/{name}/config` — saves fields and activates
+    /// the provider once the host considers it ready.
+    pub async fn set_memory_config(&self, name: &str, values: Value) -> Result<Value, ApiError> {
+        let path = format!("/api/memory/providers/{}/config", percent_encode(name));
+        let response = self
+            .authed(reqwest::Method::PUT, &path)
+            .json(&serde_json::json!({ "values": values }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// `POST /api/memory/reset` — deletes the built-in memory files. `target`
+    /// is `all`, `memory` or `user`.
+    pub async fn reset_memory(&self, target: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/memory/reset";
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&serde_json::json!({ "target": target }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
     /// `PUT /api/memory/provider` — the host rejects providers that are not ready.
     pub async fn set_memory_provider(&self, provider: &str) -> Result<Value, ApiError> {
         let path = "/api/memory/provider";
@@ -851,6 +1024,96 @@ impl RestClient {
     /// `GET /api/model/options` — authenticated providers and their models.
     pub async fn model_options(&self) -> Result<ModelOptions, ApiError> {
         self.get("/api/model/options?explicit_only=1").await
+    }
+
+    /// `POST /api/mcp/servers` — add one server through the host's validated
+    /// create path. The body is kept raw because `MCPServerCreate` grows
+    /// transport-specific fields over time.
+    pub async fn add_mcp_server(&self, body: Value) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/mcp/servers";
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `PUT /api/mcp/servers` — replace the whole map. This is the only host
+    /// route that can remove nested keys, so edits go through it.
+    pub async fn replace_mcp_servers(
+        &self,
+        servers: serde_json::Map<String, Value>,
+    ) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/mcp/servers";
+        let response = self
+            .authed(reqwest::Method::PUT, PATH)
+            .json(&serde_json::json!({ "servers": servers }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `DELETE /api/mcp/servers/{name}`.
+    pub async fn delete_mcp_server(&self, name: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/mcp/servers/{}", percent_encode(name));
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// `GET /api/mcp/catalog` — curated entries with install/enabled state.
+    pub async fn mcp_catalog(&self) -> Result<McpCatalog, ApiError> {
+        self.get("/api/mcp/catalog").await
+    }
+
+    /// `POST /api/mcp/catalog/install` — write config and required env vars.
+    /// Git-bootstrap entries return `background: true` and finish host-side.
+    pub async fn install_mcp_catalog(
+        &self,
+        name: &str,
+        env: Value,
+        enable: bool,
+    ) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/mcp/catalog/install";
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&serde_json::json!({ "name": name, "env": env, "enable": enable }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `GET /api/config` — needed to inspect one `mcp_servers` entry before an
+    /// edit. The dashboard may wrap the map under `config`, so callers should
+    /// use [`Self::mcp_config_entry`].
+    pub async fn raw_config(&self) -> Result<Value, ApiError> {
+        self.get("/api/config").await
+    }
+
+    /// Read the full `mcp_servers` map from a raw config response, accepting
+    /// both the unwrapped dashboard shape and the older wrapped one.
+    pub fn mcp_config_entry(config: &Value, name: &str) -> Option<Value> {
+        let root = config.get("config").unwrap_or(config);
+        root.get("mcp_servers")?.get(name).cloned()
     }
 
     /// `PUT /api/mcp/servers/{name}/enabled`.
