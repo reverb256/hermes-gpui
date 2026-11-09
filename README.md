@@ -99,8 +99,9 @@ is never called, so the client can write a secret but cannot read one back.
 ## Settings
 
 `Ctrl+Shift+V` (Vault), `Ctrl+Shift+M` (Model), `Ctrl+Shift+A` (Assignments),
-`Ctrl+Shift+S` (Sessions) and `Ctrl+Shift+U` (Usage & Billing) open their
-surfaces; the settings sheet keeps its sections down the left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
+`Ctrl+Shift+K` (Skills), `Ctrl+Shift+S` (Sessions) and `Ctrl+Shift+U` (Usage &
+Billing) open their surfaces; the settings sheet keeps its sections down the
+left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
 Vault.
 
 **Vault** is the host's credential catalog, grouped into one tab per category the
@@ -132,6 +133,10 @@ Opening one hydrates the stored transcript from
 sending is disabled until **New chat**. `Ctrl+Shift+S` or the header's
 **Sessions** chip toggles the rail; Escape/Bots goes back.
 
+**Skills** lists the host's installed skills with search, category pills,
+usage counts and a live On/Off toggle (`PUT /api/skills/toggle`); the footer
+says changes apply to new turns rather than mid-answer.
+
 A Hermes-style footer strip runs under every pane (they all end on the same
 line): gateway health on the left, the current model and crate version on the
 right.
@@ -146,7 +151,7 @@ reports and links out instead of moving money.
 `HERMES_OPEN_INSPECTOR=1` opens the panel at launch,
 `HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab, and
 `HERMES_OPEN_SETTINGS=vault|model|assignments|usage` opens the settings sheet
-on that section; `HERMES_OPEN_SETTINGS=sessions` opens the session rail.
+on that section; `HERMES_OPEN_SETTINGS=sessions|skills` opens those rails.
 `HERMES_DEMO=1` seeds a short local transcript. Those are QA hooks for screenshot
 runs, which is how the panel, sheet and message styling are reviewed without
 input automation.

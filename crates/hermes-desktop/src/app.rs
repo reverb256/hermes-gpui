@@ -23,6 +23,7 @@ use crate::keys::{self, Action, Chord, Focus};
 use crate::models::{self, Models};
 use crate::sessions::{self, Sessions};
 use crate::settings::{Section, Settings};
+use crate::skills::{self, Skills};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming, clip};
 use crate::tray::{self, TrayStatus};
@@ -104,6 +105,7 @@ pub struct HermesApp {
     usage: Usage,
     models: Models,
     sessions: Sessions,
+    skills: Skills,
     /// Stored transcript on screen; sending is disabled until New chat.
     viewing_history: Option<String>,
     rail_search: bool,
@@ -147,6 +149,7 @@ impl HermesApp {
             vault: Vault::default(),
             models: Models::default(),
             sessions: Sessions::default(),
+            skills: Skills::default(),
             viewing_history: None,
             usage: Usage {
                 days: 30,
@@ -189,6 +192,7 @@ impl HermesApp {
                 "model" => app.open_models(cx),
                 "assignments" => app.load_assignments(cx),
                 "sessions" => app.open_sessions(cx),
+                "skills" => app.open_skills(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -326,6 +330,14 @@ impl HermesApp {
             BackendEvent::ModelsFailed(message) => self.models.failed(message),
             BackendEvent::ModelStatus(text) => self.models.status = Some(text),
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
+            BackendEvent::Skills(rows) => self.skills.loaded(rows),
+            BackendEvent::SkillsFailed(message) => self.skills.failed(message),
+            BackendEvent::SkillToggled { name, enabled } => {
+                self.skills.status = Some(format!(
+                    "{name} {}",
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
             BackendEvent::Sessions(rows, total) => self.sessions.loaded(rows, total),
             BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
             BackendEvent::SessionMessages { id, messages } => {
@@ -409,6 +421,7 @@ impl HermesApp {
             }
             if (self.settings.section == Section::Vault && self.route_vault_typing(event, cx))
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
+                || (self.settings.section == Section::Skills && self.route_skills_typing(event, cx))
             {
                 return;
             }
@@ -545,6 +558,7 @@ impl HermesApp {
             Action::ToggleModels => self.toggle_models(cx),
             Action::ToggleAssignments => self.toggle_assignments(cx),
             Action::ToggleSessions => self.toggle_sessions(cx),
+            Action::ToggleSkills => self.toggle_skills(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -810,6 +824,8 @@ impl HermesApp {
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings.hide();
         self.vault.hide();
+        self.skills.focus = false;
+        self.models.focus = false;
         cx.notify();
     }
 
@@ -941,6 +957,251 @@ impl HermesApp {
                         cx.notify();
                     })),
             )
+    }
+
+    fn open_skills(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Skills);
+        self.load_skills(cx);
+    }
+
+    fn load_skills(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Skills);
+        self.skills.loaded = false;
+        self.skills.error = None;
+        self.skills.status = None;
+        self.backend.send(Command::LoadSkills);
+        cx.notify();
+    }
+
+    fn toggle_skills(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Skills {
+            self.close_settings(cx);
+        } else {
+            self.open_skills(cx);
+        }
+    }
+
+    fn toggle_skill(&mut self, name: &str, enabled: bool, cx: &mut Context<Self>) {
+        self.skills.status = Some(format!(
+            "{} {}…",
+            name,
+            if enabled { "enabling" } else { "disabling" }
+        ));
+        self.backend.send(Command::SetSkill {
+            name: name.to_string(),
+            enabled,
+        });
+        cx.notify();
+    }
+
+    fn route_skills_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.skills.focus {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" | "enter" => self.skills.focus = false,
+            "backspace" => {
+                self.skills.query.pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.skills.query.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn skills_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = skills::filtered(&self.skills.rows, &self.skills.query);
+        let shown = rows.len();
+        let focus = self.skills.focus;
+        let enabled = skills::enabled_count(&self.skills.rows);
+        let total = self.skills.rows.len();
+
+        let mut list = div()
+            .id("skills-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if !self.skills.loaded {
+            list = list.child(self.note("Loading skills…"));
+        } else if let Some(error) = self.skills.error.as_deref() {
+            list = list.child(self.note(error));
+        } else if rows.is_empty() {
+            list = list.child(self.note("No skills match this search."));
+        }
+        for skill in rows {
+            let name = skill.name.clone();
+            let toggle_name = skill.name.clone();
+            let is_enabled = skill.enabled;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("skill-{}", skill.name)))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG_ELEV))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .when(is_enabled, |this| this.text_color(rgb(TEXT)))
+                                            .when(!is_enabled, |this| {
+                                                this.text_color(rgb(TEXT_MUTED))
+                                            })
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .when_some(skill.category.clone(), |this, category| {
+                                        this.child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_full()
+                                                .bg(rgb(SURFACE))
+                                                .text_xs()
+                                                .text_color(rgb(TEXT_DIM))
+                                                .child(SharedString::from(category)),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("skill-toggle-{}", skill.name)))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .when(is_enabled, |this| {
+                                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                    })
+                                    .when(!is_enabled, |this| {
+                                        this.bg(rgb(SURFACE)).text_color(rgb(TEXT_MUTED))
+                                    })
+                                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.toggle_skill(&toggle_name, !is_enabled, cx)
+                                    }))
+                                    .child(if is_enabled { "On" } else { "Off" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(SharedString::from(crate::transcript::clip(
+                                &skill.description,
+                                180,
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(skills::meta(skill))),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .id("skills-search")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(BG))
+                            .border_1()
+                            .when(focus, |this| this.border_color(rgb(ACCENT)))
+                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.skills.focus = true;
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .when(self.skills.query.is_empty(), |this| {
+                                this.child(div().text_color(rgb(TEXT_DIM)).child("Search skills"))
+                            })
+                            .when(!self.skills.query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(self.skills.query.clone())),
+                                )
+                            }),
+                    ),
+            )
+            .when_some(self.skills.status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_5()
+                        .py_2()
+                        .bg(rgb(ACCENT_SOFT))
+                        .text_xs()
+                        .text_color(rgb(ACCENT))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(list)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(format!("{enabled} of {total} enabled")))
+                    .child(SharedString::from(format!(
+                        "{shown} shown · changes apply to new turns"
+                    ))),
+            )
+            .into_any_element()
     }
 
     fn open_models(&mut self, cx: &mut Context<Self>) {
@@ -2002,6 +2263,7 @@ impl HermesApp {
             Section::Vault => self.vault_body(cx),
             Section::Model => self.models_body(cx),
             Section::Assignments => self.assignments_body(cx),
+            Section::Skills => self.skills_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -2053,6 +2315,7 @@ impl HermesApp {
                                     Section::Usage => this.open_usage(cx),
                                     Section::Model => this.open_models(cx),
                                     Section::Assignments => this.load_assignments(cx),
+                                    Section::Skills => this.open_skills(cx),
                                     Section::Vault => this.open_vault(cx),
                                 },
                             ))

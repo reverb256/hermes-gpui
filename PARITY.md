@@ -17,6 +17,8 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
 - Session history: newest-first list with message/tool counts and age, search,
   delete, and read-only transcript hydration from `/api/sessions/{id}/messages`
   (the rail swaps between bots and sessions; the gateway exposes no resume).
+- Skills page: searchable installed catalog with category/usage metadata and
+  On/Off toggles through `PUT /api/skills/toggle`.
 
 ## Gaps, in the order worth closing
 

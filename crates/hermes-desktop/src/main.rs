@@ -5,6 +5,7 @@ mod keys;
 mod models;
 mod sessions;
 mod settings;
+mod skills;
 mod theme;
 mod transcript;
 mod tray;

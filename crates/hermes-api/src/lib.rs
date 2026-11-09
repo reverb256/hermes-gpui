@@ -374,6 +374,23 @@ pub struct AuxiliaryModels {
     pub main: Option<AuxiliaryMain>,
 }
 
+/// One installed skill from `GET /api/skills`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Skill {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default)]
+    pub provenance: String,
+}
+
 /// One row of `GET /api/sessions`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -688,6 +705,26 @@ impl RestClient {
     /// `GET /api/model/options` — authenticated providers and their models.
     pub async fn model_options(&self) -> Result<ModelOptions, ApiError> {
         self.get("/api/model/options?explicit_only=1").await
+    }
+
+    /// `GET /api/skills` — every installed skill with its enabled state.
+    pub async fn skills(&self) -> Result<Vec<Skill>, ApiError> {
+        self.get("/api/skills").await
+    }
+
+    /// `PUT /api/skills/toggle` — enable or disable one skill.
+    pub async fn set_skill_enabled(&self, name: &str, enabled: bool) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/skills/toggle";
+        let response = self
+            .authed(reqwest::Method::PUT, PATH)
+            .json(&serde_json::json!({ "name": name, "enabled": enabled }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
     }
 
     /// `GET /api/sessions` — newest conversations, excluding archived rows.

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use hermes_api::{
     ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo,
-    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary, UsageAnalytics,
-    gateway,
+    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary, Skill,
+    UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -187,6 +187,12 @@ pub enum BackendEvent {
         messages: Vec<serde_json::Value>,
     },
     SessionDeleted(String),
+    Skills(Vec<Skill>),
+    SkillsFailed(String),
+    SkillToggled {
+        name: String,
+        enabled: bool,
+    },
     Avatar {
         profile: String,
         mime: String,
@@ -268,6 +274,11 @@ pub enum Command {
     },
     DeleteSession {
         id: String,
+    },
+    LoadSkills,
+    SetSkill {
+        name: String,
+        enabled: bool,
     },
 }
 
@@ -508,6 +519,35 @@ async fn worker(
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::LoadSkills => match rest.skills().await {
+                            Ok(skills) => {
+                                let _ = events.send(BackendEvent::Skills(skills));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::SkillsFailed(message));
+                            }
+                        },
+                        Command::SetSkill { name, enabled } => {
+                            match rest.set_skill_enabled(&name, enabled).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::SkillToggled {
+                                        name: name.clone(),
+                                        enabled,
+                                    });
+                                    if let Ok(skills) = rest.skills().await {
+                                        let _ = events.send(BackendEvent::Skills(skills));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::SkillsFailed(format!(
+                                        "{name}: {message}"
                                     )));
                                 }
                             }
