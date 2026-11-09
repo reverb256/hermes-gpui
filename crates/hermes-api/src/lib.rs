@@ -391,6 +391,95 @@ pub struct Skill {
     pub provenance: String,
 }
 
+/// One hit from `GET /api/skills/hub/search`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillHubResult {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub trust_level: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// `GET /api/skills/hub/search`; the desktop only needs the result rows.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillHubSearch {
+    #[serde(default)]
+    pub results: Vec<SkillHubResult>,
+}
+
+/// `GET /api/skills/hub/preview` — the actual SKILL.md, before installing.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillHubPreview {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub trust_level: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub skill_md: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// One finding from the install-time security scan.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillHubFinding {
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: Option<u64>,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// `GET /api/skills/hub/scan` — the verdict the installer itself uses.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillHubScan {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub trust_level: String,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub policy: String,
+    #[serde(default)]
+    pub policy_reason: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<SkillHubFinding>,
+    #[serde(default)]
+    pub severity_counts: std::collections::HashMap<String, u64>,
+}
+
 /// One row of `GET /api/sessions`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -748,6 +837,57 @@ impl RestClient {
         let response = self
             .authed(reqwest::Method::PUT, PATH)
             .json(&serde_json::json!({ "name": name, "enabled": enabled }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `GET /api/skills/hub/search` — network-bound search across hub sources.
+    pub async fn skill_hub_search(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<SkillHubSearch, ApiError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(SkillHubSearch::default());
+        }
+        let limit = limit.clamp(1, 50);
+        self.get(&format!(
+            "/api/skills/hub/search?q={}&source=all&limit={limit}",
+            percent_encode(query)
+        ))
+        .await
+    }
+
+    /// `GET /api/skills/hub/preview` — SKILL.md and manifest, no install.
+    pub async fn skill_hub_preview(&self, identifier: &str) -> Result<SkillHubPreview, ApiError> {
+        self.get(&format!(
+            "/api/skills/hub/preview?identifier={}",
+            percent_encode(identifier.trim())
+        ))
+        .await
+    }
+
+    /// `GET /api/skills/hub/scan` — the installer's security verdict.
+    pub async fn skill_hub_scan(&self, identifier: &str) -> Result<SkillHubScan, ApiError> {
+        self.get(&format!(
+            "/api/skills/hub/scan?identifier={}",
+            percent_encode(identifier.trim())
+        ))
+        .await
+    }
+
+    /// `POST /api/skills/hub/install` — spawns the host-side install action.
+    pub async fn install_skill_hub(&self, identifier: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/skills/hub/install";
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&serde_json::json!({ "identifier": identifier }))
             .send()
             .await
             .map_err(|source| ApiError::Transport {
@@ -1454,5 +1594,63 @@ mod tests {
         .expect("active profile parses");
         assert_eq!(active.active, "ops");
         assert_eq!(active.current, "default");
+    }
+
+    #[test]
+    fn hub_payloads_parse() {
+        let search: SkillHubSearch = serde_json::from_value(serde_json::json!({
+            "results": [{
+                "name": "gif-search",
+                "description": "Search GIFs",
+                "source": "github",
+                "identifier": "github/owner/repo/gif-search",
+                "trust_level": "community",
+                "repo": "owner/repo",
+                "tags": ["gif"]
+            }],
+            "source_counts": { "github": 1 },
+            "timed_out": [],
+            "installed": {}
+        }))
+        .expect("hub search parses");
+        assert_eq!(search.results[0].identifier, "github/owner/repo/gif-search");
+        assert_eq!(search.results[0].tags, ["gif"]);
+
+        let preview: SkillHubPreview = serde_json::from_value(serde_json::json!({
+            "name": "gif-search",
+            "description": "Search GIFs",
+            "source": "github",
+            "identifier": "github/owner/repo/gif-search",
+            "trust_level": "community",
+            "repo": "owner/repo",
+            "tags": ["gif"],
+            "skill_md": "# GIF search\n",
+            "files": ["SKILL.md"]
+        }))
+        .expect("hub preview parses");
+        assert_eq!(preview.skill_md, "# GIF search\n");
+
+        let scan: SkillHubScan = serde_json::from_value(serde_json::json!({
+            "name": "gif-search",
+            "identifier": "github/owner/repo/gif-search",
+            "source": "github",
+            "trust_level": "community",
+            "verdict": "review",
+            "summary": "one finding",
+            "policy": "ask",
+            "policy_reason": "external source",
+            "findings": [{
+                "severity": "medium",
+                "category": "network",
+                "file": "SKILL.md",
+                "line": 12,
+                "description": "fetches a URL"
+            }],
+            "severity_counts": { "medium": 1 }
+        }))
+        .expect("hub scan parses");
+        assert_eq!(scan.policy, "ask");
+        assert_eq!(scan.findings[0].line, Some(12));
+        assert_eq!(scan.severity_counts["medium"], 1);
     }
 }

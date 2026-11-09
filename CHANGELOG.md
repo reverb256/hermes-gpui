@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Skills-hub browser: source-wide search, SKILL.md and manifest preview, the
+  installer's security verdict, and confirmed installs by identifier.
+
 ## [0.1.0] - 2026-11-09
 
 ### Added

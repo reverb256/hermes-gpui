@@ -143,7 +143,9 @@ in the config, not the desktop.
 
 **Skills** lists the host's installed skills with search, category pills,
 usage counts and a live On/Off toggle (`PUT /api/skills/toggle`); the footer
-says changes apply to new turns rather than mid-answer.
+says changes apply to new turns rather than mid-answer. **Browse hub** searches
+the host's configured sources, previews the actual `SKILL.md`, runs the
+installer's security scan and installs an identifier only after confirmation.
 
 A Hermes-style footer strip runs under every pane (they all end on the same
 line): gateway health on the left, the current model and crate version on the
@@ -209,7 +211,8 @@ and a pill composer, prompt submission, interrupt, approval cards
 skills, file and image attachments, cron routines read-out, tray icon with
 show/quit and minimise-on-close, a per-bot inspector for look, connectors (MCP
 servers and toolsets) and host secrets, session history, installed-skills
-toggles, and the host-level MCP view.
+toggles, the host-level MCP view, and a scan-gated skills-hub browser with
+confirmed installs.
 
 Not yet wired: file browser, voice mode, multi-host switching, markdown
 rendering, MoA presets, artifacts/media, cron and Kanban writes, and resuming a

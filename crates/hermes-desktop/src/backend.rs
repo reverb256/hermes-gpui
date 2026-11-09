@@ -7,7 +7,7 @@ use std::time::Duration;
 use hermes_api::{
     ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpServer,
     ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary,
-    Skill, UsageAnalytics, gateway,
+    Skill, SkillHubPreview, SkillHubResult, SkillHubScan, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -193,6 +193,15 @@ pub enum BackendEvent {
         name: String,
         enabled: bool,
     },
+    HubSearched(Vec<SkillHubResult>),
+    HubPreviewed {
+        preview: SkillHubPreview,
+        scan: Option<SkillHubScan>,
+    },
+    HubInstalled {
+        identifier: String,
+    },
+    HubFailed(String),
     Mcp(Vec<McpServer>),
     McpFailed(String),
     McpToggled {
@@ -289,6 +298,15 @@ pub enum Command {
     SetSkill {
         name: String,
         enabled: bool,
+    },
+    SearchSkillHub {
+        query: String,
+    },
+    PreviewSkillHub {
+        identifier: String,
+    },
+    InstallSkillHub {
+        identifier: String,
     },
     LoadMcp,
     SetMcp {
@@ -605,6 +623,60 @@ async fn worker(
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     let _ = events.send(BackendEvent::SkillsFailed(format!(
                                         "{name}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::SearchSkillHub { query } => {
+                            match rest.skill_hub_search(&query, 20).await {
+                                Ok(answer) => {
+                                    let _ = events.send(BackendEvent::HubSearched(answer.results));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                        "hub search: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::PreviewSkillHub { identifier } => {
+                            match rest.skill_hub_preview(&identifier).await {
+                                Ok(preview) => {
+                                    let scan = rest.skill_hub_scan(&identifier).await.ok();
+                                    let _ = events
+                                        .send(BackendEvent::HubPreviewed { preview, scan });
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                        "preview {identifier}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::InstallSkillHub { identifier } => {
+                            match rest.install_skill_hub(&identifier).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::HubInstalled {
+                                        identifier: identifier.clone(),
+                                    });
+                                    let rest = rest.clone();
+                                    let events = events.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        if let Ok(skills) = rest.skills().await {
+                                            let _ = events.send(BackendEvent::Skills(skills));
+                                        }
+                                    });
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                        "install {identifier}: {message}"
                                     )));
                                 }
                             }

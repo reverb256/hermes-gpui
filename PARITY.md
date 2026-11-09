@@ -21,6 +21,9 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
   On/Off toggles through `PUT /api/skills/toggle`.
 - MCP page: host-level server list with transport/source/endpoint/auth, a
   host-side reachability test, and On/Off per server.
+- Skills hub: search across the host's configured sources, read the actual
+  SKILL.md and file manifest, run the installer's security scan, and install by
+  identifier only after a visible confirmation.
 
 ## Gaps, in the order worth closing
 
@@ -43,12 +46,12 @@ reachability test and per-server enabled toggle. Still needed: add/edit/
 delete servers through a validated config buffer, OAuth hand-off, and the
 catalog installer.
 
-### 3. Skills hub — **Next**
+### 3. Skills hub — **Shipped**
 
-`GET /api/skills`, `/api/skills/content`, `PUT /api/skills/toggle`,
-`POST /api/skills/hub/install`, `GET /api/skills/hub/preview` are all available.
-Add a browser with search, content preview and enable/disable; installations are
-mutations and need a confirm step.
+`GET /api/skills/hub/search`, `/preview`, `/scan` and `POST /hub/install` now
+back a Browse-hub tab: server-side search, the full SKILL.md and manifest,
+the same security verdict the installer uses, and a confirmed install by
+identifier. Uninstall/update remain CLI work.
 
 ### 4. Memory — **Next**
 

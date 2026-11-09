@@ -11,7 +11,7 @@ use gpui::{
     Context, FocusHandle, Focusable, KeyDownEvent, Render, ScrollHandle, SharedString, Window, div,
     px, rgb, rgba,
 };
-use hermes_api::{ActiveProfile, HostConfig, Profile};
+use hermes_api::{ActiveProfile, HostConfig, Profile, SkillHubPreview};
 use hermes_rpc::ConnectionState;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -354,6 +354,12 @@ impl HermesApp {
                     if enabled { "enabled" } else { "disabled" }
                 ));
             }
+            BackendEvent::HubSearched(rows) => self.skills.hub_searched(rows),
+            BackendEvent::HubPreviewed { preview, scan } => {
+                self.skills.hub_previewed(preview, scan)
+            }
+            BackendEvent::HubInstalled { identifier } => self.skills.hub_installed(&identifier),
+            BackendEvent::HubFailed(message) => self.skills.hub_failed(message),
             BackendEvent::Sessions(rows, total) => self.sessions.loaded(rows, total),
             BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
             BackendEvent::SessionMessages { id, messages } => {
@@ -843,6 +849,7 @@ impl HermesApp {
         self.settings.hide();
         self.vault.hide();
         self.skills.focus = false;
+        self.skills.hub_focus = false;
         self.mcp.focus = false;
         self.models.focus = false;
         cx.notify();
@@ -1336,6 +1343,34 @@ impl HermesApp {
     }
 
     fn route_skills_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.skills.tab == skills::Tab::Hub {
+            if !self.skills.hub_focus {
+                return false;
+            }
+            let keystroke = &event.keystroke;
+            if keystroke.modifiers.control || keystroke.modifiers.platform {
+                return false;
+            }
+            match keystroke.key.as_str() {
+                "escape" => self.skills.hub_focus = false,
+                "enter" => {
+                    self.skills.hub_focus = false;
+                    self.search_skill_hub(cx);
+                    return true;
+                }
+                "backspace" => {
+                    self.skills.hub_query.pop();
+                }
+                _ => {
+                    if let Some(chars) = keystroke.key_char.as_deref() {
+                        self.skills.hub_query.push_str(chars);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
+
         if !self.skills.focus {
             return false;
         }
@@ -1359,6 +1394,58 @@ impl HermesApp {
     }
 
     fn skills_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let body = match self.skills.tab {
+            skills::Tab::Installed => self.installed_skills_body(cx),
+            skills::Tab::Hub => self.hub_body(cx),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.skills_tab_bar(cx))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn skills_tab_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let active = self.skills.tab;
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_5()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(BORDER));
+        for (label, tab) in [
+            ("Installed", skills::Tab::Installed),
+            ("Browse hub", skills::Tab::Hub),
+        ] {
+            let selected = active == tab;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("skills-tab-{label}")))
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                    })
+                    .when(!selected, |this| this.text_color(rgb(TEXT_MUTED)))
+                    .hover(|this| this.text_color(rgb(TEXT)))
+                    .on_click(
+                        cx.listener(move |this, _event, _window, cx| this.set_skills_tab(tab, cx)),
+                    )
+                    .child(label),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn installed_skills_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let rows = skills::filtered(&self.skills.rows, &self.skills.query);
         let shown = rows.len();
         let focus = self.skills.focus;
@@ -1541,6 +1628,404 @@ impl HermesApp {
                     .child(SharedString::from(format!(
                         "{shown} shown · changes apply to new turns"
                     ))),
+            )
+            .into_any_element()
+    }
+
+    fn set_skills_tab(&mut self, tab: skills::Tab, cx: &mut Context<Self>) {
+        if self.skills.tab == tab {
+            return;
+        }
+        self.skills.tab = tab;
+        self.skills.focus = false;
+        self.skills.hub_focus = false;
+        self.skills.preview = None;
+        self.skills.scan = None;
+        self.skills.hub_error = None;
+        cx.notify();
+    }
+
+    fn search_skill_hub(&mut self, cx: &mut Context<Self>) {
+        let query = self.skills.hub_query.trim().to_string();
+        if query.is_empty() {
+            self.skills.hub_loaded = true;
+            self.skills.hub_error = Some("Type a skill name or keyword first.".into());
+            cx.notify();
+            return;
+        }
+        self.skills.hub_started();
+        self.backend.send(Command::SearchSkillHub { query });
+        cx.notify();
+    }
+
+    fn preview_skill_hub(&mut self, identifier: &str, cx: &mut Context<Self>) {
+        self.skills.hub_status = Some(format!("Loading {identifier}…"));
+        self.skills.hub_error = None;
+        self.backend.send(Command::PreviewSkillHub {
+            identifier: identifier.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn install_skill_hub(&mut self, identifier: &str, cx: &mut Context<Self>) {
+        if !skills::can_install(self.skills.scan.as_ref()) {
+            return;
+        }
+        self.skills.installing = Some(identifier.to_string());
+        self.skills.hub_status = Some(format!("{identifier}: installing…"));
+        self.backend.send(Command::InstallSkillHub {
+            identifier: identifier.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn hub_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if let Some(preview) = self.skills.preview.as_ref() {
+            return self.hub_preview_body(preview, cx);
+        }
+        let focus = self.skills.hub_focus;
+        let mut list = div()
+            .id("hub-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if !self.skills.hub_loaded {
+            list = list.child(self.note("Search the hub to preview a skill before installing."));
+        } else if let Some(error) = self.skills.hub_error.as_deref() {
+            list = list.child(self.note(error));
+        } else if self.skills.hub_results.is_empty() {
+            list = list.child(self.note("No hub skills match this search."));
+        }
+        for result in &self.skills.hub_results {
+            let identifier = result.identifier.clone();
+            let name = result.name.clone();
+            let description = result.description.clone();
+            let meta = skills::hub_meta(result);
+            list =
+                list.child(
+                    div()
+                        .id(SharedString::from(format!("hub-{identifier}")))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(BG_ELEV))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(SURFACE_HI)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.preview_skill_hub(&identifier, cx)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(name)),
+                                )
+                                .child(div().text_xs().text_color(rgb(ACCENT)).child("Preview →")),
+                        )
+                        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                            SharedString::from(crate::transcript::clip(&description, 180)),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_DIM))
+                                .child(SharedString::from(meta)),
+                        ),
+                );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("hub-search")
+                                    .flex()
+                                    .flex_1()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(BG))
+                                    .border_1()
+                                    .when(focus, |this| this.border_color(rgb(ACCENT)))
+                                    .when(!focus, |this| this.border_color(rgb(BORDER)))
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.skills.hub_focus = true;
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                                    .when(self.skills.hub_query.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .text_color(rgb(TEXT_DIM))
+                                                .child("Search the skills hub"),
+                                        )
+                                    })
+                                    .when(!self.skills.hub_query.is_empty(), |this| {
+                                        this.child(div().text_color(rgb(TEXT)).child(
+                                            SharedString::from(self.skills.hub_query.clone()),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("hub-search-run")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(ACCENT_SOFT))
+                                    .text_xs()
+                                    .text_color(rgb(ACCENT))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.search_skill_hub(cx)
+                                    }))
+                                    .child("Search"),
+                            ),
+                    ),
+            )
+            .when_some(self.skills.hub_status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_5()
+                        .py_2()
+                        .bg(rgb(ACCENT_SOFT))
+                        .text_xs()
+                        .text_color(rgb(ACCENT))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(list)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_5()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(format!(
+                        "{} result(s)",
+                        self.skills.hub_results.len()
+                    )))
+                    .child("Preview first · installs are confirmed here"),
+            )
+            .into_any_element()
+    }
+
+    fn hub_preview_body(
+        &self,
+        preview: &SkillHubPreview,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let identifier = preview.identifier.clone();
+        let scan = self.skills.scan.as_ref();
+        let policy = scan.map(|scan| scan.policy.as_str()).unwrap_or("unscanned");
+        let allowed = skills::can_install(scan);
+        let installing = self
+            .skills
+            .installing
+            .as_deref()
+            .is_some_and(|active| active == identifier);
+        let policy_color = match policy {
+            "allow" => USER,
+            "ask" => WARN,
+            _ => DANGER,
+        };
+        let action = if installing {
+            "Installing…"
+        } else if !allowed {
+            "Blocked by scan"
+        } else if policy == "ask" {
+            "Install anyway"
+        } else {
+            "Install"
+        };
+        let meta = match preview.repo.as_deref().filter(|repo| !repo.is_empty()) {
+            Some(repo) => format!("{} · {} · {repo}", preview.trust_level, preview.source),
+            None => format!("{} · {}", preview.trust_level, preview.source),
+        };
+        let scan_text = scan.map(skills::scan_line);
+        let scan_reason = scan.and_then(|scan| scan.policy_reason.clone());
+        let mut findings = div().flex().flex_col().gap_1();
+        if let Some(scan) = scan {
+            for finding in scan.findings.iter().take(12) {
+                findings = findings.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(SharedString::from(skills::finding_line(finding))),
+                );
+            }
+        }
+        let install_id = identifier.clone();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id("hub-preview-back")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.skills.preview = None;
+                                        this.skills.scan = None;
+                                        cx.notify();
+                                    }))
+                                    .child("← Back"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(preview.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(SharedString::from(meta)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("hub-install")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .when(allowed && !installing, |this| {
+                                this.bg(rgb(ACCENT))
+                                    .text_color(rgb(BG))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.install_skill_hub(&install_id, cx)
+                                    }))
+                            })
+                            .when(!allowed || installing, |this| {
+                                this.bg(rgb(SURFACE)).text_color(rgb(TEXT_DIM))
+                            })
+                            .child(action),
+                    ),
+            )
+            .child(
+                div()
+                    .id("hub-preview")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_5()
+                    .py_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(SharedString::from(preview.description.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(format!(
+                                "{} · {} file(s) · {}",
+                                preview.identifier,
+                                preview.files.len(),
+                                preview.tags.join(", ")
+                            ))),
+                    )
+                    .when_some(scan_text, |this, text| {
+                        this.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(SURFACE))
+                                .text_xs()
+                                .text_color(rgb(policy_color))
+                                .child(SharedString::from(text)),
+                        )
+                    })
+                    .child(findings)
+                    .when_some(scan_reason, |this, reason| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_MUTED))
+                                .child(SharedString::from(reason)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT))
+                            .child(SharedString::from(crate::transcript::clip(
+                                &preview.skill_md,
+                                12000,
+                            ))),
+                    ),
             )
             .into_any_element()
     }
