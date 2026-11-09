@@ -38,6 +38,7 @@ pub enum Action {
     Attach,
     ToggleInspector,
     ToggleVault,
+    ToggleUsage,
     Dismiss,
     PaletteUp,
     PaletteDown,
@@ -83,6 +84,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "o" => Action::Attach,
                     "," | "comma" => Action::ToggleInspector,
                     "v" if chord.shift => Action::ToggleVault,
+                    "u" if chord.shift => Action::ToggleUsage,
                     digit => match digit.parse::<usize>() {
                         Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),
                         _ => Action::Nothing,
@@ -154,6 +156,17 @@ mod tests {
                 Focus::Composer
             ),
             Action::ToggleVault
+        );
+        assert_eq!(
+            resolve(
+                Chord {
+                    primary: true,
+                    shift: true,
+                    ..chord("u", None)
+                },
+                Focus::Composer
+            ),
+            Action::ToggleUsage
         );
         assert_eq!(
             resolve(ctrl("3"), Focus::Composer),

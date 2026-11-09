@@ -60,11 +60,6 @@ impl Default for Vault {
 }
 
 impl Vault {
-    pub fn show(&mut self) {
-        self.open = true;
-        self.status = None;
-    }
-
     pub fn hide(&mut self) {
         self.open = false;
         self.adding = false;

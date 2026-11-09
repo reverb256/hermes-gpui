@@ -223,6 +223,106 @@ pub struct EnvEntry {
     pub channel_managed: bool,
 }
 
+/// One day of `/api/analytics/usage`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageDay {
+    #[serde(default)]
+    pub day: String,
+    #[serde(default)]
+    pub api_calls: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub sessions: u64,
+    #[serde(default)]
+    pub estimated_cost: f64,
+}
+
+/// One model's slice of the usage window.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageModel {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_calls: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub sessions: u64,
+    #[serde(default)]
+    pub estimated_cost: f64,
+}
+
+/// Window totals; the token fields are null on hosts that never recorded them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageTotals {
+    #[serde(default)]
+    pub total_sessions: u64,
+    #[serde(default)]
+    pub total_api_calls: Option<u64>,
+    #[serde(default)]
+    pub total_input: Option<u64>,
+    #[serde(default)]
+    pub total_output: Option<u64>,
+    #[serde(default)]
+    pub total_cache_read: Option<u64>,
+    #[serde(default)]
+    pub total_reasoning: Option<u64>,
+    #[serde(default)]
+    pub total_estimated_cost: f64,
+    #[serde(default)]
+    pub total_actual_cost: f64,
+}
+
+/// `GET /api/analytics/usage`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageAnalytics {
+    #[serde(default)]
+    pub period_days: u32,
+    #[serde(default)]
+    pub daily: Vec<UsageDay>,
+    #[serde(default)]
+    pub by_model: Vec<UsageModel>,
+    #[serde(default)]
+    pub totals: UsageTotals,
+}
+
+/// `GET /api/model/info` — the model this profile is running.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelInfo {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub effective_context_length: u64,
+    #[serde(default)]
+    pub auto_context_length: u64,
+}
+
+/// `GET /api/portal` — account tier and where billing is managed.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PortalStatus {
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub free_tier: bool,
+    #[serde(default)]
+    pub account_tier: Option<String>,
+    #[serde(default)]
+    pub portal_url: String,
+    #[serde(default)]
+    pub subscription_url: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NamedToggle {
     #[serde(default)]
@@ -322,6 +422,25 @@ pub enum ApiError {
     Missing { field: String, path: String },
     #[error(transparent)]
     Rpc(#[from] hermes_rpc::RpcError),
+}
+
+impl ApiError {
+    /// The server's own explanation for a failure, when the body carried one.
+    /// Usage analytics reports `detail: {error, message}`; other routes use a
+    /// plain string.
+    pub fn detail(&self) -> Option<String> {
+        let ApiError::Status { body, .. } = self else {
+            return None;
+        };
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        match value.get("detail")? {
+            serde_json::Value::String(text) => Some(text.clone()),
+            other => other
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        }
+    }
 }
 
 impl RestClient {
@@ -436,6 +555,22 @@ impl RestClient {
         let mut rows: Vec<(String, EnvEntry)> = payload.into_iter().collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(rows)
+    }
+
+    /// `GET /api/analytics/usage` — token and cost rollups for the window.
+    pub async fn usage_analytics(&self, days: u32) -> Result<UsageAnalytics, ApiError> {
+        let days = days.clamp(1, 365);
+        self.get(&format!("/api/analytics/usage?days={days}")).await
+    }
+
+    /// `GET /api/model/info` — the model this profile is actually running.
+    pub async fn model_info(&self) -> Result<ModelInfo, ApiError> {
+        self.get("/api/model/info").await
+    }
+
+    /// `GET /api/portal` — account tier and where billing is managed.
+    pub async fn portal(&self) -> Result<PortalStatus, ApiError> {
+        self.get("/api/portal").await
     }
 
     /// `PUT /api/env` — writes `.env` and reconciles config.yaml mirrors.

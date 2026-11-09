@@ -20,9 +20,11 @@ use crate::backend::{
 };
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
+use crate::settings::{Section, Settings};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming, clip};
 use crate::tray::{self, TrayStatus};
+use crate::usage::{self, Usage};
 use crate::vault::{self, Vault};
 
 const SUGGESTIONS: [&str; 3] = [
@@ -95,7 +97,9 @@ pub struct HermesApp {
     tray: TrayStatus,
     tray_state: (bool, String),
     inspector: Inspector,
+    settings: Settings,
     vault: Vault,
+    usage: Usage,
     rail_search: bool,
     rail_filter: String,
 }
@@ -133,7 +137,12 @@ impl HermesApp {
             tray,
             tray_state: (false, String::new()),
             inspector: Inspector::default(),
+            settings: Settings::default(),
             vault: Vault::default(),
+            usage: Usage {
+                days: 30,
+                ..Usage::default()
+            },
             rail_search: false,
             rail_filter: String::new(),
         };
@@ -165,9 +174,12 @@ impl HermesApp {
             };
             app.toggle_inspector(cx);
         }
-        // QA hook: open the vault sheet at launch for screenshot review.
-        if matches!(std::env::var("HERMES_OPEN_VAULT").as_deref(), Ok("1")) {
-            app.open_vault(cx);
+        // QA hook: open the settings sheet at launch for screenshot review.
+        if let Ok(target) = std::env::var("HERMES_OPEN_SETTINGS") {
+            match target.as_str() {
+                "usage" => app.open_usage(cx),
+                _ => app.open_vault(cx),
+            }
         }
         app
     }
@@ -292,6 +304,12 @@ impl HermesApp {
                 self.inspector.detail = Some(detail);
             }
             BackendEvent::Env(rows) => self.inspector.loaded_env(rows),
+            BackendEvent::Usage {
+                analytics,
+                model,
+                portal,
+            } => self.usage.loaded(analytics, model, portal),
+            BackendEvent::UsageFailed(message) => self.usage.failed(message),
             BackendEvent::Avatar {
                 profile,
                 mime,
@@ -324,17 +342,20 @@ impl HermesApp {
     // ---- keyboard -------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        // The vault is modal: it owns the keyboard while it is up, so chat
+        // Settings is modal: it owns the keyboard while it is up, so chat
         // shortcuts cannot fire behind it.
-        if self.vault.open {
-            if self.route_vault_typing(event, cx) {
+        if self.settings.open {
+            if self.settings.section == Section::Vault && self.route_vault_typing(event, cx) {
                 return;
             }
             let keystroke = &event.keystroke;
-            let toggle = (keystroke.modifiers.control || keystroke.modifiers.platform)
-                && keystroke.key == "v";
-            if keystroke.key == "escape" || toggle {
-                self.close_vault(cx);
+            let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
+            if keystroke.key == "escape" {
+                self.close_settings(cx);
+            } else if primary && keystroke.key == "v" {
+                self.toggle_vault(cx);
+            } else if primary && keystroke.key == "u" {
+                self.toggle_usage(cx);
             }
             return;
         }
@@ -436,6 +457,7 @@ impl HermesApp {
             Action::Attach => self.pick_attachment(cx),
             Action::ToggleInspector => self.toggle_inspector(cx),
             Action::ToggleVault => self.toggle_vault(cx),
+            Action::ToggleUsage => self.toggle_usage(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -664,7 +686,7 @@ impl HermesApp {
     // ---- vault ----------------------------------------------------------
 
     fn open_vault(&mut self, cx: &mut Context<Self>) {
-        self.vault.show();
+        self.settings.show(Section::Vault);
         // The sheet lists the host catalog, which rides along with the
         // inspector's describe request; ask even when the panel is closed.
         let profile = self.profile_name();
@@ -672,16 +694,41 @@ impl HermesApp {
         cx.notify();
     }
 
-    fn close_vault(&mut self, cx: &mut Context<Self>) {
+    fn open_usage(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Usage);
+        self.load_usage(self.usage.days, cx);
+    }
+
+    fn load_usage(&mut self, days: u32, cx: &mut Context<Self>) {
+        self.settings.show(Section::Usage);
+        self.usage.days = days.clamp(1, 365);
+        self.usage.loaded = false;
+        self.usage.error = None;
+        self.backend.send(Command::LoadUsage {
+            days: self.usage.days,
+        });
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings.hide();
         self.vault.hide();
         cx.notify();
     }
 
     fn toggle_vault(&mut self, cx: &mut Context<Self>) {
-        if self.vault.open {
-            self.close_vault(cx);
+        if self.settings.open && self.settings.section == Section::Vault {
+            self.close_settings(cx);
         } else {
             self.open_vault(cx);
+        }
+    }
+
+    fn toggle_usage(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Usage {
+            self.close_settings(cx);
+        } else {
+            self.open_usage(cx);
         }
     }
 
@@ -799,8 +846,7 @@ impl HermesApp {
             )
     }
 
-    /// The vault sheet: a modal browser for the host's credential catalog.
-    fn vault_sheet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn vault_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let tabs = vault::tabs(&self.inspector.env);
         let rows = vault::visible(
             &self.inspector.env,
@@ -927,72 +973,10 @@ impl HermesApp {
         }
 
         div()
-            .w(px(SHEET_W))
-            .h(px(SHEET_H))
             .flex()
             .flex_col()
-            .rounded_xl()
-            .bg(rgb(SURFACE))
-            .border_1()
-            .border_color(rgb(BORDER_HI))
-            .overflow_hidden()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Vault"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("vault-new")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(ACCENT))
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(BG))
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(ACCENT_HI)))
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.vault.start_adding(None);
-                                        cx.notify();
-                                    }))
-                                    .child("＋ New item"),
-                            )
-                            .child(
-                                div()
-                                    .id("vault-close")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .text_sm()
-                                    .text_color(rgb(TEXT_MUTED))
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT)))
-                                    .on_click(
-                                        cx.listener(|this, _event, _window, cx| {
-                                            this.close_vault(cx)
-                                        }),
-                                    )
-                                    .child("×"),
-                            ),
-                    ),
-            )
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
                     .flex()
@@ -1164,7 +1148,406 @@ impl HermesApp {
             .into_any_element()
     }
 
-    fn vault_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn usage_row(&self, label: &str, value: String) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(value)),
+            )
+    }
+
+    fn stat_card(&self, label: &str, value: String) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(rgb(BG_ELEV))
+            .min_w(px(120.))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(value)),
+            )
+    }
+
+    fn usage_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let state = &self.usage;
+        let totals = state
+            .analytics
+            .as_ref()
+            .map(|analytics| analytics.totals.clone())
+            .unwrap_or_default();
+        let plan = usage::plan_line(state.portal.as_ref());
+        let provider = state
+            .model
+            .as_ref()
+            .map(|info| info.provider.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let model_name = state
+            .model
+            .as_ref()
+            .map(|info| info.model.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let context = state
+            .model
+            .as_ref()
+            .map(|info| usage::context_label(info.effective_context_length))
+            .unwrap_or_else(|| "—".to_string());
+        let days = state.days;
+        let subscription = state
+            .portal
+            .as_ref()
+            .map(|portal| portal.subscription_url.replace("https://", ""))
+            .filter(|url| !url.is_empty());
+
+        let mut body = div()
+            .id("usage-body")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_4();
+
+        body = body.child(self.section_label("MY PLAN")).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(BG_ELEV))
+                .child(self.usage_row("Plan", plan))
+                .child(self.usage_row("Provider", provider))
+                .child(self.usage_row("Model", model_name))
+                .child(self.usage_row("Context", context))
+                .when_some(subscription, |this, url| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(format!("Billing is managed at {url}"))),
+                    )
+                }),
+        );
+
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(self.section_label("USAGE LIMITS"))
+                .child(div().flex().items_center().gap_1().children(
+                    [7u32, 30, 90].into_iter().map(|candidate| {
+                        let selected = candidate == days;
+                        div()
+                            .id(SharedString::from(format!("usage-{candidate}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(selected, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!selected, |this| {
+                                this.text_color(rgb(TEXT_MUTED))
+                                    .hover(|this| this.bg(rgb(BG_ELEV)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.load_usage(candidate, cx)
+                            }))
+                            .child(SharedString::from(format!("{candidate}d")))
+                    }),
+                )),
+        );
+
+        if let Some(error) = &state.error {
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(WARN_SOFT))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(WARN))
+                            .child("Usage history unavailable"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(SharedString::from(error.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child("Repair the host's state.db, then reopen this page."),
+                    ),
+            );
+        }
+
+        body = body.child(
+            div()
+                .flex()
+                .gap_2()
+                .flex_wrap()
+                .child(self.stat_card("Estimated cost", usage::money(totals.total_estimated_cost)))
+                .child(self.stat_card("Sessions", totals.total_sessions.to_string()))
+                .child(
+                    self.stat_card(
+                        "API calls",
+                        totals
+                            .total_api_calls
+                            .map(|calls| calls.to_string())
+                            .unwrap_or_else(|| "—".to_string()),
+                    ),
+                )
+                .child(self.stat_card("Input tokens", usage::tokens(totals.total_input)))
+                .child(self.stat_card("Output tokens", usage::tokens(totals.total_output)))
+                .child(self.stat_card("Cache read", usage::tokens(totals.total_cache_read))),
+        );
+
+        body = body.child(self.section_label("BY MODEL"));
+        let models = usage::top_models(state.analytics.as_ref(), 8);
+        if models.is_empty() {
+            body = body.child(self.note(if !state.loaded {
+                "Loading usage…"
+            } else if state.error.is_some() {
+                "Usage history unavailable."
+            } else {
+                "No model usage recorded in this window."
+            }));
+        }
+        for model in models {
+            let title = if model.model.is_empty() {
+                "unknown model".to_string()
+            } else {
+                model.model.clone()
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG_ELEV))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(title)),
+                            )
+                            .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                SharedString::from(format!(
+                                    "{} calls · {} sessions",
+                                    model.api_calls, model.sessions
+                                )),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                                SharedString::from(format!(
+                                    "{} in · {} out",
+                                    usage::tokens(Some(model.input_tokens)),
+                                    usage::tokens(Some(model.output_tokens))
+                                )),
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child(SharedString::from(usage::money(model.estimated_cost))),
+                            ),
+                    ),
+            );
+        }
+
+        body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(TEXT_DIM))
+                .child("Costs are the host's estimates from recorded token usage."),
+        )
+        .into_any_element()
+    }
+
+    fn settings_sheet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let section = self.settings.section;
+        let body = match section {
+            Section::Vault => self.vault_body(cx),
+            Section::Usage => self.usage_body(cx),
+        };
+
+        div()
+            .w(px(SHEET_W))
+            .h(px(SHEET_H))
+            .flex()
+            .rounded_xl()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER_HI))
+            .overflow_hidden()
+            .child(
+                div()
+                    .w(px(190.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .bg(rgb(BG_ELEV))
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("SETTINGS"))
+                    .children(Section::all().into_iter().map(|candidate| {
+                        let selected = candidate == section;
+                        div()
+                            .id(SharedString::from(format!(
+                                "settings-{}",
+                                candidate.label()
+                            )))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(selected, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!selected, |this| {
+                                this.text_color(rgb(TEXT_MUTED))
+                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                if candidate == Section::Usage {
+                                    this.open_usage(cx)
+                                } else {
+                                    this.open_vault(cx)
+                                }
+                            }))
+                            .child(div().child(SharedString::from(candidate.glyph())))
+                            .child(div().child(SharedString::from(candidate.label())))
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(HEADER_H))
+                            .px_5()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(SharedString::from(section.label())),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(section == Section::Vault, |this| {
+                                        this.child(
+                                            div()
+                                                .id("vault-new")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(ACCENT))
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(rgb(BG))
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                                .on_click(cx.listener(
+                                                    |this, _event, _window, cx| {
+                                                        this.vault.start_adding(None);
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child("＋ New item"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("settings-close")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_sm()
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .cursor_pointer()
+                                            .hover(|this| {
+                                                this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT))
+                                            })
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.close_settings(cx)
+                                            }))
+                                            .child("×"),
+                                    ),
+                            ),
+                    )
+                    .child(body),
+            )
+            .into_any_element()
+    }
+    fn settings_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .absolute()
             .inset_0()
@@ -1172,7 +1555,7 @@ impl HermesApp {
             .items_center()
             .justify_center()
             .bg(rgba(SCRIM))
-            .child(self.vault_sheet(cx))
+            .child(self.settings_sheet(cx))
             .into_any_element()
     }
 
@@ -3431,6 +3814,8 @@ impl Render for HermesApp {
             .when_some(cards, |this, cards| this.child(cards))
             .when_some(palette, |this, palette| this.child(palette))
             .child(self.composer(cx))
-            .when(self.vault.open, |this| this.child(self.vault_overlay(cx)))
+            .when(self.settings.open, |this| {
+                this.child(self.settings_overlay(cx))
+            })
     }
 }

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, Profile, ProfileDetail,
-    RestClient, gateway,
+    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo, PortalStatus,
+    Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -156,6 +156,14 @@ pub enum BackendEvent {
     ProfileDetail(ProfileDetail),
     /// The host `.env`, redacted server-side.
     Env(Vec<(String, EnvEntry)>),
+    /// Usage rollups plus the model and portal facts the page shows beside them.
+    Usage {
+        analytics: UsageAnalytics,
+        model: Option<ModelInfo>,
+        portal: Option<PortalStatus>,
+    },
+    /// Analytics refused (a host with an unreadable `state.db`, for example).
+    UsageFailed(String),
     Avatar {
         profile: String,
         mime: String,
@@ -212,6 +220,9 @@ pub enum Command {
     DeleteSecret {
         profile: String,
         key: String,
+    },
+    LoadUsage {
+        days: u32,
     },
 }
 
@@ -453,6 +464,30 @@ async fn worker(
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
                                     )));
+                                }
+                            }
+                        }
+                        Command::LoadUsage { days } => {
+                            let model = rest.model_info().await.ok();
+                            let portal = rest.portal().await.ok();
+                            match rest.usage_analytics(days).await {
+                                Ok(analytics) => {
+                                    tracing::debug!(
+                                        days,
+                                        models = analytics.by_model.len(),
+                                        "usage: analytics loaded"
+                                    );
+                                    let _ = events.send(BackendEvent::Usage {
+                                        analytics,
+                                        model,
+                                        portal,
+                                    });
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    tracing::warn!(%message, "usage: analytics failed");
+                                    let _ = events.send(BackendEvent::UsageFailed(message));
                                 }
                             }
                         }

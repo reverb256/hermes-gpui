@@ -2,9 +2,11 @@ mod app;
 mod backend;
 mod inspector;
 mod keys;
+mod settings;
 mod theme;
 mod transcript;
 mod tray;
+mod usage;
 mod vault;
 
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
