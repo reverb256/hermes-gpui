@@ -96,10 +96,19 @@ machine. Avatar images are stored as `assets/avatar.*`; the client accepts
 PNG/JPEG/WebP up to 2 MB. Secret values arrive redacted and the reveal endpoint
 is never called, so the client can write a secret but cannot read one back.
 
-`HERMES_OPEN_INSPECTOR=1` opens the panel at launch, and
-`HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab. `HERMES_DEMO=1`
-seeds a short local transcript. Both are QA hooks for screenshot runs, which is
-how the panel and message styling are reviewed without input automation.
+## Vault
+
+`Ctrl+Shift+V` (or `Vault ⇗` on the inspector's Secrets tab) opens the vault: the
+host's credential catalog, grouped into one tab per category the host reports,
+with set counts, search and a per-entry replace form. `New item` writes a key
+through `PUT /api/env`. Rows show the redacted value; the reveal endpoint is
+never called, so the sheet can write a credential but not read one back.
+
+`HERMES_OPEN_INSPECTOR=1` opens the panel at launch,
+`HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab, `HERMES_OPEN_VAULT=1`
+opens the vault sheet and `HERMES_DEMO=1` seeds a short local transcript. Those
+are QA hooks for screenshot runs, which is how the panel, vault and message
+styling are reviewed without input automation.
 
 ## System requirements (Linux)
 

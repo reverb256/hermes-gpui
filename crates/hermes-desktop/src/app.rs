@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     Context, FocusHandle, Focusable, KeyDownEvent, Render, ScrollHandle, SharedString, Window, div,
-    px, rgb,
+    px, rgb, rgba,
 };
 use hermes_api::{ActiveProfile, HostConfig, Profile};
 use hermes_rpc::ConnectionState;
@@ -23,6 +23,7 @@ use crate::keys::{self, Action, Chord, Focus};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming, clip};
 use crate::tray::{self, TrayStatus};
+use crate::vault::{self, Vault};
 
 const SUGGESTIONS: [&str; 3] = [
     "What can you do?",
@@ -94,6 +95,7 @@ pub struct HermesApp {
     tray: TrayStatus,
     tray_state: (bool, String),
     inspector: Inspector,
+    vault: Vault,
     rail_search: bool,
     rail_filter: String,
 }
@@ -131,6 +133,7 @@ impl HermesApp {
             tray,
             tray_state: (false, String::new()),
             inspector: Inspector::default(),
+            vault: Vault::default(),
             rail_search: false,
             rail_filter: String::new(),
         };
@@ -161,6 +164,10 @@ impl HermesApp {
                 _ => Tab::Look,
             };
             app.toggle_inspector(cx);
+        }
+        // QA hook: open the vault sheet at launch for screenshot review.
+        if matches!(std::env::var("HERMES_OPEN_VAULT").as_deref(), Ok("1")) {
+            app.open_vault(cx);
         }
         app
     }
@@ -299,7 +306,10 @@ impl HermesApp {
                 self.inspector.set_avatar(&profile, image);
             }
             BackendEvent::AvatarCleared { profile } => self.inspector.clear_avatar(&profile),
-            BackendEvent::InspectorStatus(text) => self.inspector.status = Some(text),
+            BackendEvent::InspectorStatus(text) => {
+                self.vault.status = Some(text.clone());
+                self.inspector.status = Some(text);
+            }
             BackendEvent::Attached { name } => {
                 self.attachments.push(name.clone());
                 self.lines
@@ -314,6 +324,20 @@ impl HermesApp {
     // ---- keyboard -------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        // The vault is modal: it owns the keyboard while it is up, so chat
+        // shortcuts cannot fire behind it.
+        if self.vault.open {
+            if self.route_vault_typing(event, cx) {
+                return;
+            }
+            let keystroke = &event.keystroke;
+            let toggle = (keystroke.modifiers.control || keystroke.modifiers.platform)
+                && keystroke.key == "v";
+            if keystroke.key == "escape" || toggle {
+                self.close_vault(cx);
+            }
+            return;
+        }
         if self.rail_search && self.route_rail_typing(event, cx) {
             return;
         }
@@ -411,6 +435,7 @@ impl HermesApp {
             Action::Refresh => self.refresh(cx),
             Action::Attach => self.pick_attachment(cx),
             Action::ToggleInspector => self.toggle_inspector(cx),
+            Action::ToggleVault => self.toggle_vault(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -634,6 +659,521 @@ impl HermesApp {
             Field::SecretKey => Some(&mut self.inspector.draft_key),
             Field::SecretValue => Some(&mut self.inspector.draft_value),
         }
+    }
+
+    // ---- vault ----------------------------------------------------------
+
+    fn open_vault(&mut self, cx: &mut Context<Self>) {
+        self.vault.show();
+        // The sheet lists the host catalog, which rides along with the
+        // inspector's describe request; ask even when the panel is closed.
+        let profile = self.profile_name();
+        self.backend.send(Command::Inspect { profile });
+        cx.notify();
+    }
+
+    fn close_vault(&mut self, cx: &mut Context<Self>) {
+        self.vault.hide();
+        cx.notify();
+    }
+
+    fn toggle_vault(&mut self, cx: &mut Context<Self>) {
+        if self.vault.open {
+            self.close_vault(cx);
+        } else {
+            self.open_vault(cx);
+        }
+    }
+
+    fn vault_field_mut(&mut self, field: vault::Field) -> Option<&mut String> {
+        match field {
+            vault::Field::Search => Some(&mut self.vault.query),
+            vault::Field::Key => Some(&mut self.vault.key),
+            vault::Field::Value => Some(&mut self.vault.value),
+        }
+    }
+
+    /// Typing into the vault takes precedence over the chat shortcuts.
+    fn route_vault_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(field) = self.vault.focus else {
+            return false;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => self.vault.focus = None,
+            "enter" | "tab" => match field {
+                vault::Field::Key => self.vault.focus = Some(vault::Field::Value),
+                vault::Field::Value => self.save_vault_item(cx),
+                vault::Field::Search => self.vault.focus = None,
+            },
+            "backspace" => {
+                if let Some(text) = self.vault_field_mut(field) {
+                    text.pop();
+                }
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref()
+                    && let Some(text) = self.vault_field_mut(field)
+                {
+                    text.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn save_vault_item(&mut self, cx: &mut Context<Self>) {
+        let key = self.vault.key.trim().to_uppercase();
+        if !vault::valid_key(&key) {
+            self.vault.status = Some("Keys look like OPENAI_API_KEY.".into());
+            cx.notify();
+            return;
+        }
+        if self.vault.value.is_empty() {
+            self.vault.status = Some("A value is required.".into());
+            cx.notify();
+            return;
+        }
+        let profile = self.profile_name();
+        self.vault.status = Some(format!("saving {key}…"));
+        self.backend.send(Command::SetSecret {
+            profile,
+            key,
+            value: self.vault.value.clone(),
+        });
+        cx.notify();
+    }
+
+    fn delete_vault_item(&mut self, key: &str, cx: &mut Context<Self>) {
+        let profile = self.profile_name();
+        self.vault.status = Some(format!("removing {key}…"));
+        self.backend.send(Command::DeleteSecret {
+            profile,
+            key: key.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn vault_field(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        field: vault::Field,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.section_label(label))
+            .child(
+                div()
+                    .id(SharedString::from(format!("vault-field-{label}")))
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG))
+                    .border_1()
+                    .when(focused, |this| this.border_color(rgb(ACCENT)))
+                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(value.is_empty(), |this| {
+                        this.text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(placeholder.to_string()))
+                    })
+                    .when(!value.is_empty(), |this| {
+                        this.text_color(rgb(TEXT))
+                            .child(SharedString::from(value.to_string()))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.vault.focus = Some(field);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// The vault sheet: a modal browser for the host's credential catalog.
+    fn vault_sheet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let tabs = vault::tabs(&self.inspector.env);
+        let rows = vault::visible(
+            &self.inspector.env,
+            self.vault.tab.as_deref(),
+            &self.vault.query,
+        );
+        let loaded = self.inspector.env_loaded;
+        let focus = self.vault.focus;
+        let selected_tab = self.vault.tab.clone();
+
+        let mut list = div()
+            .id("vault-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if rows.is_empty() {
+            list = list.child(self.note(if loaded {
+                "No credentials match this view."
+            } else {
+                "Loading vault…"
+            }));
+        }
+        for (name, entry) in rows {
+            let subtitle = if entry.description.is_empty() {
+                entry
+                    .redacted_value
+                    .clone()
+                    .unwrap_or_else(|| "not set".into())
+            } else {
+                clip(&entry.description, 72)
+            };
+            let is_set = entry.is_set;
+            let redacted = entry.redacted_value.clone().unwrap_or_default();
+            let tint = vault::tint(name);
+            let monogram = vault::monogram(name);
+            let row_key = name.clone();
+            let delete_key = name.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("vault-row-{name}")))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG_ELEV))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.vault.start_adding(Some(&row_key));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(30.))
+                            .h(px(30.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgb(tint))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(BG))
+                                    .child(SharedString::from(monogram)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(SharedString::from(subtitle)),
+                            ),
+                    )
+                    .when(is_set, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_MUTED))
+                                .child(SharedString::from(redacted)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("vault-delete-{name}")))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(DANGER))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.delete_vault_item(&delete_key, cx)
+                                }))
+                                .child("Remove"),
+                        )
+                    })
+                    .when(!is_set, |this| {
+                        this.child(div().text_xs().text_color(rgb(ACCENT)).child("Set"))
+                    }),
+            );
+        }
+
+        div()
+            .w(px(SHEET_W))
+            .h(px(SHEET_H))
+            .flex()
+            .flex_col()
+            .rounded_xl()
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(BORDER_HI))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_5()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Vault"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("vault-new")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(ACCENT))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(BG))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.vault.start_adding(None);
+                                        cx.notify();
+                                    }))
+                                    .child("＋ New item"),
+                            )
+                            .child(
+                                div()
+                                    .id("vault-close")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT)))
+                                    .on_click(
+                                        cx.listener(|this, _event, _window, cx| {
+                                            this.close_vault(cx)
+                                        }),
+                                    )
+                                    .child("×"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .children(tabs.into_iter().map(|tab| {
+                        let selected = selected_tab == tab.category;
+                        let category = tab.category.clone();
+                        div()
+                            .id(SharedString::from(format!("vault-tab-{}", tab.label)))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(selected, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!selected, |this| {
+                                this.text_color(rgb(TEXT_MUTED))
+                                    .hover(|this| this.bg(rgb(BG_ELEV)).text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.vault.tab = category.clone();
+                                cx.notify();
+                            }))
+                            .child(SharedString::from(format!("{} {}", tab.label, tab.count)))
+                    })),
+            )
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .id("vault-search")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(BG))
+                            .border_1()
+                            .when(focus == Some(vault::Field::Search), |this| {
+                                this.border_color(rgb(ACCENT))
+                            })
+                            .when(focus != Some(vault::Field::Search), |this| {
+                                this.border_color(rgb(BORDER))
+                            })
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.vault.focus = Some(vault::Field::Search);
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .when(self.vault.query.is_empty(), |this| {
+                                this.child(div().text_color(rgb(TEXT_DIM)).child("Search vault"))
+                            })
+                            .when(!self.vault.query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(self.vault.query.clone())),
+                                )
+                            }),
+                    ),
+            )
+            .child(list)
+            .when(self.vault.adding, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .px_5()
+                        .py_3()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(self.vault_field(
+                            "KEY",
+                            &self.vault.key,
+                            "OPENAI_API_KEY",
+                            vault::Field::Key,
+                            focus == Some(vault::Field::Key),
+                            cx,
+                        ))
+                        .child(self.vault_field(
+                            "VALUE",
+                            &self.vault.value,
+                            "sk-…",
+                            vault::Field::Value,
+                            focus == Some(vault::Field::Value),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("vault-cancel")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(rgb(BG_ELEV)))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.vault.cancel_adding();
+                                            cx.notify();
+                                        }))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id("vault-save")
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(ACCENT))
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(BG))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.save_vault_item(cx)
+                                        }))
+                                        .child("Save"),
+                                ),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_5()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                            "Hermes can use these values, but this client never reveals them.",
+                        ),
+                    )
+                    .when_some(self.vault.status.clone(), |this, status| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_MUTED))
+                                .child(SharedString::from(status)),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn vault_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(SCRIM))
+            .child(self.vault_sheet(cx))
+            .into_any_element()
     }
 
     fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
@@ -2662,24 +3202,47 @@ impl HermesApp {
                     .child(self.section_label(&header))
                     .child(
                         div()
-                            .id("show-all-secrets")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .text_xs()
-                            .cursor_pointer()
-                            .when(self.inspector.show_all, |this| {
-                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
-                            })
-                            .when(!self.inspector.show_all, |this| {
-                                this.text_color(rgb(TEXT_MUTED))
-                                    .hover(|this| this.bg(rgb(SURFACE)))
-                            })
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.inspector.show_all = !this.inspector.show_all;
-                                cx.notify();
-                            }))
-                            .child("Show all"),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("open-vault")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                                    .on_click(
+                                        cx.listener(|this, _event, _window, cx| {
+                                            this.open_vault(cx)
+                                        }),
+                                    )
+                                    .child("Vault ⇗"),
+                            )
+                            .child(
+                                div()
+                                    .id("show-all-secrets")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .when(self.inspector.show_all, |this| {
+                                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                                    })
+                                    .when(!self.inspector.show_all, |this| {
+                                        this.text_color(rgb(TEXT_MUTED))
+                                            .hover(|this| this.bg(rgb(SURFACE)))
+                                    })
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.inspector.show_all = !this.inspector.show_all;
+                                        cx.notify();
+                                    }))
+                                    .child("Show all"),
+                            ),
                     ),
             )
             .child(self.secret_field(
@@ -2843,6 +3406,7 @@ impl Render for HermesApp {
         };
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -2867,5 +3431,6 @@ impl Render for HermesApp {
             .when_some(cards, |this, cards| this.child(cards))
             .when_some(palette, |this, palette| this.child(palette))
             .child(self.composer(cx))
+            .when(self.vault.open, |this| this.child(self.vault_overlay(cx)))
     }
 }

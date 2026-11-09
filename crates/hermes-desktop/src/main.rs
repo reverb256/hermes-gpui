@@ -5,6 +5,7 @@ mod keys;
 mod theme;
 mod transcript;
 mod tray;
+mod vault;
 
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use hermes_api::HostConfig;

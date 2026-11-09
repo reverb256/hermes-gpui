@@ -75,6 +75,15 @@ pub const HEADER_H: f32 = 52.;
 pub const READ_W: f32 = 720.;
 /// Maximum width of a user bubble — narrower than the measure so turns read apart.
 pub const BUBBLE_W: f32 = 560.;
+/// Settings sheet (the vault): wide enough for key, description and actions.
+pub const SHEET_W: f32 = 760.;
+/// Settings sheet height, capped so it never becomes a full-screen page.
+pub const SHEET_H: f32 = 560.;
+
+// ---- scrim -------------------------------------------------------------
+/// ARGB dimming plane between the window and a modal sheet (alpha in the top
+/// byte, so `rgba(SCRIM)` scrims what is behind it).
+pub const SCRIM: u32 = 0xcc05070b;
 
 #[cfg(test)]
 mod tests {
@@ -138,5 +147,9 @@ mod tests {
         assert!((300. ..=420.).contains(&PANEL_W), "inspector drifted");
         assert!(BUBBLE_W <= READ_W);
         assert!(HEADER_H >= 44., "header must stay a comfortable hit target");
+        assert!(
+            (640. ..=900.).contains(&SHEET_W) && SHEET_H < 1080.,
+            "settings sheet must stay a sheet, not a page"
+        );
     }
 }
