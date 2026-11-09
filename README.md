@@ -125,6 +125,10 @@ reasoning scale (default/minimal/low/medium/high/xhigh/max/ultra), read from
 `agent.reasoning_effort` in `/api/config` and written back with a partial deep
 merge. Both apply to new sessions only.
 
+A Hermes-style footer strip runs under every pane (they all end on the same
+line): gateway health on the left, the current model and crate version on the
+right.
+
 **Usage & Billing** reads `/api/analytics/usage` for the 7/30/90-day totals and
 per-model spend, `/api/model/info` for the running model and its context, and
 `/api/portal` for the account tier and where billing is managed. A host whose

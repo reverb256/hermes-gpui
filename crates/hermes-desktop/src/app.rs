@@ -2361,6 +2361,61 @@ impl HermesApp {
 
     // ---- rendering ------------------------------------------------------
 
+    /// Hermes' footer strip: gateway health on the left, what you are running
+    /// on the right. It sits below the pane row so every pane ends on one line.
+    fn status_bar(&self) -> impl IntoElement {
+        let (label, color) = match self.connection {
+            ConnectionState::Open => ("Gateway ready", USER),
+            ConnectionState::Connecting => ("Connecting…", WARN),
+            ConnectionState::Closed => ("Gateway offline", DANGER),
+        };
+        let model = self
+            .usage
+            .model
+            .as_ref()
+            .map(|info| info.model.clone())
+            .filter(|model| !model.is_empty())
+            .or_else(|| {
+                self.models
+                    .options
+                    .as_ref()
+                    .map(|options| options.model.clone())
+                    .filter(|model| !model.is_empty())
+            })
+            .unwrap_or_else(|| self.profile_name());
+        let version = env!("CARGO_PKG_VERSION");
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .h(px(STATUS_H))
+            .flex_shrink_0()
+            .px_4()
+            .bg(rgb(BG_ELEV))
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .text_xs()
+            .text_color(rgb(TEXT_MUTED))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(rgb(color)))
+                    .child(SharedString::from(label)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(SharedString::from(model))
+                    .child(SharedString::from(format!("v{version}"))),
+            )
+    }
+
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (label, color) = match self.connection {
             ConnectionState::Open => ("connected", USER),
@@ -4359,6 +4414,7 @@ impl Render for HermesApp {
                         this.child(self.inspector_panel(cx))
                     }),
             )
+            .child(self.status_bar())
             .when_some(palette, |this, palette| this.child(palette))
             .when(self.settings.open, |this| {
                 this.child(self.settings_overlay(cx))

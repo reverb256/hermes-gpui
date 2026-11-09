@@ -71,6 +71,8 @@ pub const RAIL_W: f32 = 248.;
 pub const PANEL_W: f32 = 340.;
 /// Header bar height.
 pub const HEADER_H: f32 = 52.;
+/// Footer status strip: gateway state plus model and version.
+pub const STATUS_H: f32 = 26.;
 /// Maximum width of the transcript, in pixels.
 pub const READ_W: f32 = 720.;
 /// Maximum width of a user bubble — narrower than the measure so turns read apart.
@@ -147,6 +149,10 @@ mod tests {
         assert!((300. ..=420.).contains(&PANEL_W), "inspector drifted");
         assert!(BUBBLE_W <= READ_W);
         assert!(HEADER_H >= 44., "header must stay a comfortable hit target");
+        assert!(
+            (22. ..=32.).contains(&STATUS_H),
+            "status strip must stay a strip"
+        );
         assert!(
             (640. ..=900.).contains(&SHEET_W) && SHEET_H < 1080.,
             "settings sheet must stay a sheet, not a page"
