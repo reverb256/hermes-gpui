@@ -17,13 +17,16 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
 
 ## Gaps, in the order worth closing
 
-### 1. Sessions and projects — **Blocked**
+### 1. Sessions and projects — **Next** (unblocked 2026-11-09)
 
-`GET /api/sessions` returns 503 on the pod (`state.db corrupt`,
-`/opt/data/state.db`). Everything else here is cosmetic until history works.
-Needed: the pod-side repair, then a session list grouped by recency, resume,
-rename, delete, and a project/workspace filter. No client can work around a
-corrupt database.
+The pod's `state.db` was rebuilt with SQLite `.recover` after btree page
+corruption; `PRAGMA integrity_check` is `ok`, 1,843 sessions and 50,357
+messages survived (23 unreadable messages lost), and `GET /api/sessions`
+returns 200 again. The original is archived off-cluster and a Longhorn
+snapshot (`pre-repair`) was taken first.
+
+Needed now: a session list grouped by recency, resume, rename, delete, and a
+project/workspace filter.
 
 ### 2. MCP toolsets — **Next**
 
@@ -92,3 +95,7 @@ widget that summons the window. No QML rewrite.
 - QA runs go to a hidden `special:hermes-qa` workspace; no test windows on the
   active desktop. `sway`/`weston` are not installed, so headless capture would
   need a system package decision.
+- Never stage multi-GB database copies in `/tmp`: it is an 8 GiB tmpfs, and a
+  6.3 GB recovery dump filled it once. Use `/var/tmp` or
+  `~/hermes-db-repair` (disk-backed). `/etc/tmpfiles.d/tmp.conf` already ages
+  `/tmp` out after 3 days and `/var/tmp` after 14.
