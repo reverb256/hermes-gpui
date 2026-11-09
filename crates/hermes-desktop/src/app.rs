@@ -372,6 +372,14 @@ impl HermesApp {
         // Settings is modal: it owns the keyboard while it is up, so chat
         // shortcuts cannot fire behind it.
         if self.settings.open {
+            // Escape always leaves the sheet, even while a search field owns
+            // the keystrokes; blurring first made the first press a no-op.
+            if event.keystroke.key == "escape" {
+                self.models.focus = false;
+                self.vault.focus = None;
+                self.close_settings(cx);
+                return;
+            }
             if (self.settings.section == Section::Vault && self.route_vault_typing(event, cx))
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
             {
@@ -379,9 +387,7 @@ impl HermesApp {
             }
             let keystroke = &event.keystroke;
             let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
-            if keystroke.key == "escape" {
-                self.close_settings(cx);
-            } else if primary && keystroke.key == "v" {
+            if primary && keystroke.key == "v" {
                 self.toggle_vault(cx);
             } else if primary && keystroke.key == "m" {
                 self.toggle_models(cx);
@@ -390,6 +396,15 @@ impl HermesApp {
             } else if primary && keystroke.key == "u" {
                 self.toggle_usage(cx);
             }
+            return;
+        }
+        if event.keystroke.key == "escape"
+            && !self.palette.open
+            && !self.mention.open
+            && self.inspector.open
+        {
+            self.inspector.open = false;
+            cx.notify();
             return;
         }
         if self.rail_search && self.route_rail_typing(event, cx) {
