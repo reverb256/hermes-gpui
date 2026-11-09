@@ -344,6 +344,36 @@ pub struct ModelOptionProvider {
     pub total_models: u64,
 }
 
+/// One auxiliary task's pinned provider/model in `GET /api/model/auxiliary`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuxiliaryTask {
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuxiliaryMain {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// `GET /api/model/auxiliary` — per-task pins plus the main assignment.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuxiliaryModels {
+    #[serde(default)]
+    pub tasks: Vec<AuxiliaryTask>,
+    #[serde(default)]
+    pub main: Option<AuxiliaryMain>,
+}
+
 /// `GET /api/model/options` — the active model plus every configured provider.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelOptions {
@@ -608,6 +638,82 @@ impl RestClient {
     /// `GET /api/model/options` — authenticated providers and their models.
     pub async fn model_options(&self) -> Result<ModelOptions, ApiError> {
         self.get("/api/model/options?explicit_only=1").await
+    }
+
+    /// `GET /api/model/auxiliary` — the helper-task assignments.
+    pub async fn auxiliary_models(&self) -> Result<AuxiliaryModels, ApiError> {
+        self.get("/api/model/auxiliary").await
+    }
+
+    /// `POST /api/model/set` with `scope: auxiliary` — pins one task.
+    pub async fn set_auxiliary_model(
+        &self,
+        task: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/model/set";
+        let body = serde_json::json!({
+            "scope": "auxiliary",
+            "task": task,
+            "provider": provider,
+            "model": model,
+        });
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `POST /api/model/set` with the reset sentinel: every task follows main.
+    pub async fn reset_auxiliary_models(&self) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/model/set";
+        let body = serde_json::json!({ "scope": "auxiliary", "task": "__reset__" });
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `GET /api/config` — the raw config, to read `agent.reasoning_effort`.
+    pub async fn reasoning_effort(&self) -> Result<String, ApiError> {
+        let config: Value = self.get("/api/config").await?;
+        let root = config.get("config").unwrap_or(&config);
+        Ok(root
+            .pointer("/agent/reasoning_effort")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// `PUT /api/config` — deep-merges, so a partial `agent` block is enough.
+    pub async fn set_reasoning_effort(&self, level: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/config";
+        let body = serde_json::json!({
+            "config": { "agent": { "reasoning_effort": level } }
+        });
+        let response = self
+            .authed(reqwest::Method::PUT, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
     }
 
     /// `POST /api/model/set` — writes the main model for *new* sessions.

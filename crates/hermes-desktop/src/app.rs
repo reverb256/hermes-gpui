@@ -181,6 +181,7 @@ impl HermesApp {
         if let Ok(target) = std::env::var("HERMES_OPEN_SETTINGS") {
             match target.as_str() {
                 "model" => app.open_models(cx),
+                "assignments" => app.load_assignments(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -318,6 +319,24 @@ impl HermesApp {
             BackendEvent::ModelsFailed(message) => self.models.failed(message),
             BackendEvent::ModelStatus(text) => self.models.status = Some(text),
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
+            BackendEvent::Auxiliary(tasks) => self.models.auxiliary_loaded(tasks),
+            BackendEvent::AuxiliaryFailed(message) => self.models.auxiliary_failed(message),
+            BackendEvent::AuxiliarySaved {
+                task,
+                provider,
+                model,
+            } => {
+                self.models.aux_target = None;
+                self.models.status = Some(format!(
+                    "{} → {provider} · {model}",
+                    models::task_label(&task)
+                ));
+                self.settings.show(Section::Assignments);
+            }
+            BackendEvent::ReasoningEffort(level) => self.models.reasoning_loaded(level),
+            BackendEvent::ReasoningFailed(message) => {
+                self.models.status = Some(format!("reasoning: {message}"))
+            }
             BackendEvent::Avatar {
                 profile,
                 mime,
@@ -366,6 +385,8 @@ impl HermesApp {
                 self.toggle_vault(cx);
             } else if primary && keystroke.key == "m" {
                 self.toggle_models(cx);
+            } else if primary && keystroke.key == "a" {
+                self.toggle_assignments(cx);
             } else if primary && keystroke.key == "u" {
                 self.toggle_usage(cx);
             }
@@ -471,6 +492,7 @@ impl HermesApp {
             Action::ToggleVault => self.toggle_vault(cx),
             Action::ToggleUsage => self.toggle_usage(cx),
             Action::ToggleModels => self.toggle_models(cx),
+            Action::ToggleAssignments => self.toggle_assignments(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -874,11 +896,20 @@ impl HermesApp {
     }
 
     fn select_model(&mut self, provider: &str, model: &str, cx: &mut Context<Self>) {
-        self.models.status = Some(format!("switching to {model}…"));
-        self.backend.send(Command::SetModel {
-            provider: provider.to_string(),
-            model: model.to_string(),
-        });
+        if let Some(task) = self.models.aux_target.clone() {
+            self.models.status = Some(format!("assigning {}…", models::task_label(&task)));
+            self.backend.send(Command::SetAuxModel {
+                task,
+                provider: provider.to_string(),
+                model: model.to_string(),
+            });
+        } else {
+            self.models.status = Some(format!("switching to {model}…"));
+            self.backend.send(Command::SetModel {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            });
+        }
         cx.notify();
     }
 
@@ -912,6 +943,219 @@ impl HermesApp {
         }
         cx.notify();
         true
+    }
+
+    fn load_assignments(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Assignments);
+        self.models.aux_loaded = false;
+        self.models.aux_error = None;
+        self.models.status = None;
+        self.backend.send(Command::LoadAuxiliary);
+        cx.notify();
+    }
+
+    fn toggle_assignments(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Assignments {
+            self.close_settings(cx);
+        } else {
+            self.load_assignments(cx);
+        }
+    }
+
+    fn assign_to(&mut self, task: &str, cx: &mut Context<Self>) {
+        self.models.aux_target = Some(task.to_string());
+        self.settings.show(Section::Model);
+        cx.notify();
+    }
+
+    fn reset_aux(&mut self, cx: &mut Context<Self>) {
+        self.models.status = Some("resetting auxiliary tasks…".to_string());
+        self.backend.send(Command::ResetAuxModels);
+        cx.notify();
+    }
+
+    fn set_reasoning(&mut self, level: &str, cx: &mut Context<Self>) {
+        self.models.status = Some(format!(
+            "reasoning: {}…",
+            models::reasoning_label(level).to_lowercase()
+        ));
+        self.backend.send(Command::SetReasoning {
+            level: level.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn assignments_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut list = div()
+            .id("assignments-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if !self.models.aux_loaded {
+            list = list.child(self.note("Loading assignments…"));
+        } else if let Some(error) = self.models.aux_error.as_deref() {
+            list = list.child(self.note(error));
+        } else if self.models.auxiliary.is_empty() {
+            list = list.child(self.note("No auxiliary tasks reported."));
+        } else {
+            for task in &self.models.auxiliary {
+                let key = task.task.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("aux-{}", task.task)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(BG_ELEV))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(SURFACE_HI)))
+                        .on_click(
+                            cx.listener(move |this, _event, _window, cx| this.assign_to(&key, cx)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(models::task_label(&task.task))),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_DIM))
+                                        .child(SharedString::from(models::aux_line(task))),
+                                ),
+                        )
+                        .child(div().text_xs().text_color(rgb(ACCENT)).child("Change")),
+                );
+            }
+        }
+
+        let mut chips = div().flex().flex_wrap().gap_2();
+        for level in models::REASONING_LEVELS {
+            let level = level.to_string();
+            let selected = self.models.reasoning.trim() == level;
+            let label = models::reasoning_label(&level);
+            let id = format!(
+                "reasoning-{}",
+                if level.is_empty() { "default" } else { &level }
+            );
+            chips =
+                chips.child(
+                    div()
+                        .id(SharedString::from(id))
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .when(selected, |this| this.bg(rgb(ACCENT)).text_color(rgb(BG)))
+                        .when(!selected, |this| {
+                            this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                        })
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(BORDER_HI)))
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.set_reasoning(&level, cx)
+                        }))
+                        .child(SharedString::from(label)),
+                );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_5()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT_DIM))
+                            .child("AUXILIARY TASKS"),
+                    )
+                    .child(
+                        div()
+                            .id("aux-reset")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(SURFACE_HI))
+                            .text_xs()
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .on_click(cx.listener(|this, _event, _window, cx| this.reset_aux(cx)))
+                            .child("Reset all to main"),
+                    ),
+            )
+            .child(list)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .px_5()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT_DIM))
+                            .child("REASONING EFFORT"),
+                    )
+                    .child(chips)
+                    .child(
+                        div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                            "Default inherits the server's level (medium). New sessions only.",
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .px_5()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(SharedString::from(
+                                self.models
+                                    .status
+                                    .clone()
+                                    .or_else(|| self.models.aux_error.clone())
+                                    .unwrap_or_else(|| {
+                                        "Pinned tasks keep their own model until reset.".to_string()
+                                    }),
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn models_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1036,6 +1280,44 @@ impl HermesApp {
                             }),
                     ),
             )
+            .when_some(self.models.aux_target.clone(), |this, task| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_5()
+                        .py_2()
+                        .bg(rgb(ACCENT_SOFT))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(ACCENT))
+                                .child(SharedString::from(format!(
+                                    "Assigning {} — pick a model",
+                                    models::task_label(&task)
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .id("aux-cancel")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(SURFACE))
+                                .text_xs()
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.models.aux_target = None;
+                                    this.settings.show(Section::Assignments);
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1657,6 +1939,7 @@ impl HermesApp {
         let body = match section {
             Section::Vault => self.vault_body(cx),
             Section::Model => self.models_body(cx),
+            Section::Assignments => self.assignments_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -1707,6 +1990,7 @@ impl HermesApp {
                                 move |this, _event, _window, cx| match candidate {
                                     Section::Usage => this.open_usage(cx),
                                     Section::Model => this.open_models(cx),
+                                    Section::Assignments => this.load_assignments(cx),
                                     Section::Vault => this.open_vault(cx),
                                 },
                             ))
@@ -2605,7 +2889,6 @@ impl HermesApp {
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .h_full()
                 .child(self.empty_state(cx))
                 .into_any_element();
         }
@@ -2618,7 +2901,6 @@ impl HermesApp {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .h_full()
             .overflow_y_scroll()
             .bg(rgb(BG))
             .child(
@@ -4037,6 +4319,9 @@ impl Render for HermesApp {
                 cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key(event, cx)),
             )
             .child(self.header(cx))
+            // Rail, conversation and inspector share one full-height row; the
+            // composer lives inside the centre column so it can never clip the
+            // side panes (Grok's all-vertical split).
             .child(
                 div()
                     .flex()
@@ -4044,14 +4329,22 @@ impl Render for HermesApp {
                     .min_h_0()
                     .overflow_hidden()
                     .child(self.sidebar(cx))
-                    .child(self.chat(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(self.chat(cx))
+                            .when_some(cards, |this, cards| this.child(cards))
+                            .child(self.composer(cx)),
+                    )
                     .when(self.inspector.open, |this| {
                         this.child(self.inspector_panel(cx))
                     }),
             )
-            .when_some(cards, |this, cards| this.child(cards))
             .when_some(palette, |this, palette| this.child(palette))
-            .child(self.composer(cx))
             .when(self.settings.open, |this| {
                 this.child(self.settings_overlay(cx))
             })

@@ -98,9 +98,9 @@ is never called, so the client can write a secret but cannot read one back.
 
 ## Settings
 
-`Ctrl+Shift+V` (Vault), `Ctrl+Shift+M` (Model) and `Ctrl+Shift+U`
-(Usage & Billing) open the settings sheet, which keeps its sections down the
-left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
+`Ctrl+Shift+V` (Vault), `Ctrl+Shift+M` (Model), `Ctrl+Shift+A` (Assignments)
+and `Ctrl+Shift+U` (Usage & Billing) open the settings sheet, which keeps its
+sections down the left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
 Vault.
 
 **Vault** is the host's credential catalog, grouped into one tab per category the
@@ -115,6 +115,16 @@ model, and picking one writes `POST /api/model/set`. That applies to new
 sessions only — an open chat keeps the model it started with — so the page says
 so instead of implying a hot swap.
 
+**Assignments** ports the two config-backed knobs the Electron app keeps beside
+the model picker: `GET /api/model/auxiliary` lists the host's helper tasks
+(vision, compression, titles, review, curation and friends — the list is
+server-driven) with their pinned `provider · model` or `Follows main`; picking one reuses the
+model catalog and posts `scope: auxiliary` to `/api/model/set`. `Reset all to
+main` uses the backend's `__reset__` sentinel. The same page carries the
+reasoning scale (default/minimal/low/medium/high/xhigh/max/ultra), read from
+`agent.reasoning_effort` in `/api/config` and written back with a partial deep
+merge. Both apply to new sessions only.
+
 **Usage & Billing** reads `/api/analytics/usage` for the 7/30/90-day totals and
 per-model spend, `/api/model/info` for the running model and its context, and
 `/api/portal` for the account tier and where billing is managed. A host whose
@@ -124,8 +134,8 @@ reports and links out instead of moving money.
 
 `HERMES_OPEN_INSPECTOR=1` opens the panel at launch,
 `HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab, and
-`HERMES_OPEN_SETTINGS=vault|model|usage` opens the settings sheet on that
-section.
+`HERMES_OPEN_SETTINGS=vault|model|assignments|usage` opens the settings sheet
+on that section.
 `HERMES_DEMO=1` seeds a short local transcript. Those are QA hooks for screenshot
 runs, which is how the panel, sheet and message styling are reviewed without
 input automation.

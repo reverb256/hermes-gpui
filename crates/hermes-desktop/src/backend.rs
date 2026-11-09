@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo, ModelOptions,
-    PortalStatus, Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
+    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo,
+    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -170,6 +170,15 @@ pub enum BackendEvent {
     ModelStatus(String),
     /// The model after a successful switch, so the usage page stays honest.
     ModelInfo(ModelInfo),
+    Auxiliary(Vec<AuxiliaryTask>),
+    AuxiliaryFailed(String),
+    AuxiliarySaved {
+        task: String,
+        provider: String,
+        model: String,
+    },
+    ReasoningEffort(String),
+    ReasoningFailed(String),
     Avatar {
         profile: String,
         mime: String,
@@ -234,6 +243,16 @@ pub enum Command {
     SetModel {
         provider: String,
         model: String,
+    },
+    LoadAuxiliary,
+    SetAuxModel {
+        task: String,
+        provider: String,
+        model: String,
+    },
+    ResetAuxModels,
+    SetReasoning {
+        level: String,
     },
 }
 
@@ -475,6 +494,84 @@ async fn worker(
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
                                     )));
+                                }
+                            }
+                        }
+                        Command::LoadAuxiliary => {
+                            match rest.auxiliary_models().await {
+                                Ok(aux) => {
+                                    let _ = events.send(BackendEvent::Auxiliary(aux.tasks));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ =
+                                        events.send(BackendEvent::AuxiliaryFailed(message));
+                                }
+                            }
+                            match rest.reasoning_effort().await {
+                                Ok(level) => {
+                                    let _ = events.send(BackendEvent::ReasoningEffort(level));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ =
+                                        events.send(BackendEvent::ReasoningFailed(message));
+                                }
+                            }
+                        }
+                        Command::SetAuxModel {
+                            task,
+                            provider,
+                            model,
+                        } => match rest.set_auxiliary_model(&task, &provider, &model).await {
+                            Ok(_) => {
+                                let _ = events.send(BackendEvent::AuxiliarySaved {
+                                    task,
+                                    provider,
+                                    model,
+                                });
+                                if let Ok(aux) = rest.auxiliary_models().await {
+                                    let _ = events.send(BackendEvent::Auxiliary(aux.tasks));
+                                }
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::ModelStatus(format!(
+                                    "assignment failed: {message}"
+                                )));
+                            }
+                        },
+                        Command::ResetAuxModels => {
+                            match rest.reset_auxiliary_models().await {
+                                Ok(_) => {
+                                    if let Ok(aux) = rest.auxiliary_models().await {
+                                        let _ = events.send(BackendEvent::Auxiliary(aux.tasks));
+                                    }
+                                    let _ = events.send(BackendEvent::ModelStatus(
+                                        "auxiliary tasks follow the main model".to_string(),
+                                    ));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::ModelStatus(format!(
+                                        "reset failed: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::SetReasoning { level } => {
+                            match rest.set_reasoning_effort(&level).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::ReasoningEffort(level));
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ =
+                                        events.send(BackendEvent::ReasoningFailed(message));
                                 }
                             }
                         }
