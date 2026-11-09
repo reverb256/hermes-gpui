@@ -2,13 +2,15 @@
 //!
 //! The goal is Grok-Bot-like flow: never reach for the mouse. Enter sends,
 //! Shift+Enter breaks the line, Ctrl+K opens the palette, Ctrl+N starts a
-//! fresh chat, Ctrl+1..9 jumps between bots (profiles), Esc interrupts.
+//! fresh chat, Ctrl+1..9 jumps between bots (profiles), Ctrl+O attaches a
+//! file, Esc interrupts or dismisses.
 
 /// Which surface has the keystroke.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Composer,
     Palette,
+    Mention,
 }
 
 /// One key press, normalised away from GPUI types.
@@ -33,17 +35,21 @@ pub enum Action {
     NewChat,
     OpenPalette,
     Refresh,
+    Attach,
     Dismiss,
     PaletteUp,
     PaletteDown,
     PaletteAccept,
+    ListUp,
+    ListDown,
+    ListAccept,
     SwitchProfile(usize),
     Nothing,
 }
 
 pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
-    if focus == Focus::Palette {
-        return match chord.key {
+    match focus {
+        Focus::Palette => match chord.key {
             "escape" => Action::Dismiss,
             "enter" => Action::PaletteAccept,
             "up" => Action::PaletteUp,
@@ -53,30 +59,44 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                 Some(text) if !chord.primary => Action::Insert(text.to_string()),
                 _ => Action::Nothing,
             },
-        };
-    }
-
-    if chord.primary {
-        return match chord.key {
-            "k" => Action::OpenPalette,
-            "n" => Action::NewChat,
-            "r" => Action::Refresh,
-            digit => match digit.parse::<usize>() {
-                Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),
+        },
+        // The mention popup owns Enter/Tab/Esc; typing keeps filtering it.
+        Focus::Mention => match chord.key {
+            "escape" => Action::Dismiss,
+            "enter" | "tab" => Action::ListAccept,
+            "up" => Action::ListUp,
+            "down" => Action::ListDown,
+            "backspace" => Action::Backspace,
+            _ => match chord.text {
+                Some(text) if !chord.primary => Action::Insert(text.to_string()),
                 _ => Action::Nothing,
             },
-        };
-    }
-
-    match chord.key {
-        "enter" if chord.shift => Action::Newline,
-        "enter" => Action::Send,
-        "escape" => Action::Interrupt,
-        "backspace" => Action::Backspace,
-        _ => match chord.text {
-            Some(text) if !chord.alt => Action::Insert(text.to_string()),
-            _ => Action::Nothing,
         },
+        Focus::Composer => {
+            if chord.primary {
+                return match chord.key {
+                    "k" => Action::OpenPalette,
+                    "n" => Action::NewChat,
+                    "r" => Action::Refresh,
+                    "o" => Action::Attach,
+                    digit => match digit.parse::<usize>() {
+                        Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),
+                        _ => Action::Nothing,
+                    },
+                };
+            }
+
+            match chord.key {
+                "enter" if chord.shift => Action::Newline,
+                "enter" => Action::Send,
+                "escape" => Action::Interrupt,
+                "backspace" => Action::Backspace,
+                _ => match chord.text {
+                    Some(text) if !chord.alt => Action::Insert(text.to_string()),
+                    _ => Action::Nothing,
+                },
+            }
+        }
     }
 }
 
@@ -118,6 +138,7 @@ mod tests {
         assert_eq!(resolve(ctrl("k"), Focus::Composer), Action::OpenPalette);
         assert_eq!(resolve(ctrl("n"), Focus::Composer), Action::NewChat);
         assert_eq!(resolve(ctrl("r"), Focus::Composer), Action::Refresh);
+        assert_eq!(resolve(ctrl("o"), Focus::Composer), Action::Attach);
         assert_eq!(
             resolve(ctrl("3"), Focus::Composer),
             Action::SwitchProfile(3)
@@ -163,7 +184,6 @@ mod tests {
             resolve(chord("escape", None), Focus::Palette),
             Action::Dismiss
         );
-        // Ctrl chords are not text in the palette.
         assert_eq!(
             resolve(
                 Chord {
@@ -173,6 +193,27 @@ mod tests {
                 Focus::Palette
             ),
             Action::Nothing
+        );
+    }
+
+    #[test]
+    fn mentions_accept_on_enter_or_tab() {
+        assert_eq!(
+            resolve(chord("enter", None), Focus::Mention),
+            Action::ListAccept
+        );
+        assert_eq!(
+            resolve(chord("tab", None), Focus::Mention),
+            Action::ListAccept
+        );
+        assert_eq!(resolve(chord("up", None), Focus::Mention), Action::ListUp);
+        assert_eq!(
+            resolve(chord("escape", None), Focus::Mention),
+            Action::Dismiss
+        );
+        assert_eq!(
+            resolve(chord("m", Some("m")), Focus::Mention),
+            Action::Insert("m".into())
         );
     }
 }

@@ -20,6 +20,7 @@ futures-util.workspace = true
 gpui = { package = "gpui-ce", version = "=0.3.0" }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", features = ["font-kit", "wayland", "x11"] }
 ksni = { version = "0.3", features = ["blocking"] }
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

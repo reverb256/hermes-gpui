@@ -17,6 +17,19 @@ fn main() {
 
     let host = HostConfig::from_env();
 
+    // Headless verification: REST, WS handshake, session creation, then exit.
+    if std::env::args().any(|arg| arg == "--probe") {
+        let report = tokio::runtime::Runtime::new()
+            .expect("build tokio runtime")
+            .block_on(backend::probe(&host));
+        let mut failed = false;
+        for line in &report {
+            println!("{line}");
+            failed |= line.contains("FAILED");
+        }
+        std::process::exit(i32::from(failed));
+    }
+
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
         let options = WindowOptions {
@@ -28,7 +41,13 @@ fn main() {
             ..Default::default()
         };
 
-        cx.open_window(options, |_window, cx| {
+        cx.open_window(options, |window, cx| {
+            // Close hides to the tray instead of quitting, so a running turn
+            // keeps streaming; Quit lives on the tray menu and in the palette.
+            window.on_window_should_close(cx, |window, _cx| {
+                window.minimize_window();
+                false
+            });
             cx.new(|cx| app::HermesApp::new(host.clone(), cx))
         })
         .expect("open Hermes window");

@@ -20,6 +20,11 @@ pub struct HostConfig {
     /// `user:password` for hosts fronted by basic auth (e.g. the k3s pod's
     /// tailnet ingress).
     pub basic: Option<(String, String)>,
+    /// Dashboard session cookie (`__Host-hermes_session_at=…`), set by
+    /// [`authenticate`]. Sent on REST calls and used to mint WS tickets.
+    pub cookie: Option<String>,
+    /// Single-use `?ticket=` for the next WS upgrade, set by [`authenticate`].
+    pub ticket: Option<String>,
 }
 
 impl HostConfig {
@@ -29,6 +34,8 @@ impl HostConfig {
             profile: None,
             token: None,
             basic: None,
+            cookie: None,
+            ticket: None,
         }
     }
 
@@ -46,6 +53,11 @@ impl HostConfig {
         if let Ok(basic) = std::env::var("HERMES_BASIC") {
             if let Some((user, pass)) = basic.split_once(':') {
                 cfg.basic = Some((user.to_string(), pass.to_string()));
+            }
+        }
+        if let Ok(cookie) = std::env::var("HERMES_COOKIE") {
+            if !cookie.is_empty() {
+                cfg.cookie = Some(cookie);
             }
         }
         if let Ok(profile) = std::env::var("HERMES_PROFILE") {
@@ -71,8 +83,13 @@ impl HostConfig {
 
     pub fn connection_config(&self) -> ConnectionConfig {
         let mut cfg = ConnectionConfig::new(self.ws_url());
+        if let Some(ticket) = &self.ticket {
+            cfg.url = format!("{}?ticket={}", cfg.url, percent_encode(ticket));
+        }
         if let Some(token) = &self.token {
             cfg = cfg.with_bearer(token.clone());
+        } else if let Some(cookie) = &self.cookie {
+            cfg = cfg.with_cookie(cookie.clone());
         } else if let Some((user, pass)) = &self.basic {
             cfg = cfg.with_basic(user, pass);
         }
@@ -153,6 +170,7 @@ pub struct RestClient {
     base: String,
     token: Option<String>,
     basic: Option<(String, String)>,
+    cookie: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,6 +193,8 @@ pub enum ApiError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("missing `{field}` in response from {path}")]
+    Missing { field: String, path: String },
     #[error(transparent)]
     Rpc(#[from] hermes_rpc::RpcError),
 }
@@ -189,6 +209,7 @@ impl RestClient {
             base: host.base_url.trim_end_matches('/').to_string(),
             token: host.token.clone(),
             basic: host.basic.clone(),
+            cookie: host.cookie.clone(),
         }
     }
 
@@ -196,6 +217,10 @@ impl RestClient {
         let mut req = self.http.get(format!("{}{}", self.base, path));
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
+        } else if let Some(cookie) = &self.cookie {
+            // A dashboard session wins over raw basic creds: the gated routers
+            // only read the cookie, and basic-auth passwords are not forwarded.
+            req = req.header("cookie", cookie.clone());
         } else if let Some((user, pass)) = &self.basic {
             req = req.basic_auth(user, Some(pass));
         }
@@ -261,6 +286,171 @@ impl RestClient {
     pub async fn status(&self) -> Result<Value, ApiError> {
         self.get("/api/status").await
     }
+
+    /// Name of the password provider advertised by `GET /api/auth/providers`,
+    /// e.g. `basic` for `HERMES_DASHBOARD_BASIC_AUTH_*` deployments.
+    async fn password_provider(&self) -> Option<String> {
+        let payload: Value = self.get("/api/auth/providers").await.ok()?;
+        for provider in payload.get("providers")?.as_array()? {
+            if provider.get("supports_password").and_then(Value::as_bool) == Some(true) {
+                if let Some(name) = provider.get("name").and_then(Value::as_str) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// `POST /auth/password-login`; returns the session cookie for reuse.
+    pub async fn login(&self) -> Result<Option<String>, ApiError> {
+        const PATH: &str = "/auth/password-login";
+        let Some((user, pass)) = self.basic.clone() else {
+            return Ok(None);
+        };
+        let provider = self
+            .password_provider()
+            .await
+            .unwrap_or_else(|| "basic".into());
+        let body = serde_json::json!({
+            "provider": provider,
+            "username": user,
+            "password": pass,
+            "next": "",
+        });
+
+        let mut req = self.http.post(format!("{}{PATH}", self.base)).json(&body);
+        if let Some(cookie) = &self.cookie {
+            req = req.header("cookie", cookie.clone());
+        }
+
+        let response = req.send().await.map_err(|source| ApiError::Transport {
+            path: PATH.to_string(),
+            source,
+        })?;
+        let status = response.status();
+
+        // `hermes_session_at` holds the access token; keep the whole pair,
+        // including the `__Host-`/`__Secure-` prefix the server chose.
+        let mut session = None;
+        for raw in response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+        {
+            let Ok(raw) = raw.to_str() else { continue };
+            let Some(pair) = raw.split(';').next() else {
+                continue;
+            };
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if name.contains("hermes_session_at") && !value.is_empty() {
+                session = Some(format!("{name}={value}"));
+            }
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                path: PATH.to_string(),
+                body: text.chars().take(400).collect(),
+            });
+        }
+        Ok(session)
+    }
+
+    /// `POST /api/auth/ws-ticket` — single-use, 30s TTL upgrade credential.
+    pub async fn ws_ticket(&self) -> Result<String, ApiError> {
+        const PATH: &str = "/api/auth/ws-ticket";
+        let mut req = self.http.post(format!("{}{PATH}", self.base));
+        if let Some(cookie) = &self.cookie {
+            req = req.header("cookie", cookie.clone());
+        }
+        let response = req.send().await.map_err(|source| ApiError::Transport {
+            path: PATH.to_string(),
+            source,
+        })?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                path: PATH.to_string(),
+                body: text.chars().take(400).collect(),
+            });
+        }
+        let payload: Value = serde_json::from_str(&text).map_err(|source| ApiError::Decode {
+            path: PATH.to_string(),
+            source,
+        })?;
+        payload
+            .get("ticket")
+            .and_then(Value::as_str)
+            .filter(|ticket| !ticket.is_empty())
+            .map(str::to_string)
+            .ok_or(ApiError::Missing {
+                field: "ticket".into(),
+                path: PATH.to_string(),
+            })
+    }
+}
+
+/// Percent-encode for a query value (tickets are base64url, but stay safe).
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Resolve credentials for a host before dialing: password-login when only
+/// basic credentials are configured, then mint a single-use WS ticket.
+///
+/// Failures come back as human-readable notes rather than errors so a caller
+/// can still attempt the connection (loopback hosts need no auth at all).
+pub async fn authenticate(host: &HostConfig) -> (HostConfig, Vec<String>) {
+    let mut host = host.clone();
+    let mut notes = Vec::new();
+
+    if host.token.is_some() || host.basic.is_none() {
+        return (host, notes);
+    }
+
+    if host.cookie.is_none() {
+        match RestClient::new(&host).login().await {
+            Ok(Some(cookie)) => host.cookie = Some(cookie),
+            Ok(None) => {}
+            Err(err) => notes.push(format!("login failed: {err}")),
+        }
+    }
+
+    if host.cookie.is_some() {
+        match RestClient::new(&host).ws_ticket().await {
+            Ok(ticket) => host.ticket = Some(ticket),
+            Err(err) => notes.push(format!("ws ticket failed: {err}")),
+        }
+    }
+
+    (host, notes)
 }
 
 /// Session/prompt helpers over the gateway's JSON-RPC surface.
@@ -396,6 +586,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(profile.label(), "default");
+    }
+
+    #[test]
+    fn ticket_is_appended_to_the_ws_url() {
+        let host = HostConfig {
+            base_url: "https://hermes.example.com".into(),
+            cookie: Some("__Host-hermes_session_at=abc".into()),
+            ticket: Some("t-1_2".into()),
+            ..HostConfig::local()
+        };
+        let cfg = host.connection_config();
+        assert_eq!(
+            cfg.url,
+            "wss://hermes.example.com/api/ws?ticket=t-1_2"
+        );
+        assert!(matches!(cfg.auth, Some(Auth::Cookie(_))));
+    }
+
+    #[test]
+    fn percent_encode_escapes_query_unsafe_bytes() {
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+        assert_eq!(percent_encode("a b/c"), "a%20b%2Fc");
     }
 
     #[test]

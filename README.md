@@ -35,7 +35,28 @@ cargo run -p hermes-desktop
 ```
 
 Env vars: `HERMES_URL` (origin), `HERMES_TOKEN` (bearer), `HERMES_BASIC`
-(`user:pass`), `HERMES_PROFILE` (profile to scope the chat to).
+(`user:pass`), `HERMES_COOKIE` (a ready-made `hermes_session_at=…` cookie, skips
+login), `HERMES_PROFILE` (profile to scope the chat to).
+
+### Authentication
+
+A gated dashboard (`auth_required: true`) does not accept basic auth on its
+routers or on the socket. When only `HERMES_BASIC` is set the client:
+
+1. `GET /api/auth/providers` → picks the provider with `supports_password`
+   (`basic` for `HERMES_DASHBOARD_BASIC_AUTH_*` deployments);
+2. `POST /auth/password-login` → keeps the `__Host-hermes_session_at` cookie;
+3. sends that cookie on every REST call and mints a fresh single-use
+   `POST /api/auth/ws-ticket` before each dial, appending `?ticket=…` to the
+   `/api/ws` URL (tickets live 30 s and are consumed by the handshake).
+
+`--probe` performs the whole sequence headlessly and reports each step, which
+makes it the quickest way to check a host:
+
+```bash
+HERMES_URL=https://hermes.example.com HERMES_BASIC=user:pass   ./target/debug/hermes-desktop --probe
+```
+
 
 ### Pointing at the hermes deployment
 
@@ -59,11 +80,13 @@ vulkan-icd-loader vulkan-headers fontconfig freetype2`.
 
 ## Status
 
-Working today: connect/handshake/keepalive, profile roster, active-profile
-display, streaming chat transcript with reasoning deltas, prompt submission,
-interrupt, tray icon with show/quit.
+Working today: connect/handshake/keepalive, password login + WS tickets for
+gated hosts, profile roster, bot switching (`Ctrl+1…9`), streaming transcript
+with reasoning deltas, prompt submission, interrupt, approval cards
+(allow once / always allow / deny), clarify cards, `@`-mentions for bots and
+skills, file and image attachments, cron routines read-out, tray icon with
+show/quit and minimise-on-close.
 
-Not yet wired: approvals and clarify cards (requests are received and surfaced
-as system lines), file browser, voice mode, multi-host switching. The composer
-handles printable keys, backspace and enter; there is no IME composition or
-text selection yet.
+Not yet wired: file browser, voice mode, inline Vault-style secrets,
+multi-host switching. The composer handles printable keys, backspace and enter;
+there is no IME composition or text selection yet.

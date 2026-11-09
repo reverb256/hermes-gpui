@@ -16,7 +16,7 @@ mod client;
 mod frame;
 
 pub use client::{
-    APPROVAL_RESPOND_TIMEOUT, Auth, ConnectionConfig, ConnectionState, GatewayClient,
+    APPROVAL_RESPOND_TIMEOUT, Auth, ConnectionConfig, ConnectionState, GatewayClient, base64_encode,
 };
 pub use frame::{
     GatewayEvent, INTERNAL_ERROR, JsonRpcError, METHOD_NOT_FOUND, RpcError, SESSION_NOT_SHOWN,

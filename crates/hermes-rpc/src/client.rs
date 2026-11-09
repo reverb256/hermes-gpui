@@ -28,6 +28,8 @@ pub enum Auth {
     Bearer(String),
     /// Pre-encoded `Authorization` header value, e.g. `Basic <base64>`.
     Header(String),
+    /// `Cookie` header value, e.g. `__Host-hermes_session_at=…` (dashboard session).
+    Cookie(String),
 }
 
 impl std::fmt::Debug for Auth {
@@ -60,6 +62,11 @@ impl ConnectionConfig {
 
     pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
         self.auth = Some(Auth::Bearer(token.into()));
+        self
+    }
+
+    pub fn with_cookie(mut self, cookie: impl Into<String>) -> Self {
+        self.auth = Some(Auth::Cookie(cookie.into()));
         self
     }
 
@@ -112,6 +119,7 @@ impl GatewayClient {
             let (name, value) = match auth {
                 Auth::Bearer(token) => ("authorization", format!("Bearer {token}")),
                 Auth::Header(value) => ("authorization", value.clone()),
+                Auth::Cookie(value) => ("cookie", value.clone()),
             };
             let value =
                 HeaderValue::from_str(&value).map_err(|err| RpcError::Decode(err.to_string()))?;
@@ -431,7 +439,7 @@ fn reply_error(outbound: &mpsc::UnboundedSender<Message>, id: &str, code: i64) -
         .map_err(|_| ())
 }
 
-fn base64_encode(input: &[u8]) -> String {
+pub fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
