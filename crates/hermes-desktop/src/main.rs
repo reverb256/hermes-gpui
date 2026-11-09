@@ -2,6 +2,7 @@ mod app;
 mod backend;
 mod inspector;
 mod keys;
+mod models;
 mod settings;
 mod theme;
 mod transcript;

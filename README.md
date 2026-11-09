@@ -98,15 +98,22 @@ is never called, so the client can write a secret but cannot read one back.
 
 ## Settings
 
-`Ctrl+Shift+V` (Vault) and `Ctrl+Shift+U` (Usage & Billing) open the settings
-sheet, which keeps its sections down the left edge. `Vault ⇗` on the inspector's
-Secrets tab opens the same sheet on Vault.
+`Ctrl+Shift+V` (Vault), `Ctrl+Shift+M` (Model) and `Ctrl+Shift+U`
+(Usage & Billing) open the settings sheet, which keeps its sections down the
+left edge. `Vault ⇗` on the inspector's Secrets tab opens the same sheet on
+Vault.
 
 **Vault** is the host's credential catalog, grouped into one tab per category the
 host reports, with set counts, search and a per-entry replace form. `New item`
 writes a key through `PUT /api/env`. Rows show the redacted value; the reveal
 endpoint is never called, so the sheet can write a credential but not read one
 back.
+
+**Model** ports the Electron model picker: `/api/model/options` lists the
+authenticated providers and their curated model ids, searchable by provider or
+model, and picking one writes `POST /api/model/set`. That applies to new
+sessions only — an open chat keeps the model it started with — so the page says
+so instead of implying a hot swap.
 
 **Usage & Billing** reads `/api/analytics/usage` for the 7/30/90-day totals and
 per-model spend, `/api/model/info` for the running model and its context, and
@@ -117,7 +124,8 @@ reports and links out instead of moving money.
 
 `HERMES_OPEN_INSPECTOR=1` opens the panel at launch,
 `HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab, and
-`HERMES_OPEN_SETTINGS=vault|usage` opens the settings sheet on that section.
+`HERMES_OPEN_SETTINGS=vault|model|usage` opens the settings sheet on that
+section.
 `HERMES_DEMO=1` seeds a short local transcript. Those are QA hooks for screenshot
 runs, which is how the panel, sheet and message styling are reviewed without
 input automation.

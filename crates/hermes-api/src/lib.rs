@@ -323,6 +323,38 @@ pub struct PortalStatus {
     pub subscription_url: String,
 }
 
+/// One provider in `GET /api/model/options`, with its curated model ids.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelOptionProvider {
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub authenticated: bool,
+    #[serde(default)]
+    pub free_tier: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub featured_models: Vec<String>,
+    #[serde(default)]
+    pub total_models: u64,
+}
+
+/// `GET /api/model/options` — the active model plus every configured provider.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelOptions {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub providers: Vec<ModelOptionProvider>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NamedToggle {
     #[serde(default)]
@@ -571,6 +603,27 @@ impl RestClient {
     /// `GET /api/portal` — account tier and where billing is managed.
     pub async fn portal(&self) -> Result<PortalStatus, ApiError> {
         self.get("/api/portal").await
+    }
+
+    /// `GET /api/model/options` — authenticated providers and their models.
+    pub async fn model_options(&self) -> Result<ModelOptions, ApiError> {
+        self.get("/api/model/options?explicit_only=1").await
+    }
+
+    /// `POST /api/model/set` — writes the main model for *new* sessions.
+    pub async fn set_model(&self, provider: &str, model: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/model/set";
+        let body = serde_json::json!({ "scope": "main", "provider": provider, "model": model });
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
     }
 
     /// `PUT /api/env` — writes `.env` and reconciles config.yaml mirrors.

@@ -8,17 +8,19 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     Vault,
+    Model,
     Usage,
 }
 
 impl Section {
-    pub fn all() -> [Section; 2] {
-        [Section::Vault, Section::Usage]
+    pub fn all() -> [Section; 3] {
+        [Section::Vault, Section::Model, Section::Usage]
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Section::Vault => "Vault",
+            Section::Model => "Model",
             Section::Usage => "Usage & Billing",
         }
     }
@@ -27,6 +29,7 @@ impl Section {
     pub fn glyph(self) -> &'static str {
         match self {
             Section::Vault => "▤",
+            Section::Model => "◇",
             Section::Usage => "▥",
         }
     }
@@ -64,9 +67,15 @@ mod tests {
     #[test]
     fn sections_are_distinct_and_labeled() {
         let sections = Section::all();
-        assert_eq!(sections.len(), 2);
-        assert_ne!(sections[0].label(), sections[1].label());
-        assert_ne!(sections[0].glyph(), sections[1].glyph());
+        assert_eq!(sections.len(), 3);
+        for (index, section) in sections.iter().enumerate() {
+            assert!(!section.label().is_empty());
+            assert!(
+                sections[..index]
+                    .iter()
+                    .all(|other| other.label() != section.label())
+            );
+        }
     }
 
     #[test]

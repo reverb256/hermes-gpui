@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo, PortalStatus,
-    Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
+    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo, ModelOptions,
+    PortalStatus, Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -164,6 +164,12 @@ pub enum BackendEvent {
     },
     /// Analytics refused (a host with an unreadable `state.db`, for example).
     UsageFailed(String),
+    /// `GET /api/model/options` for the picker.
+    Models(ModelOptions),
+    ModelsFailed(String),
+    ModelStatus(String),
+    /// The model after a successful switch, so the usage page stays honest.
+    ModelInfo(ModelInfo),
     Avatar {
         profile: String,
         mime: String,
@@ -223,6 +229,11 @@ pub enum Command {
     },
     LoadUsage {
         days: u32,
+    },
+    LoadModels,
+    SetModel {
+        provider: String,
+        model: String,
     },
 }
 
@@ -463,6 +474,42 @@ async fn worker(
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::LoadModels => match rest.model_options().await {
+                            Ok(options) => {
+                                tracing::debug!(
+                                    providers = options.providers.len(),
+                                    "models: options loaded"
+                                );
+                                let _ = events.send(BackendEvent::Models(options));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                tracing::warn!(%message, "models: options failed");
+                                let _ = events.send(BackendEvent::ModelsFailed(message));
+                            }
+                        },
+                        Command::SetModel { provider, model } => {
+                            match rest.set_model(&provider, &model).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::ModelStatus(format!(
+                                        "switched to {model} — new sessions only"
+                                    )));
+                                    if let Ok(options) = rest.model_options().await {
+                                        let _ = events.send(BackendEvent::Models(options));
+                                    }
+                                    if let Ok(info) = rest.model_info().await {
+                                        let _ = events.send(BackendEvent::ModelInfo(info));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::ModelStatus(format!(
+                                        "switch failed: {message}"
                                     )));
                                 }
                             }

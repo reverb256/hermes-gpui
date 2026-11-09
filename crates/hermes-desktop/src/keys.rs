@@ -38,6 +38,7 @@ pub enum Action {
     Attach,
     ToggleInspector,
     ToggleVault,
+    ToggleModels,
     ToggleUsage,
     Dismiss,
     PaletteUp,
@@ -84,6 +85,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "o" => Action::Attach,
                     "," | "comma" => Action::ToggleInspector,
                     "v" if chord.shift => Action::ToggleVault,
+                    "m" if chord.shift => Action::ToggleModels,
                     "u" if chord.shift => Action::ToggleUsage,
                     digit => match digit.parse::<usize>() {
                         Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),

@@ -20,6 +20,7 @@ use crate::backend::{
 };
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
+use crate::models::{self, Models};
 use crate::settings::{Section, Settings};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming, clip};
@@ -100,6 +101,7 @@ pub struct HermesApp {
     settings: Settings,
     vault: Vault,
     usage: Usage,
+    models: Models,
     rail_search: bool,
     rail_filter: String,
 }
@@ -139,6 +141,7 @@ impl HermesApp {
             inspector: Inspector::default(),
             settings: Settings::default(),
             vault: Vault::default(),
+            models: Models::default(),
             usage: Usage {
                 days: 30,
                 ..Usage::default()
@@ -177,6 +180,7 @@ impl HermesApp {
         // QA hook: open the settings sheet at launch for screenshot review.
         if let Ok(target) = std::env::var("HERMES_OPEN_SETTINGS") {
             match target.as_str() {
+                "model" => app.open_models(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -310,6 +314,10 @@ impl HermesApp {
                 portal,
             } => self.usage.loaded(analytics, model, portal),
             BackendEvent::UsageFailed(message) => self.usage.failed(message),
+            BackendEvent::Models(options) => self.models.loaded(options),
+            BackendEvent::ModelsFailed(message) => self.models.failed(message),
+            BackendEvent::ModelStatus(text) => self.models.status = Some(text),
+            BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
             BackendEvent::Avatar {
                 profile,
                 mime,
@@ -345,7 +353,9 @@ impl HermesApp {
         // Settings is modal: it owns the keyboard while it is up, so chat
         // shortcuts cannot fire behind it.
         if self.settings.open {
-            if self.settings.section == Section::Vault && self.route_vault_typing(event, cx) {
+            if (self.settings.section == Section::Vault && self.route_vault_typing(event, cx))
+                || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
+            {
                 return;
             }
             let keystroke = &event.keystroke;
@@ -354,6 +364,8 @@ impl HermesApp {
                 self.close_settings(cx);
             } else if primary && keystroke.key == "v" {
                 self.toggle_vault(cx);
+            } else if primary && keystroke.key == "m" {
+                self.toggle_models(cx);
             } else if primary && keystroke.key == "u" {
                 self.toggle_usage(cx);
             }
@@ -458,6 +470,7 @@ impl HermesApp {
             Action::ToggleInspector => self.toggle_inspector(cx),
             Action::ToggleVault => self.toggle_vault(cx),
             Action::ToggleUsage => self.toggle_usage(cx),
+            Action::ToggleModels => self.toggle_models(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -844,6 +857,230 @@ impl HermesApp {
                         cx.notify();
                     })),
             )
+    }
+
+    fn open_models(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Model);
+        self.load_models(cx);
+    }
+
+    fn load_models(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Model);
+        self.models.loaded = false;
+        self.models.error = None;
+        self.models.status = None;
+        self.backend.send(Command::LoadModels);
+        cx.notify();
+    }
+
+    fn select_model(&mut self, provider: &str, model: &str, cx: &mut Context<Self>) {
+        self.models.status = Some(format!("switching to {model}…"));
+        self.backend.send(Command::SetModel {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn toggle_models(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Model {
+            self.close_settings(cx);
+        } else {
+            self.open_models(cx);
+        }
+    }
+
+    /// Typing into the model picker's search field.
+    fn route_models_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.models.focus {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" | "enter" => self.models.focus = false,
+            "backspace" => {
+                self.models.query.pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.models.query.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn models_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = models::rows(self.models.options.as_ref(), &self.models.query);
+        let focus = self.models.focus;
+        let current = models::current_line(self.models.options.as_ref());
+
+        let mut list = div()
+            .id("models-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_2();
+        if rows.is_empty() {
+            list = list.child(self.note(if !self.models.loaded {
+                "Loading models…"
+            } else if self.models.error.is_some() {
+                "The provider catalog is unavailable."
+            } else {
+                "No models match this search."
+            }));
+        }
+        let mut last_provider: Option<String> = None;
+        for row in rows {
+            if last_provider.as_deref() != Some(row.provider.as_str()) {
+                last_provider = Some(row.provider.clone());
+                list = list.child(
+                    div()
+                        .pt_2()
+                        .pb_1()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(TEXT_DIM))
+                        .child(SharedString::from(row.provider_name.clone())),
+                );
+            }
+            let provider = row.provider.clone();
+            let model = row.model.clone();
+            let is_current = row.current;
+            let label = row.model.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "model-{}-{}",
+                        row.provider, row.model
+                    )))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG_ELEV))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                    .when(is_current, |this| this.bg(rgb(ACCENT_SOFT)))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.select_model(&provider, &model, cx)
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .when(is_current, |this| this.text_color(rgb(ACCENT)))
+                            .when(!is_current, |this| this.text_color(rgb(TEXT)))
+                            .child(SharedString::from(label)),
+                    )
+                    .when(is_current, |this| {
+                        this.child(div().text_xs().text_color(rgb(ACCENT)).child("Current"))
+                    }),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .id("models-search")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(BG))
+                            .border_1()
+                            .when(focus, |this| this.border_color(rgb(ACCENT)))
+                            .when(!focus, |this| this.border_color(rgb(BORDER)))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.models.focus = true;
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                            .when(self.models.query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_color(rgb(TEXT_DIM))
+                                        .child("Search providers and models"),
+                                )
+                            })
+                            .when(!self.models.query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(self.models.query.clone())),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_5()
+                    .py_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(format!("Current: {current}"))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child("New sessions only"),
+                    ),
+            )
+            .child(list)
+            .child(
+                div()
+                    .px_5()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(SharedString::from(
+                            self.models
+                                .status
+                                .clone()
+                                .or_else(|| self.models.error.clone())
+                                .unwrap_or_else(|| {
+                                    "Switching writes config.yaml; the open chat keeps its model."
+                                        .to_string()
+                                }),
+                        )),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn vault_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1419,6 +1656,7 @@ impl HermesApp {
         let section = self.settings.section;
         let body = match section {
             Section::Vault => self.vault_body(cx),
+            Section::Model => self.models_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -1465,13 +1703,13 @@ impl HermesApp {
                                 this.text_color(rgb(TEXT_MUTED))
                                     .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
                             })
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                if candidate == Section::Usage {
-                                    this.open_usage(cx)
-                                } else {
-                                    this.open_vault(cx)
-                                }
-                            }))
+                            .on_click(cx.listener(
+                                move |this, _event, _window, cx| match candidate {
+                                    Section::Usage => this.open_usage(cx),
+                                    Section::Model => this.open_models(cx),
+                                    Section::Vault => this.open_vault(cx),
+                                },
+                            ))
                             .child(div().child(SharedString::from(candidate.glyph())))
                             .child(div().child(SharedString::from(candidate.label())))
                     })),
