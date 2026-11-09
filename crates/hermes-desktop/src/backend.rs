@@ -189,6 +189,7 @@ pub enum BackendEvent {
         messages: Vec<serde_json::Value>,
     },
     SessionDeleted(String),
+    SessionUpdated(String),
     Skills(Vec<Skill>),
     SkillsFailed(String),
     SkillToggled {
@@ -298,6 +299,10 @@ pub enum Command {
     },
     DeleteSession {
         id: String,
+    },
+    UpdateSession {
+        id: String,
+        patch: Value,
     },
     LoadSkills,
     SetSkill {
@@ -759,6 +764,24 @@ async fn worker(
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     let _ = events.send(BackendEvent::Notice(format!(
                                         "session {id}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::UpdateSession { id, patch } => {
+                            match rest.update_session(&id, patch).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::SessionUpdated(id.clone()));
+                                    if let Ok(page) = rest.sessions(50).await {
+                                        let _ = events
+                                            .send(BackendEvent::Sessions(page.sessions, page.total));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::Notice(format!(
+                                        "session update failed: {message}"
                                     )));
                                 }
                             }

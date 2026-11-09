@@ -914,6 +914,21 @@ impl RestClient {
         .await
     }
 
+    /// `PATCH /api/sessions/{id}` — rename, pin, archive or mark read.
+    pub async fn update_session(&self, id: &str, patch: Value) -> Result<Value, ApiError> {
+        let path = format!("/api/sessions/{id}");
+        let response = self
+            .authed(reqwest::Method::PATCH, &path)
+            .json(&patch)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
     /// `DELETE /api/sessions/{id}` — removes one stored conversation.
     pub async fn delete_session(&self, id: &str) -> Result<Value, ApiError> {
         const PATH: &str = "/api/sessions";

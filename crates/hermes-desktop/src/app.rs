@@ -364,6 +364,9 @@ impl HermesApp {
             BackendEvent::HubFailed(message) => self.skills.hub_failed(message),
             BackendEvent::Sessions(rows, total) => self.sessions.loaded(rows, total),
             BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
+            BackendEvent::SessionUpdated(_id) => {
+                self.sessions.status = Some("session updated".into());
+            }
             BackendEvent::SessionMessages { id, messages } => {
                 self.lines = sessions::lines_from_messages(&messages);
                 self.viewing_history = Some(id);
@@ -3807,6 +3810,24 @@ impl HermesApp {
         cx.notify();
     }
 
+    fn pin_session(&mut self, id: &str, pinned: bool, cx: &mut Context<Self>) {
+        self.sessions.status = Some(if pinned { "pinning…" } else { "unpinning…" }.into());
+        self.backend.send(Command::UpdateSession {
+            id: id.to_string(),
+            patch: serde_json::json!({ "pinned": pinned }),
+        });
+        cx.notify();
+    }
+
+    fn archive_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.sessions.status = Some("archiving…".into());
+        self.backend.send(Command::UpdateSession {
+            id: id.to_string(),
+            patch: serde_json::json!({ "archived": true }),
+        });
+        cx.notify();
+    }
+
     fn delete_session(&mut self, id: &str, cx: &mut Context<Self>) {
         self.backend
             .send(Command::DeleteSession { id: id.to_string() });
@@ -3865,6 +3886,9 @@ impl HermesApp {
         for row in rows {
             let open_id = row.id.clone();
             let delete_id = row.id.clone();
+            let pin_id = row.id.clone();
+            let archive_id = row.id.clone();
+            let pinned = row.pinned;
             let active = self.viewing_history.as_deref() == Some(row.id.as_str());
             list = list.child(
                 div()
@@ -3907,8 +3931,38 @@ impl HermesApp {
                     )
                     .child(
                         div()
+                            .id(SharedString::from(format!("session-pin-{}", row.id)))
+                            .px_1()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(if pinned { ACCENT } else { TEXT_MUTED }))
+                            .cursor_pointer()
+                            .hover(|this| this.text_color(rgb(TEXT)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.pin_session(&pin_id, !pinned, cx)
+                            }))
+                            .child(if pinned { "Unpin" } else { "Pin" }),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("session-arch-{}", row.id)))
+                            .px_1()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .cursor_pointer()
+                            .hover(|this| this.text_color(rgb(TEXT)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.archive_session(&archive_id, cx)
+                            }))
+                            .child("Arch"),
+                    )
+                    .child(
+                        div()
                             .id(SharedString::from(format!("session-del-{}", row.id)))
-                            .px_2()
+                            .px_1()
                             .py_1()
                             .rounded_md()
                             .text_xs()
