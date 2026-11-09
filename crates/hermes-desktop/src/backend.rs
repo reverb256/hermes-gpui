@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use hermes_api::{
     ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, ModelInfo,
-    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, UsageAnalytics, gateway,
+    ModelOptions, PortalStatus, Profile, ProfileDetail, RestClient, SessionSummary, UsageAnalytics,
+    gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -179,6 +180,13 @@ pub enum BackendEvent {
     },
     ReasoningEffort(String),
     ReasoningFailed(String),
+    Sessions(Vec<SessionSummary>, u64),
+    SessionsFailed(String),
+    SessionMessages {
+        id: String,
+        messages: Vec<serde_json::Value>,
+    },
+    SessionDeleted(String),
     Avatar {
         profile: String,
         mime: String,
@@ -253,6 +261,13 @@ pub enum Command {
     ResetAuxModels,
     SetReasoning {
         level: String,
+    },
+    LoadSessions,
+    LoadSession {
+        id: String,
+    },
+    DeleteSession {
+        id: String,
     },
 }
 
@@ -493,6 +508,51 @@ async fn worker(
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
                                         "remove failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::LoadSessions => match rest.sessions(50).await {
+                            Ok(page) => {
+                                let _ = events
+                                    .send(BackendEvent::Sessions(page.sessions, page.total));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::SessionsFailed(message));
+                            }
+                        },
+                        Command::LoadSession { id } => {
+                            match rest.session_messages(&id).await {
+                                Ok(page) => {
+                                    let _ = events.send(BackendEvent::SessionMessages {
+                                        id: page.session_id,
+                                        messages: page.messages,
+                                    });
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::Notice(format!(
+                                        "session {id}: {message}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::DeleteSession { id } => {
+                            match rest.delete_session(&id).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::SessionDeleted(id));
+                                    if let Ok(page) = rest.sessions(50).await {
+                                        let _ = events
+                                            .send(BackendEvent::Sessions(page.sessions, page.total));
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::Notice(format!(
+                                        "delete failed: {message}"
                                     )));
                                 }
                             }

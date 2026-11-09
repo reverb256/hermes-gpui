@@ -14,10 +14,13 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
   `/api/model/info`, `/api/portal`).
 - Full-height rail/inspector split with a centre-column composer, Hermes-style
   footer status strip, tray presence.
+- Session history: newest-first list with message/tool counts and age, search,
+  delete, and stored-transcript hydration from `/api/sessions/{id}/messages`
+  (the rail swaps between bots and sessions).
 
 ## Gaps, in the order worth closing
 
-### 1. Sessions and projects — **Next** (unblocked 2026-11-09)
+### 1. Sessions and projects — **Partly shipped** (unblocked 2026-11-09)
 
 The pod's `state.db` was rebuilt with SQLite `.recover` after btree page
 corruption; `PRAGMA integrity_check` is `ok`, 1,843 sessions and 50,357
@@ -25,7 +28,8 @@ messages survived (23 unreadable messages lost), and `GET /api/sessions`
 returns 200 again. The original is archived off-cluster and a Longhorn
 snapshot (`pre-repair`) was taken first.
 
-Needed now: a session list grouped by recency, resume, rename, delete, and a
+Shipped: recency list, search, delete and transcript hydration. Still needed:
+resume the gateway runtime for an old id, rename, pin/archive, and a
 project/workspace filter.
 
 ### 2. MCP toolsets — **Next**

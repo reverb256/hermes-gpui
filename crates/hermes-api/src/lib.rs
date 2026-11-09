@@ -374,6 +374,56 @@ pub struct AuxiliaryModels {
     pub main: Option<AuxiliaryMain>,
 }
 
+/// One row of `GET /api/sessions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionSummary {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub message_count: u64,
+    #[serde(default)]
+    pub tool_call_count: u64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub last_active: f64,
+    #[serde(default)]
+    pub started_at: f64,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// `GET /api/sessions` — a page of history plus the unfiltered total.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SessionPage {
+    #[serde(default)]
+    pub sessions: Vec<SessionSummary>,
+    #[serde(default)]
+    pub total: u64,
+}
+
+/// `GET /api/sessions/{id}/messages` — stored turns as opaque JSON, so a single
+/// unfamiliar block cannot fail the page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SessionMessages {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
 /// `GET /api/model/options` — the active model plus every configured provider.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelOptions {
@@ -638,6 +688,38 @@ impl RestClient {
     /// `GET /api/model/options` — authenticated providers and their models.
     pub async fn model_options(&self) -> Result<ModelOptions, ApiError> {
         self.get("/api/model/options?explicit_only=1").await
+    }
+
+    /// `GET /api/sessions` — newest conversations, excluding archived rows.
+    pub async fn sessions(&self, limit: u32) -> Result<SessionPage, ApiError> {
+        let limit = limit.clamp(1, 200);
+        self.get(&format!(
+            "/api/sessions?limit={limit}&offset=0&min_messages=1&archived=exclude&order=recent"
+        ))
+        .await
+    }
+
+    /// `GET /api/sessions/{id}/messages` — the stored transcript.
+    pub async fn session_messages(&self, id: &str) -> Result<SessionMessages, ApiError> {
+        self.get(&format!(
+            "/api/sessions/{id}/messages?limit=200&order=latest&include_compacted=true"
+        ))
+        .await
+    }
+
+    /// `DELETE /api/sessions/{id}` — removes one stored conversation.
+    pub async fn delete_session(&self, id: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/sessions";
+        let path = format!("{PATH}/{id}");
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
     }
 
     /// `GET /api/model/auxiliary` — the helper-task assignments.

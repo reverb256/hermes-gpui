@@ -3,6 +3,7 @@ mod backend;
 mod inspector;
 mod keys;
 mod models;
+mod sessions;
 mod settings;
 mod theme;
 mod transcript;

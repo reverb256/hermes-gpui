@@ -21,6 +21,7 @@ use crate::backend::{
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
 use crate::models::{self, Models};
+use crate::sessions::{self, Sessions};
 use crate::settings::{Section, Settings};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming, clip};
@@ -102,6 +103,7 @@ pub struct HermesApp {
     vault: Vault,
     usage: Usage,
     models: Models,
+    sessions: Sessions,
     rail_search: bool,
     rail_filter: String,
 }
@@ -142,6 +144,7 @@ impl HermesApp {
             settings: Settings::default(),
             vault: Vault::default(),
             models: Models::default(),
+            sessions: Sessions::default(),
             usage: Usage {
                 days: 30,
                 ..Usage::default()
@@ -182,6 +185,7 @@ impl HermesApp {
             match target.as_str() {
                 "model" => app.open_models(cx),
                 "assignments" => app.load_assignments(cx),
+                "sessions" => app.open_sessions(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -319,6 +323,26 @@ impl HermesApp {
             BackendEvent::ModelsFailed(message) => self.models.failed(message),
             BackendEvent::ModelStatus(text) => self.models.status = Some(text),
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
+            BackendEvent::Sessions(rows, total) => self.sessions.loaded(rows, total),
+            BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
+            BackendEvent::SessionMessages { id, messages } => {
+                self.lines = sessions::lines_from_messages(&messages);
+                self.session_id = Some(id);
+                self.cards.clear();
+                self.error = None;
+                self.busy = false;
+                self.sessions.open = false;
+                self.sessions.focus = false;
+                self.scroll.scroll_to_bottom();
+            }
+            BackendEvent::SessionDeleted(id) => {
+                self.sessions.rows.retain(|row| row.id != id);
+                self.sessions.total = self.sessions.total.saturating_sub(1);
+                if self.session_id.as_deref() == Some(id.as_str()) {
+                    self.session_id = None;
+                    self.lines.clear();
+                }
+            }
             BackendEvent::Auxiliary(tasks) => self.models.auxiliary_loaded(tasks),
             BackendEvent::AuxiliaryFailed(message) => self.models.auxiliary_failed(message),
             BackendEvent::AuxiliarySaved {
@@ -398,6 +422,12 @@ impl HermesApp {
             }
             return;
         }
+        if event.keystroke.key == "escape" && self.sessions.open {
+            self.sessions.open = false;
+            self.sessions.focus = false;
+            cx.notify();
+            return;
+        }
         if event.keystroke.key == "escape"
             && !self.palette.open
             && !self.mention.open
@@ -405,6 +435,9 @@ impl HermesApp {
         {
             self.inspector.open = false;
             cx.notify();
+            return;
+        }
+        if self.sessions.open && self.route_sessions_typing(event, cx) {
             return;
         }
         if self.rail_search && self.route_rail_typing(event, cx) {
@@ -508,6 +541,7 @@ impl HermesApp {
             Action::ToggleUsage => self.toggle_usage(cx),
             Action::ToggleModels => self.toggle_models(cx),
             Action::ToggleAssignments => self.toggle_assignments(cx),
+            Action::ToggleSessions => self.toggle_sessions(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -2559,6 +2593,20 @@ impl HermesApp {
             )
             .child(
                 div()
+                    .id("sessions-toggle")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(SURFACE))
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_sessions(cx)))
+                    .child("Sessions"),
+            )
+            .child(
+                div()
                     .id("new-chat")
                     .px_3()
                     .py_1()
@@ -2570,6 +2618,268 @@ impl HermesApp {
                     .hover(|this| this.bg(rgb(BORDER_HI)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.new_chat(cx)))
                     .child("New chat"),
+            )
+    }
+
+    fn open_sessions(&mut self, cx: &mut Context<Self>) {
+        if self.sessions.open {
+            self.sessions.open = false;
+            self.sessions.focus = false;
+        } else {
+            self.sessions.open = true;
+            self.sessions.focus = true;
+            if !self.sessions.loaded {
+                self.backend.send(Command::LoadSessions);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_sessions(&mut self, cx: &mut Context<Self>) {
+        self.open_sessions(cx);
+    }
+
+    fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.sessions.loaded = false;
+        self.sessions.error = None;
+        self.backend.send(Command::LoadSessions);
+        cx.notify();
+    }
+
+    fn open_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.sessions.status = Some("loading transcript…".to_string());
+        self.backend
+            .send(Command::LoadSession { id: id.to_string() });
+        cx.notify();
+    }
+
+    fn delete_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.backend
+            .send(Command::DeleteSession { id: id.to_string() });
+        cx.notify();
+    }
+
+    fn route_sessions_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.sessions.focus {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "enter" => self.sessions.focus = false,
+            "backspace" => {
+                self.sessions.query.pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.sessions.query.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn sessions_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = sessions::filtered(&self.sessions.rows, &self.sessions.query);
+        let now = sessions::now_secs();
+        let focus = self.sessions.focus;
+
+        let mut list = div()
+            .id("sessions-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_3()
+            .py_2();
+        if !self.sessions.loaded {
+            list = list.child(self.note("Loading sessions…"));
+        } else if let Some(error) = self.sessions.error.as_deref() {
+            list = list.child(self.note(error));
+        } else if rows.is_empty() {
+            list = list.child(self.note(if self.sessions.query.is_empty() {
+                "No sessions yet."
+            } else {
+                "No sessions match this search."
+            }));
+        }
+        for row in rows {
+            let open_id = row.id.clone();
+            let delete_id = row.id.clone();
+            let active = self.session_id.as_deref() == Some(row.id.as_str());
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .py_1()
+                    .rounded_md()
+                    .when(active, |this| this.bg(rgb(ACCENT_SOFT)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("session-{}", row.id)))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .px_1()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.open_session(&open_id, cx)
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .when(active, |this| this.text_color(rgb(ACCENT)))
+                                    .when(!active, |this| this.text_color(rgb(TEXT)))
+                                    .child(SharedString::from(sessions::title(&row))),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child(SharedString::from(sessions::meta(&row, now))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("session-del-{}", row.id)))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .cursor_pointer()
+                            .hover(|this| this.text_color(rgb(DANGER)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.delete_session(&delete_id, cx)
+                            }))
+                            .child("×"),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w(px(RAIL_W))
+            .flex_shrink_0()
+            .h_full()
+            .bg(rgb(BG_ELEV))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_4()
+                    .pt_4()
+                    .pb_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT_DIM))
+                            .child("SESSIONS"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("sessions-refresh")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.refresh_sessions(cx)
+                                    }))
+                                    .child("⟳"),
+                            )
+                            .child(
+                                div()
+                                    .id("sessions-bots")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(TEXT)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sessions.open = false;
+                                        this.sessions.focus = false;
+                                        cx.notify();
+                                    }))
+                                    .child("Bots"),
+                            ),
+                    ),
+            )
+            .child(
+                div().px_3().pb_2().child(
+                    div()
+                        .id("sessions-search")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(BG))
+                        .border_1()
+                        .when(focus, |this| this.border_color(rgb(ACCENT)))
+                        .when(!focus, |this| this.border_color(rgb(BORDER)))
+                        .text_xs()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.sessions.focus = true;
+                            cx.notify();
+                        }))
+                        .child(div().text_color(rgb(TEXT_DIM)).child("⌕"))
+                        .when(self.sessions.query.is_empty(), |this| {
+                            this.child(div().text_color(rgb(TEXT_DIM)).child("Search sessions"))
+                        })
+                        .when(!self.sessions.query.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(self.sessions.query.clone())),
+                            )
+                        }),
+                ),
+            )
+            .child(list)
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(SharedString::from(format!(
+                        "{} of {} sessions",
+                        self.sessions.rows.len(),
+                        self.sessions.total
+                    ))),
             )
     }
 
@@ -4398,7 +4708,11 @@ impl Render for HermesApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(self.sidebar(cx))
+                    .child(if self.sessions.open {
+                        self.sessions_rail(cx).into_any_element()
+                    } else {
+                        self.sidebar(cx).into_any_element()
+                    })
                     .child(
                         div()
                             .flex()
