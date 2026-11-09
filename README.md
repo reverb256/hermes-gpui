@@ -69,8 +69,9 @@ HERMES_PROFILE=ops \
 cargo run -p hermes-desktop
 ```
 
-The profile roster comes from the pod's `/api/profiles`, so every `fleet-*`
-profile shows up in the sidebar automatically.
+The roster comes from the gateway's `profiles.list` (falling back to
+`/api/profiles`), so every profile shows up in the sidebar with its own last
+message as a preview.
 
 ## Style
 
@@ -109,8 +110,9 @@ vulkan-icd-loader vulkan-headers fontconfig freetype2`.
 ## Status
 
 Working today: connect/handshake/keepalive, password login + WS tickets for
-gated hosts, profile roster, bot switching (`Ctrl+1…9`), streaming transcript
-with reasoning deltas, prompt submission, interrupt, approval cards
+gated hosts, profile roster with last-message previews and search, bot switching
+(`Ctrl+1…9`), streaming transcript with reasoning deltas, attributed bot cards
+and a pill composer, prompt submission, interrupt, approval cards
 (allow once / always allow / deny), clarify cards, `@`-mentions for bots and
 skills, file and image attachments, cron routines read-out, tray icon with
 show/quit and minimise-on-close, and a per-bot inspector for look, connectors
