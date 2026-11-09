@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
   installer's security verdict, and confirmed installs by identifier.
 - Voice playback: `▷ Speak` synthesizes the last assistant reply through the
   stack's `voice-models` service and plays it through PipeWire/Pulse.
-- Session controls: pin/unpin and archive rows through the host's
+- Session controls: pin/unpin, archive and inline rename through the host's
   `PATCH /api/sessions/{id}`, with the list refreshed from the host.
 - Memory page: active provider, discovery status and built-in file sizes from
   `GET /api/memory`, plus activation for providers the host marks ready.

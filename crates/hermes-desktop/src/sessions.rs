@@ -9,6 +9,12 @@ use serde_json::Value;
 
 use crate::transcript::{Line, Role, clip};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameDraft {
+    pub id: String,
+    pub title: String,
+}
+
 #[derive(Debug, Default)]
 pub struct Sessions {
     pub open: bool,
@@ -19,6 +25,7 @@ pub struct Sessions {
     pub query: String,
     pub focus: bool,
     pub status: Option<String>,
+    pub renaming: Option<RenameDraft>,
 }
 
 impl Sessions {
@@ -32,6 +39,18 @@ impl Sessions {
     pub fn failed(&mut self, message: String) {
         self.error = Some(message);
         self.loaded = true;
+    }
+
+    pub fn begin_rename(&mut self, id: &str, title: &str) {
+        self.renaming = Some(RenameDraft {
+            id: id.to_string(),
+            title: title.to_string(),
+        });
+        self.focus = false;
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.renaming = None;
     }
 }
 
@@ -227,6 +246,24 @@ mod tests {
         assert_eq!(lines[2].text, "hello");
         assert!(lines[3].text.starts_with("⚙ shell:"));
         assert_eq!(lines[4].text, "part");
+    }
+
+    #[test]
+    fn rename_drafts_track_the_row_and_title() {
+        let mut sessions = Sessions {
+            focus: true,
+            ..Sessions::default()
+        };
+        sessions.begin_rename("id-a", "Old title");
+        let draft = sessions.renaming.as_ref().unwrap();
+        assert_eq!(draft.id, "id-a");
+        assert_eq!(draft.title, "Old title");
+        assert!(
+            !sessions.focus,
+            "the search field gives up focus to the editor"
+        );
+        sessions.cancel_rename();
+        assert!(sessions.renaming.is_none());
     }
 
     #[test]

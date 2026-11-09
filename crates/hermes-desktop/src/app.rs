@@ -501,6 +501,11 @@ impl HermesApp {
             }
             return;
         }
+        if event.keystroke.key == "escape" && self.sessions.renaming.is_some() {
+            self.sessions.cancel_rename();
+            cx.notify();
+            return;
+        }
         if event.keystroke.key == "escape" && self.sessions.open {
             self.sessions.open = false;
             self.sessions.focus = false;
@@ -4024,6 +4029,23 @@ impl HermesApp {
         cx.notify();
     }
 
+    fn start_rename_session(&mut self, id: &str, title: &str, cx: &mut Context<Self>) {
+        self.sessions.begin_rename(id, title);
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.sessions.renaming.take() else {
+            return;
+        };
+        self.sessions.status = Some("renaming…".into());
+        self.backend.send(Command::UpdateSession {
+            id: draft.id,
+            patch: serde_json::json!({ "title": draft.title.trim() }),
+        });
+        cx.notify();
+    }
+
     fn archive_session(&mut self, id: &str, cx: &mut Context<Self>) {
         self.sessions.status = Some("archiving…".into());
         self.backend.send(Command::UpdateSession {
@@ -4040,6 +4062,30 @@ impl HermesApp {
     }
 
     fn route_sessions_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.sessions.renaming.is_some() {
+            let keystroke = &event.keystroke;
+            if keystroke.modifiers.control || keystroke.modifiers.platform {
+                return false;
+            }
+            match keystroke.key.as_str() {
+                "enter" => self.commit_rename(cx),
+                "escape" => self.sessions.cancel_rename(),
+                "backspace" => {
+                    if let Some(draft) = self.sessions.renaming.as_mut() {
+                        draft.title.pop();
+                    }
+                }
+                _ => {
+                    if let Some(chars) = keystroke.key_char.as_deref()
+                        && let Some(draft) = self.sessions.renaming.as_mut()
+                    {
+                        draft.title.push_str(chars);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
         if !self.sessions.focus {
             return false;
         }
@@ -4093,7 +4139,16 @@ impl HermesApp {
             let delete_id = row.id.clone();
             let pin_id = row.id.clone();
             let archive_id = row.id.clone();
+            let rename_id = row.id.clone();
+            let rename_title = row.title.clone();
             let pinned = row.pinned;
+            let rename_draft = self
+                .sessions
+                .renaming
+                .as_ref()
+                .filter(|draft| draft.id == row.id)
+                .map(|draft| draft.title.clone());
+            let renaming = rename_draft.is_some();
             let active = self.viewing_history.as_deref() == Some(row.id.as_str());
             list = list.child(
                 div()
@@ -4125,7 +4180,10 @@ impl HermesApp {
                                     .text_xs()
                                     .when(active, |this| this.text_color(rgb(accent())))
                                     .when(!active, |this| this.text_color(rgb(text())))
-                                    .child(SharedString::from(sessions::title(&row))),
+                                    .child(SharedString::from(match &rename_draft {
+                                        Some(draft) => format!("{draft}▌"),
+                                        None => sessions::title(&row),
+                                    })),
                             )
                             .child(
                                 div()
@@ -4134,51 +4192,108 @@ impl HermesApp {
                                     .child(SharedString::from(sessions::meta(&row, now))),
                             ),
                     )
-                    .child(
+                    .child(if renaming {
                         div()
-                            .id(SharedString::from(format!("session-pin-{}", row.id)))
-                            .px_1()
-                            .py_1()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(if pinned { accent() } else { text_muted() }))
-                            .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(text())))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.pin_session(&pin_id, !pinned, cx)
-                            }))
-                            .child(if pinned { "Unpin" } else { "Pin" }),
-                    )
-                    .child(
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-save-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(accent()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(accent_hi())))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.commit_rename(cx)
+                                    }))
+                                    .child("↵"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-cancel-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.sessions.cancel_rename();
+                                        cx.notify();
+                                    }))
+                                    .child("Esc"),
+                            )
+                    } else {
                         div()
-                            .id(SharedString::from(format!("session-arch-{}", row.id)))
-                            .px_1()
-                            .py_1()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(text_muted()))
-                            .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(text())))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.archive_session(&archive_id, cx)
-                            }))
-                            .child("Arch"),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("session-del-{}", row.id)))
-                            .px_1()
-                            .py_1()
-                            .rounded_md()
-                            .text_xs()
-                            .text_color(rgb(text_muted()))
-                            .cursor_pointer()
-                            .hover(|this| this.text_color(rgb(danger())))
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.delete_session(&delete_id, cx)
-                            }))
-                            .child("×"),
-                    ),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-rename-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.start_rename_session(&rename_id, &rename_title, cx)
+                                    }))
+                                    .child("✎"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-pin-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(if pinned { accent() } else { text_muted() }))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.pin_session(&pin_id, !pinned, cx)
+                                    }))
+                                    .child(if pinned { "Unpin" } else { "Pin" }),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-arch-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.archive_session(&archive_id, cx)
+                                    }))
+                                    .child("Arch"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("session-del-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(danger())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.delete_session(&delete_id, cx)
+                                    }))
+                                    .child("×"),
+                            )
+                    }),
             );
         }
 

@@ -15,9 +15,9 @@ Status legend: **Shipped**, **Next**, **Blocked** (waiting on the pod), **Later*
 - Full-height rail/inspector split with a centre-column composer, Hermes-style
   footer status strip, tray presence.
 - Session history: newest-first list with message/tool counts and age, search,
-  pin/unpin, archive, delete, and read-only transcript hydration from
-  `/api/sessions/{id}/messages` (the rail swaps between bots and sessions; the
-  gateway exposes no resume).
+  inline rename, pin/unpin, archive, delete, and read-only transcript hydration
+  from `/api/sessions/{id}/messages` (the rail swaps between bots and sessions;
+  the gateway exposes no resume).
 - Skills page: searchable installed catalog with category/usage metadata and
   On/Off toggles through `PUT /api/skills/toggle`.
 - MCP page: host-level server list with transport/source/endpoint/auth, a
@@ -39,9 +39,9 @@ messages survived (23 unreadable messages lost), and `GET /api/sessions`
 returns 200 again. The original is archived off-cluster and a Longhorn
 snapshot (`pre-repair`) was taken first.
 
-Shipped: recency list, search, delete, transcript hydration, and pin/archive
-through `PATCH /api/sessions/{id}`. Still needed: resume the gateway runtime for
-an old id, inline rename, and a project/workspace filter.
+Shipped: recency list, search, delete, transcript hydration, inline rename, and
+pin/archive through `PATCH /api/sessions/{id}`. Still needed: resume the gateway
+runtime for an old id and a project/workspace filter.
 
 ### 2. MCP toolsets — **Partly shipped**
 

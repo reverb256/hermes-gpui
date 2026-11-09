@@ -161,7 +161,7 @@ reasoning scale (default/minimal/low/medium/high/xhigh/max/ultra), read from
 merge. Both apply to new sessions only.
 
 **Sessions** swaps the bot rail for history: `/api/sessions` newest-first with
-message/tool counts and relative age, a client-side search, and delete per row.
+message/tool counts and relative age, a client-side search, inline rename, pin/archive, and delete per row.
 Opening one hydrates the stored transcript from
 `/api/sessions/{id}/messages` read-only — the gateway has no resume call, so
 sending is disabled until **New chat**. `Ctrl+Shift+S` or the header's
