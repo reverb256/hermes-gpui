@@ -286,7 +286,7 @@ async fn worker(
 
         backoff = RECONNECT_MIN;
         let _ = events.send(BackendEvent::Connection(ConnectionState::Open));
-        refresh(&rest, &events).await;
+        refresh(&client, &rest, &events).await;
 
         let mut event_rx = client.subscribe();
         let mut state_rx = client.state_changes();
@@ -299,7 +299,7 @@ async fn worker(
                 command = commands.recv() => {
                     let Some(command) = command else { return };
                     match command {
-                        Command::Refresh => refresh(&rest, &events).await,
+                        Command::Refresh => refresh(&client, &rest, &events).await,
                         Command::NewSession => {
                             session = None;
                             let _ = events.send(BackendEvent::MessageComplete);
@@ -427,7 +427,7 @@ async fn worker(
                                 Ok(_) => {
                                     let _ = events
                                         .send(BackendEvent::InspectorStatus("saved".into()));
-                                    refresh(&rest, &events).await;
+                                    refresh(&client, &rest, &events).await;
                                 }
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
@@ -447,7 +447,7 @@ async fn worker(
                                     });
                                     let _ = events
                                         .send(BackendEvent::InspectorStatus("avatar removed".into()));
-                                    refresh(&rest, &events).await;
+                                    refresh(&client, &rest, &events).await;
                                 }
                                 Err(err) => {
                                     let _ = events.send(BackendEvent::InspectorStatus(format!(
@@ -765,14 +765,25 @@ pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-async fn refresh(rest: &RestClient, events: &mpsc::UnboundedSender<BackendEvent>) {
-    match rest.profiles().await {
-        Ok(profiles) => {
+async fn refresh(
+    client: &GatewayClient,
+    rest: &RestClient,
+    events: &mpsc::UnboundedSender<BackendEvent>,
+) {
+    // `profiles.list` carries the last-message preview and per-bot look that
+    // the REST roster lacks; REST is the fallback when the method is missing.
+    match gateway::list_profiles(client).await {
+        Ok(profiles) if !profiles.is_empty() => {
             let _ = events.send(BackendEvent::Profiles(profiles));
         }
-        Err(err) => {
-            let _ = events.send(BackendEvent::Error(err.to_string()));
-        }
+        _ => match rest.profiles().await {
+            Ok(profiles) => {
+                let _ = events.send(BackendEvent::Profiles(profiles));
+            }
+            Err(err) => {
+                let _ = events.send(BackendEvent::Error(err.to_string()));
+            }
+        },
     }
     match rest.active_profile().await {
         Ok(active) => {

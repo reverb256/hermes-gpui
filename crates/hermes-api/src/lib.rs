@@ -97,6 +97,20 @@ impl HostConfig {
     }
 }
 
+/// Newest conversation summary a roster row carries (`profiles.list` →
+/// `last_session`); the REST listing does not include it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LastSession {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub last_active: i64,
+}
+
 /// One Hermes profile (`GET /api/profiles` → `profiles[]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
@@ -126,6 +140,9 @@ pub struct Profile {
     pub has_alias: bool,
     #[serde(default)]
     pub has_avatar: bool,
+    /// Most recent conversation, when the roster came from `profiles.list`.
+    #[serde(default)]
+    pub last_session: Option<LastSession>,
     /// Client-agnostic UI metadata the host keeps in `profile.yaml` — the
     /// roster's `icon`, `accent` and anything else a client wants to share.
     #[serde(default)]
@@ -135,6 +152,19 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// One rail line: what the bot last said, else what it is for.
+    pub fn preview(&self) -> &str {
+        if let Some(preview) = self
+            .last_session
+            .as_ref()
+            .map(|session| session.preview.trim())
+            .filter(|preview| !preview.is_empty())
+        {
+            return preview;
+        }
+        self.description.trim()
+    }
+
     /// What a chat header should show: bot title, display name, or name.
     pub fn label(&self) -> &str {
         if !self.bot_title.is_empty() {
@@ -706,6 +736,25 @@ pub mod gateway {
             .await
     }
 
+    /// `profiles.list` — the roster with per-bot previews, `ui_meta` and
+    /// `has_avatar`, none of which the REST listing carries.
+    pub async fn list_profiles(
+        client: &GatewayClient,
+    ) -> Result<Vec<Profile>, hermes_rpc::RpcError> {
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(default)]
+            profiles: Vec<Profile>,
+        }
+        let answer: Answer = client
+            .request(
+                "profiles.list",
+                serde_json::json!({ "include_sessions": true }),
+            )
+            .await?;
+        Ok(answer.profiles)
+    }
+
     /// `profiles.describe` — soul, model, skills, toolsets and MCP servers.
     pub async fn describe_profile(
         client: &GatewayClient,
@@ -842,6 +891,31 @@ mod tests {
         assert!(profile.gateway_running);
         assert!(profile.extra.contains_key("unknown_future_field"));
         assert_eq!(profile.label(), "Fleet Ops");
+    }
+
+    #[test]
+    fn roster_preview_prefers_the_last_message() {
+        let mut profile: Profile = serde_json::from_value(serde_json::json!({
+            "name": "infra",
+            "description": "platform ops",
+            "last_session": { "preview": "Updated every host", "last_active": 12 }
+        }))
+        .expect("roster row parses");
+        assert_eq!(profile.preview(), "Updated every host");
+
+        profile.last_session = None;
+        assert_eq!(profile.preview(), "platform ops");
+
+        let blank = Profile {
+            name: "x".into(),
+            description: "fallback".into(),
+            last_session: Some(LastSession {
+                preview: "   ".into(),
+                ..LastSession::default()
+            }),
+            ..Profile::default()
+        };
+        assert_eq!(blank.preview(), "fallback");
     }
 
     #[test]

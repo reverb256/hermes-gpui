@@ -21,7 +21,7 @@ use crate::backend::{
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
 use crate::theme::*;
-use crate::transcript::{Line, Role, append_streaming};
+use crate::transcript::{Line, Role, append_streaming, clip};
 use crate::tray::{self, TrayStatus};
 
 const SUGGESTIONS: [&str; 3] = [
@@ -94,6 +94,8 @@ pub struct HermesApp {
     tray: TrayStatus,
     tray_state: (bool, String),
     inspector: Inspector,
+    rail_search: bool,
+    rail_filter: String,
 }
 
 impl Focusable for HermesApp {
@@ -129,6 +131,8 @@ impl HermesApp {
             tray,
             tray_state: (false, String::new()),
             inspector: Inspector::default(),
+            rail_search: false,
+            rail_filter: String::new(),
         };
 
         app.pump(events, cx);
@@ -295,6 +299,9 @@ impl HermesApp {
     // ---- keyboard -------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.rail_search && self.route_rail_typing(event, cx) {
+            return;
+        }
         if self.route_inspector_typing(event, cx) {
             return;
         }
@@ -544,6 +551,30 @@ impl HermesApp {
         self.lines
             .push(Line::new(Role::System, format!("Switched to {name}")));
         cx.notify();
+    }
+
+    /// Typing into the rail's search field.
+    fn route_rail_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.rail_search = false;
+                self.rail_filter.clear();
+            }
+            "backspace" => {
+                self.rail_filter.pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.rail_filter.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
     }
 
     // ---- inspector ------------------------------------------------------
@@ -1014,6 +1045,17 @@ impl HermesApp {
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.profile_name();
+        let needle = self.rail_filter.trim().to_lowercase();
+        let visible: Vec<&Profile> = self
+            .profiles
+            .iter()
+            .filter(|profile| {
+                needle.is_empty()
+                    || profile.label().to_lowercase().contains(&needle)
+                    || profile.name.to_lowercase().contains(&needle)
+                    || profile.preview().to_lowercase().contains(&needle)
+            })
+            .collect();
 
         div()
             .flex()
@@ -1029,8 +1071,9 @@ impl HermesApp {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_2()
                     .px_4()
-                    .pt_3()
+                    .pt_4()
                     .pb_2()
                     .child(
                         div()
@@ -1041,11 +1084,59 @@ impl HermesApp {
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(TEXT_DIM))
-                            .child(format!("{}", self.profiles.len())),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("rail-search")
+                                    .w(px(24.))
+                                    .h(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(SURFACE))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.rail_search = !this.rail_search;
+                                        if !this.rail_search {
+                                            this.rail_filter.clear();
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("⌕")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(format!("{}", visible.len())),
+                            ),
                     ),
             )
+            .when(self.rail_search, |this| {
+                this.child(
+                    div()
+                        .mx_3()
+                        .mb_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_full()
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_xs()
+                        .when(self.rail_filter.is_empty(), |this| {
+                            this.text_color(rgb(TEXT_DIM)).child("Search bots…")
+                        })
+                        .when(!self.rail_filter.is_empty(), |this| {
+                            this.text_color(rgb(TEXT))
+                                .child(SharedString::from(self.rail_filter.clone()))
+                        }),
+                )
+            })
             .child(
                 div()
                     .id("profiles")
@@ -1056,20 +1147,12 @@ impl HermesApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(self.profiles.iter().enumerate().map(|(index, profile)| {
+                    .children(visible.iter().map(|profile| {
                         let selected = profile.name == current;
                         let name = profile.name.clone();
-                        let subtitle = profile
-                            .model
-                            .clone()
-                            .or_else(|| profile.provider.clone())
-                            .unwrap_or_default();
-                        let meta = if subtitle.is_empty() {
-                            format!("{} skills", profile.skill_count)
-                        } else {
-                            format!("{} · {} skills", subtitle, profile.skill_count)
-                        };
                         let (glyph, accent) = inspector::look_from_meta(profile.ui_meta.as_ref());
+                        let preview = clip(profile.preview(), 58);
+                        let has_history = profile.last_session.is_some();
 
                         div()
                             .id(SharedString::from(format!("profile-{}", profile.name)))
@@ -1093,19 +1176,19 @@ impl HermesApp {
                             )
                             .child(
                                 div()
-                                    .w(px(24.))
-                                    .h(px(24.))
+                                    .w(px(32.))
+                                    .h(px(32.))
                                     .flex_shrink_0()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_md()
-                                    .bg(rgb(SURFACE_HI))
+                                    .rounded_full()
+                                    .bg(rgb(ACCENT_SOFT))
                                     .border_1()
                                     .border_color(rgb(accent))
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_sm()
                                             .text_color(rgb(accent))
                                             .child(SharedString::from(glyph)),
                                     ),
@@ -1137,19 +1220,18 @@ impl HermesApp {
                                                     .child(SharedString::from(
                                                         profile.label().to_string(),
                                                     )),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(TEXT_DIM))
-                                                    .child(format!("{}", index + 1)),
                                             ),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(TEXT_DIM))
-                                            .child(SharedString::from(meta)),
+                                            .when(has_history, |this| {
+                                                this.text_color(rgb(TEXT_MUTED))
+                                            })
+                                            .when(!has_history, |this| {
+                                                this.text_color(rgb(TEXT_DIM))
+                                            })
+                                            .child(SharedString::from(preview)),
                                     ),
                             )
                     })),
@@ -1181,6 +1263,69 @@ impl HermesApp {
                         .child(SharedString::from(error.clone())),
                 )
             })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .mx_2()
+                    .mb_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .h(px(28.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(SURFACE_HI))
+                                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("◍")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(div().text_xs().text_color(rgb(TEXT)).child("You"))
+                                    .child(
+                                        div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                            SharedString::from(clip(&self.host.base_url, 24)),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("sidebar-apps")
+                            .w(px(28.))
+                            .h(px(28.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgb(SURFACE))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)),
+                            )
+                            .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("⊞")),
+                    ),
+            )
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1337,24 +1482,25 @@ impl HermesApp {
                 .w_full()
                 .child(
                     div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(TEXT_DIM))
-                        .child("YOU"),
-                )
-                .child(
-                    div()
                         .max_w(px(BUBBLE_W))
                         .px_4()
                         .py_3()
                         .rounded_xl()
-                        .bg(rgb(SURFACE))
+                        .bg(rgb(USER))
                         .text_sm()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(BG))
                         .child(SharedString::from(text)),
                 )
                 .into_any_element(),
             Role::Assistant => {
+                let (bot_glyph, _) = inspector::look_from_meta(
+                    self.current_profile()
+                        .and_then(|profile| profile.ui_meta.as_ref()),
+                );
+                let bot_name = self
+                    .current_profile()
+                    .map(|profile| profile.label().to_string())
+                    .unwrap_or_else(|| self.profile_name());
                 let mut body = div().flex().flex_col().gap_1();
                 for part in text.split('\n') {
                     body = body.child(
@@ -1373,17 +1519,42 @@ impl HermesApp {
                         div()
                             .flex()
                             .items_center()
+                            .justify_center()
                             .gap_2()
-                            .child(div().text_xs().text_color(rgb(ACCENT)).child("◆"))
+                            .w_full()
+                            .py_1()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(rgb(ACCENT_SOFT))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(ACCENT))
+                                            .child(SharedString::from(bot_glyph)),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(TEXT_DIM))
-                                    .child("HERMES"),
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child(SharedString::from(format!("Messaged {bot_name}"))),
                             ),
                     )
-                    .child(body)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .w_full()
+                            .px_4()
+                            .py_3()
+                            .rounded_xl()
+                            .bg(rgb(SURFACE))
+                            .child(body),
+                    )
                     .into_any_element()
             }
             Role::Reasoning => div()
@@ -2545,12 +2716,14 @@ impl HermesApp {
 
         let mut input = div().flex().flex_col().gap_1().flex_1().min_w_0();
         if empty {
-            input = input.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .child("Message Hermes…"),
-            );
+            input = input.child(div().text_sm().text_color(rgb(TEXT_DIM)).child(
+                SharedString::from(format!(
+                        "Message {}",
+                        self.current_profile()
+                            .map(|profile| profile.label().to_string())
+                            .unwrap_or_else(|| self.profile_name())
+                    )),
+            ));
         } else {
             for part in self.composer.split('\n') {
                 input = input.child(
@@ -2572,75 +2745,61 @@ impl HermesApp {
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_end()
                     .gap_2()
                     .w_full()
                     .max_w(px(READ_W))
                     .mx_auto()
-                    .px_3()
-                    .py_3()
+                    .px_2()
+                    .py_2()
                     .rounded_xl()
                     .bg(rgb(SURFACE))
                     .border_1()
                     .when(focused, |this| this.border_color(rgb(ACCENT)))
                     .when(!focused, |this| this.border_color(rgb(BORDER)))
-                    .when(!self.attachments.is_empty(), |this| {
-                        this.child(div().flex().flex_wrap().gap_2().children(
-                            self.attachments.iter().map(|name| {
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_full()
-                                    .bg(rgb(SURFACE_HI))
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
-                                    .child(SharedString::from(name.clone()))
-                            }),
-                        ))
-                    })
+                    .child(
+                        div()
+                            .id("composer-attach")
+                            .w(px(32.))
+                            .h(px(32.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgb(SURFACE_HI))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.pick_attachment(cx)),
+                            )
+                            .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child("＋")),
+                    )
                     .child(input)
                     .child(
                         div()
+                            .id("send")
+                            .w(px(32.))
+                            .h(px(32.))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_3()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .when(empty, |this| {
+                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                            })
+                            .when(!empty, |this| {
+                                this.bg(rgb(ACCENT)).hover(|this| this.bg(rgb(ACCENT_HI)))
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx)))
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_DIM))
-                                    .child("Enter to send")
-                                    .child("·")
-                                    .child("Shift+Enter newline")
-                                    .child("·")
-                                    .child("@ mention")
-                                    .child("·")
-                                    .child("⌘K"),
-                            )
-                            .child(
-                                div()
-                                    .id("send")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor_pointer()
-                                    .when(empty, |this| {
-                                        this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
-                                    })
-                                    .when(!empty, |this| {
-                                        this.bg(rgb(ACCENT))
-                                            .text_color(rgb(BG))
-                                            .hover(|this| this.bg(rgb(ACCENT_HI)))
-                                    })
-                                    .on_click(
-                                        cx.listener(|this, _event, _window, cx| this.submit(cx)),
-                                    )
-                                    .child("Send ↵"),
+                                    .text_sm()
+                                    .when(empty, |this| this.text_color(rgb(TEXT_DIM)))
+                                    .when(!empty, |this| this.text_color(rgb(BG)))
+                                    .child("↑"),
                             ),
                     ),
             )

@@ -26,6 +26,18 @@ impl Line {
     }
 }
 
+/// One line of roster copy: whitespace collapsed and ellipsized on a char
+/// boundary, so a preview never reflows the rail.
+pub fn clip(text: &str, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max_chars {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Append streamed text to the trailing line of the same role, or start a new
 /// one when the speaker changed. Deltas from the gateway arrive per token, so
 /// this runs once per frame.
@@ -58,6 +70,16 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[2].role, Role::Reasoning);
         assert_eq!(lines[3].text, "more");
+    }
+
+    #[test]
+    fn clip_collapses_whitespace_and_ellipsizes() {
+        assert_eq!(clip("line one\n\nline two", 40), "line one line two");
+        assert_eq!(clip("short", 40), "short");
+        let clipped = clip("abcdefghij", 5);
+        assert_eq!(clipped.chars().count(), 5);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clip("", 5), "");
     }
 
     #[test]
