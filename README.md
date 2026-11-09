@@ -72,6 +72,14 @@ cargo run -p hermes-desktop
 The profile roster comes from the pod's `/api/profiles`, so every `fleet-*`
 profile shows up in the sidebar automatically.
 
+## Style
+
+The UI is built on a token layer (`crates/hermes-desktop/src/theme.rs`) that
+applies the [GPUI Kit style guide](https://gpui-kit.com/docs/style): tokens
+before values, semantic colours, one accent, a 4 px spacing rhythm and one
+reading measure. [`STYLE.md`](STYLE.md) records the rules and token table;
+contrast and scale invariants are unit-tested.
+
 ## System requirements (Linux)
 
 GPUI renders through the GPU: `wayland` or `x11`, `libxkbcommon`, `vulkan-icd-loader`,

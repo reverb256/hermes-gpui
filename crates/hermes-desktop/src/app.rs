@@ -19,19 +19,9 @@ use crate::backend::{
     ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command,
 };
 use crate::keys::{self, Action, Chord, Focus};
+use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming};
 use crate::tray::{self, TrayStatus};
-
-const BG: u32 = 0x0f1014;
-const PANEL: u32 = 0x16181f;
-const BORDER: u32 = 0x24262f;
-const TEXT: u32 = 0xe4e6ee;
-const MUTED: u32 = 0x8b90a0;
-const ACCENT: u32 = 0x7aa2f7;
-const USER: u32 = 0x9ece6a;
-const REASONING: u32 = 0xbb9af7;
-const WARN: u32 = 0xe0af68;
-const DANGER: u32 = 0xf7768e;
 
 const SUGGESTIONS: [&str; 3] = [
     "What can you do?",
@@ -638,49 +628,83 @@ impl HermesApp {
             .flex()
             .items_center()
             .gap_3()
+            .h(px(HEADER_H))
             .px_4()
-            .py_2()
-            .bg(rgb(PANEL))
+            .bg(rgb(BG_ELEV))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child("HERMES"),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().text_color(rgb(ACCENT)).child("◆"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT))
+                            .child("Hermes"),
+                    ),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(TEXT_DIM))
                     .child(SharedString::from(self.host.base_url.clone())),
             )
             .child(
                 div()
                     .id("connection")
-                    .text_xs()
-                    .text_color(rgb(color))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(SURFACE))
                     .cursor_pointer()
+                    .hover(|this| this.bg(rgb(SURFACE_HI)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.refresh(cx)))
-                    .child(SharedString::from(format!("● {label}"))),
+                    .child(div().text_xs().text_color(rgb(color)).child("●"))
+                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(label)),
             )
             .when(!model.is_empty(), |this| {
                 this.child(
                     div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(SURFACE))
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(TEXT_MUTED))
                         .child(SharedString::from(model)),
                 )
             })
             .when(self.busy, |this| {
-                this.child(div().text_xs().text_color(rgb(WARN)).child("working…"))
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(rgb(ACCENT_SOFT))
+                        .child(div().text_xs().text_color(rgb(ACCENT)).child("◐"))
+                        .child(div().text_xs().text_color(rgb(ACCENT)).child("working")),
+                )
             })
             .when(!self.cards.is_empty(), |this| {
                 this.child(
                     div()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(rgb(WARN_SOFT))
                         .text_xs()
                         .text_color(rgb(WARN))
-                        .child(format!("{} waiting on you", self.cards.len())),
+                        .child(format!("{} awaiting you", self.cards.len())),
                 )
             })
             .child(div().flex_1())
@@ -691,9 +715,9 @@ impl HermesApp {
                     .py_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(TEXT_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.pick_attachment(cx)))
                     .child("＋ Attach"),
             )
@@ -704,26 +728,27 @@ impl HermesApp {
                     .py_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(TEXT_MUTED))
                     .cursor_pointer()
-                    .hover(|this| this.text_color(rgb(TEXT)))
+                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.dispatch(Action::OpenPalette, cx)
                     }))
-                    .child("⌘K commands"),
+                    .child("⌘K"),
             )
             .child(
                 div()
                     .id("new-chat")
-                    .px_2()
+                    .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(BORDER))
+                    .bg(rgb(SURFACE_HI))
                     .text_xs()
+                    .text_color(rgb(TEXT))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(0x2d3140)))
+                    .hover(|this| this.bg(rgb(BORDER_HI)))
                     .on_click(cx.listener(|this, _event, _window, cx| this.new_chat(cx)))
-                    .child("＋ New chat"),
+                    .child("New chat"),
             )
     }
 
@@ -733,27 +758,43 @@ impl HermesApp {
         div()
             .flex()
             .flex_col()
-            .w(px(232.))
+            .w(px(RAIL_W))
+            .flex_shrink_0()
             .h_full()
-            .bg(rgb(PANEL))
+            .bg(rgb(BG_ELEV))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .py_2()
-            .overflow_hidden()
             .child(
                 div()
-                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .pt_3()
                     .pb_2()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child(format!("BOTS ({})", self.profiles.len())),
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT_DIM))
+                            .child("BOTS"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(format!("{}", self.profiles.len())),
+                    ),
             )
             .child(
                 div()
                     .id("profiles")
                     .flex()
                     .flex_col()
+                    .gap_0p5()
+                    .px_2()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .children(self.profiles.iter().enumerate().map(|(index, profile)| {
                         let selected = profile.name == current;
@@ -763,63 +804,98 @@ impl HermesApp {
                             .clone()
                             .or_else(|| profile.provider.clone())
                             .unwrap_or_default();
-                        let meta = format!("{} skills", profile.skill_count);
+                        let meta = if subtitle.is_empty() {
+                            format!("{} skills", profile.skill_count)
+                        } else {
+                            format!("{} · {} skills", subtitle, profile.skill_count)
+                        };
 
                         div()
                             .id(SharedString::from(format!("profile-{}", profile.name)))
                             .flex()
-                            .flex_col()
-                            .gap_1()
-                            .px_3()
+                            .items_stretch()
+                            .gap_2()
+                            .px_2()
                             .py_2()
+                            .rounded_md()
                             .cursor_pointer()
-                            .when(selected, |this| this.bg(rgb(BORDER)))
-                            .hover(|this| this.bg(rgb(0x1d2029)))
+                            .when(selected, |this| this.bg(rgb(SURFACE)))
+                            .when(!selected, |this| this.hover(|this| this.bg(rgb(SURFACE))))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.select_profile(name.clone(), cx);
                             }))
                             .child(
                                 div()
-                                    .flex()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                                            .child(SharedString::from(profile.label().to_string())),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(SharedString::from(format!("{}", index + 1))),
-                                    ),
+                                    .w(px(2.))
+                                    .rounded_full()
+                                    .when(selected, |this| this.bg(rgb(ACCENT))),
                             )
                             .child(
                                 div()
                                     .flex()
-                                    .gap_2()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(SharedString::from(meta))
-                                    .when(!subtitle.is_empty(), |this| {
-                                        this.child(SharedString::from(subtitle))
-                                    }),
+                                    .flex_col()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_sm()
+                                                    .when(selected, |this| {
+                                                        this.text_color(rgb(ACCENT))
+                                                    })
+                                                    .when(!selected, |this| {
+                                                        this.text_color(rgb(TEXT))
+                                                    })
+                                                    .child(SharedString::from(
+                                                        profile.label().to_string(),
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(TEXT_DIM))
+                                                    .child(format!("{}", index + 1)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(TEXT_DIM))
+                                            .child(SharedString::from(meta)),
+                                    ),
                             )
                     })),
             )
             .when(!self.attachments.is_empty(), |this| {
-                this.child(div().px_3().pt_2().text_xs().text_color(rgb(MUTED)).child(
-                    SharedString::from(format!("attached: {}", self.attachments.join(", "))),
-                ))
+                this.child(
+                    div()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .mt_2()
+                        .px_4()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(rgb(TEXT_DIM))
+                        .child(SharedString::from(self.attachments.join(" · "))),
+                )
             })
             .when_some(self.error.as_ref(), |this, error| {
                 this.child(
                     div()
-                        .mt_auto()
-                        .px_3()
-                        .pt_2()
+                        .mx_2()
+                        .mb_2()
+                        .px_2()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(DANGER_SOFT))
                         .text_xs()
                         .text_color(rgb(DANGER))
                         .child(SharedString::from(error.clone())),
@@ -833,78 +909,132 @@ impl HermesApp {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_4()
-            .p_8()
             .h_full()
+            .w_full()
+            .px_6()
             .child(
                 div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child("What should we get done?"),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_5()
+                    .w_full()
+                    .max_w(px(READ_W))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .h(px(44.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_xl()
+                            .bg(rgb(ACCENT_SOFT))
+                            .child(div().text_lg().text_color(rgb(ACCENT)).child("◆")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("What should we get done?"),
+                            )
+                            .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child(
+                                SharedString::from(format!("Talking to {}", self.profile_name())),
+                            )),
+                    )
+                    .child(div().flex().flex_col().gap_2().w_full().children(
+                        SUGGESTIONS.iter().map(|suggestion| {
+                            let text = suggestion.to_string();
+                            div()
+                                .id(SharedString::from(format!("suggestion-{suggestion}")))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(SURFACE))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(SURFACE_HI)).border_color(rgb(BORDER_HI)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.use_suggestion(&text.clone(), cx)
+                                }))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(*suggestion)),
+                                )
+                                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("↵"))
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child("Enter to send")
+                            .child("·")
+                            .child("Shift+Enter newline")
+                            .child("·")
+                            .child("@ to mention")
+                            .child("·")
+                            .child("⌘K commands"),
+                    ),
             )
-            .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                "Talking to {} · Enter sends · @ mentions · Ctrl+K commands",
-                self.profile_name()
-            )))
-            .children(SUGGESTIONS.iter().map(|suggestion| {
-                let text = suggestion.to_string();
-                div()
-                    .id(SharedString::from(format!("suggestion-{suggestion}")))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_sm()
-                    .text_color(rgb(TEXT))
-                    .cursor_pointer()
-                    .hover(|this| this.bg(rgb(PANEL)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.use_suggestion(&text.clone(), cx)
-                    }))
-                    .child(SharedString::from(*suggestion))
-            }))
     }
 
-    fn chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = if self.has_conversation() {
-            div()
+    fn chat(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.has_conversation() {
+            return div()
                 .flex()
                 .flex_col()
-                .gap_4()
-                .p_5()
-                .children(self.lines.iter().map(|line| self.render_line(line)))
-                .into_any_element()
-        } else {
-            self.empty_state(cx).into_any_element()
-        };
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .child(self.empty_state(cx))
+                .into_any_element();
+        }
 
         div()
+            .id("transcript")
+            .track_scroll(&self.scroll)
             .flex()
             .flex_col()
             .flex_1()
+            .min_w_0()
+            .min_h_0()
             .h_full()
-            .overflow_hidden()
+            .overflow_y_scroll()
+            .bg(rgb(BG))
             .child(
                 div()
-                    .id("transcript")
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(body),
+                    .gap_5()
+                    .w_full()
+                    .max_w(px(READ_W))
+                    .mx_auto()
+                    .px_6()
+                    .py_5()
+                    .children(self.lines.iter().map(|line| self.render_line(line))),
             )
+            .into_any_element()
     }
 
     fn render_line(&self, line: &Line) -> gpui::AnyElement {
-        let (speaker, color) = match line.role {
-            Role::User => ("you", USER),
-            Role::Assistant => ("hermes", TEXT),
-            Role::Reasoning => ("thinking", REASONING),
-            Role::System => ("·", MUTED),
-        };
-
         let streaming = self.busy
             && line.role == Role::Assistant
             && std::ptr::eq(line, self.lines.last().unwrap_or(line));
@@ -918,30 +1048,108 @@ impl HermesApp {
             text.push('▍');
         }
 
-        let mut block = div().flex().flex_col().gap_1().w_full();
-        for part in text.split('\n') {
-            block = block.child(
+        match line.role {
+            Role::User => div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap_2()
+                .w_full()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(TEXT_DIM))
+                        .child("YOU"),
+                )
+                .child(
+                    div()
+                        .max_w(px(BUBBLE_W))
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
+                        .bg(rgb(SURFACE))
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(text)),
+                )
+                .into_any_element(),
+            Role::Assistant => {
+                let mut body = div().flex().flex_col().gap_1();
+                for part in text.split('\n') {
+                    body = body.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .child(SharedString::from(part.to_string())),
+                    );
+                }
                 div()
-                    .text_sm()
-                    .text_color(rgb(color))
-                    .child(SharedString::from(part.to_string())),
-            );
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(rgb(ACCENT)).child("◆"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child("HERMES"),
+                            ),
+                    )
+                    .child(body)
+                    .into_any_element()
+            }
+            Role::Reasoning => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .w_full()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(REASONING))
+                        .child("THINKING"),
+                )
+                .child(
+                    div()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(rgb(REASONING_SOFT))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(text.split('\n').map(|part| {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(REASONING))
+                                .child(SharedString::from(part.to_string()))
+                        })),
+                )
+                .into_any_element(),
+            Role::System => div()
+                .flex()
+                .items_start()
+                .gap_2()
+                .w_full()
+                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("·"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(TEXT_DIM))
+                        .child(SharedString::from(text)),
+                )
+                .into_any_element(),
         }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w_full()
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(color))
-                    .child(SharedString::from(speaker)),
-            )
-            .child(block)
-            .into_any_element()
     }
 
     fn cards_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -950,6 +1158,7 @@ impl HermesApp {
             .flex_col()
             .gap_2()
             .px_4()
+            .pb_2()
             .children(self.cards.iter().map(|card| match &card.kind {
                 CardKind::Approval(request) => self.approval_card(card, request, cx),
                 CardKind::Clarify(request) => self.clarify_card(card, request, cx),
@@ -985,31 +1194,62 @@ impl HermesApp {
             .id(SharedString::from(format!("approval-{id}")))
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(rgb(PANEL))
+            .gap_3()
+            .p_4()
+            .rounded_xl()
+            .bg(rgb(SURFACE))
             .border_1()
-            .border_color(rgb(WARN))
+            .border_color(rgb(BORDER))
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(WARN))
-                    .child("APPROVAL NEEDED"),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(WARN_SOFT))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(WARN))
+                            .child("APPROVAL"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child(if allow_permanent {
+                                "can be remembered"
+                            } else {
+                                "one-off"
+                            }),
+                    ),
             )
-            .child(div().text_sm().child(SharedString::from(body)))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(BG))
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(body)),
+            )
             .when_some(detail, |this, detail| {
                 this.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(TEXT_MUTED))
                         .child(SharedString::from(detail)),
                 )
             })
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .child(
                         div()
@@ -1019,9 +1259,10 @@ impl HermesApp {
                             .rounded_md()
                             .bg(rgb(ACCENT))
                             .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(BG))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(0x8bb0f8)))
+                            .hover(|this| this.bg(rgb(ACCENT_HI)))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.approve(&id_once, ApprovalChoice::Once, cx)
                             }))
@@ -1035,11 +1276,11 @@ impl HermesApp {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(rgb(BORDER))
+                                .bg(rgb(SURFACE_HI))
                                 .text_xs()
                                 .text_color(rgb(USER))
                                 .cursor_pointer()
-                                .hover(|this| this.bg(rgb(0x2d3140)))
+                                .hover(|this| this.bg(rgb(BORDER_HI)))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.approve(&id_always, ApprovalChoice::Always, cx)
                                 }))
@@ -1052,15 +1293,22 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(BORDER))
+                            .bg(rgb(SURFACE_HI))
                             .text_xs()
                             .text_color(rgb(DANGER))
                             .cursor_pointer()
-                            .hover(|this| this.bg(rgb(0x2d3140)))
+                            .hover(|this| this.bg(rgb(DANGER_SOFT)))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.approve(&id_deny, ApprovalChoice::Deny, cx)
                             }))
                             .child("Deny"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child("Esc to dismiss"),
                     ),
             )
             .into_any_element()
@@ -1083,13 +1331,14 @@ impl HermesApp {
             choices = choices.child(
                 div()
                     .id(SharedString::from(format!("choice-{id}-{index}")))
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .py_2()
                     .rounded_md()
+                    .bg(rgb(BG))
                     .text_xs()
                     .text_color(rgb(TEXT))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(BORDER)))
+                    .hover(|this| this.bg(rgb(SURFACE_HI)).text_color(rgb(ACCENT)))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.answer(&card_id, answer.clone(), cx)
                     }))
@@ -1101,14 +1350,18 @@ impl HermesApp {
             .id(SharedString::from(format!("clarify-{id}")))
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .bg(rgb(PANEL))
+            .gap_3()
+            .p_4()
+            .rounded_xl()
+            .bg(rgb(SURFACE))
             .border_1()
-            .border_color(rgb(ACCENT))
+            .border_color(rgb(BORDER))
             .child(
                 div()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(ACCENT_SOFT))
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(ACCENT))
@@ -1117,12 +1370,14 @@ impl HermesApp {
             .child(
                 div()
                     .text_sm()
+                    .text_color(rgb(TEXT))
                     .child(SharedString::from(request.question.clone())),
             )
             .child(choices)
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .when(!typed_answer.is_empty(), |this| {
                         let card_id = id.clone();
@@ -1135,8 +1390,10 @@ impl HermesApp {
                                 .rounded_md()
                                 .bg(rgb(ACCENT))
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
                                 .text_color(rgb(BG))
                                 .cursor_pointer()
+                                .hover(|this| this.bg(rgb(ACCENT_HI)))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.answer(&card_id, answer.clone(), cx)
                                 }))
@@ -1149,15 +1406,25 @@ impl HermesApp {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(BORDER))
+                            .bg(rgb(SURFACE_HI))
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(TEXT_MUTED))
                             .cursor_pointer()
+                            .hover(|this| this.bg(rgb(BORDER_HI)).text_color(rgb(TEXT)))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.dismiss_card(&id_skip, cx)
                             }))
                             .child("Skip"),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .when(typed_answer.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_DIM))
+                                .child("Type an answer, then Enter"),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -1169,54 +1436,87 @@ impl HermesApp {
         div()
             .flex()
             .flex_col()
-            .gap_1()
             .mx_4()
             .mb_2()
-            .p_2()
-            .rounded_lg()
-            .bg(rgb(PANEL))
+            .rounded_xl()
+            .bg(rgb(SURFACE))
             .border_1()
-            .border_color(rgb(ACCENT))
+            .border_color(rgb(BORDER_HI))
+            .overflow_hidden()
             .child(
                 div()
-                    .px_2()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(if self.palette.query.is_empty() {
-                        MUTED
-                    } else {
-                        TEXT
-                    }))
-                    .child(SharedString::from(if self.palette.query.is_empty() {
-                        "Type a command…".to_string()
-                    } else {
-                        self.palette.query.clone()
-                    })),
-            )
-            .children(items.into_iter().enumerate().map(|(index, item)| {
-                div()
-                    .id(SharedString::from(format!("palette-{index}")))
                     .flex()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(index == selected, |this| this.bg(rgb(BORDER)))
-                    .hover(|this| this.bg(rgb(0x1d2029)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.palette.index = index;
-                        this.accept_palette(cx);
-                    }))
-                    .child(SharedString::from(item.label))
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(div().text_sm().text_color(rgb(ACCENT)).child("›"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(item.hint)),
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .when(self.palette.query.is_empty(), |this| {
+                                this.text_color(rgb(TEXT_DIM))
+                            })
+                            .when(!self.palette.query.is_empty(), |this| {
+                                this.text_color(rgb(TEXT))
+                            })
+                            .child(SharedString::from(if self.palette.query.is_empty() {
+                                "Type a command…".to_string()
+                            } else {
+                                self.palette.query.clone()
+                            })),
                     )
-            }))
+                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("esc")),
+            )
+            .child(
+                div()
+                    .id("palette-list")
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .p_2()
+                    .max_h(px(300.))
+                    .overflow_y_scroll()
+                    .children(items.into_iter().enumerate().map(|(index, item)| {
+                        div()
+                            .id(SharedString::from(format!("palette-{index}")))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(index == selected, |this| this.bg(rgb(ACCENT_SOFT)))
+                            .when(index != selected, |this| {
+                                this.hover(|this| this.bg(rgb(SURFACE_HI)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.palette.index = index;
+                                this.accept_palette(cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .when(index == selected, |this| this.text_color(rgb(ACCENT)))
+                                    .when(index != selected, |this| this.text_color(rgb(TEXT)))
+                                    .child(SharedString::from(item.label)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(SharedString::from(item.hint)),
+                            )
+                    })),
+            )
     }
 
     fn mention_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1226,95 +1526,170 @@ impl HermesApp {
         div()
             .flex()
             .flex_col()
-            .gap_1()
             .mx_4()
             .mb_2()
-            .p_2()
-            .rounded_lg()
-            .bg(rgb(PANEL))
+            .rounded_xl()
+            .bg(rgb(SURFACE))
             .border_1()
-            .border_color(rgb(REASONING))
+            .border_color(rgb(BORDER_HI))
+            .overflow_hidden()
             .child(
                 div()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child(SharedString::from(format!(
-                        "@{} · Enter to mention",
-                        self.mention.query
-                    ))),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(REASONING))
+                            .child(SharedString::from(format!("@{}", self.mention.query))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_DIM))
+                            .child("↑↓ · Enter"),
+                    ),
             )
-            .children(items.into_iter().enumerate().map(|(index, item)| {
+            .child(
                 div()
-                    .id(SharedString::from(format!("mention-{index}")))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(index == selected, |this| this.bg(rgb(BORDER)))
-                    .hover(|this| this.bg(rgb(0x1d2029)))
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.mention.index = index;
-                        this.accept_mention(cx);
-                    }))
-                    .child(SharedString::from(format!("@{item}")))
-            }))
+                    .id("mention-list")
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .p_2()
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .children(items.into_iter().enumerate().map(|(index, item)| {
+                        div()
+                            .id(SharedString::from(format!("mention-{index}")))
+                            .px_2()
+                            .py_2()
+                            .rounded_md()
+                            .text_sm()
+                            .cursor_pointer()
+                            .when(index == selected, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(index != selected, |this| {
+                                this.text_color(rgb(TEXT))
+                                    .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.mention.index = index;
+                                this.accept_mention(cx);
+                            }))
+                            .child(SharedString::from(format!("@{item}")))
+                    })),
+            )
     }
 
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.composer.is_empty();
         let focused = self.focused;
 
-        let mut input = div().flex().flex_col().gap_0p5().flex_1();
+        let mut input = div().flex().flex_col().gap_1().flex_1().min_w_0();
         if empty {
             input = input.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(MUTED))
-                    .child("Message Hermes…  ·  Shift+Enter for a new line"),
+                    .text_color(rgb(TEXT_DIM))
+                    .child("Message Hermes…"),
             );
         } else {
             for part in self.composer.split('\n') {
-                input = input.child(div().text_sm().child(SharedString::from(part.to_string())));
+                input = input.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(part.to_string())),
+                );
             }
         }
 
         div()
             .flex()
-            .items_end()
-            .gap_2()
+            .flex_col()
             .px_4()
-            .py_3()
-            .bg(rgb(PANEL))
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .when(!focused, |this| this.border_color(rgb(WARN)))
+            .pt_3()
+            .pb_4()
+            .bg(rgb(BG))
             .child(
                 div()
-                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(BG))
+                    .py_3()
+                    .rounded_xl()
+                    .bg(rgb(SURFACE))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(TEXT))
-                    .child(input),
-            )
-            .child(
-                div()
-                    .id("send")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(empty, |this| this.bg(rgb(BORDER)).text_color(rgb(MUTED)))
-                    .when(!empty, |this| this.bg(rgb(ACCENT)).text_color(rgb(BG)))
-                    .on_click(cx.listener(|this, _event, _window, cx| this.submit(cx)))
-                    .child("Send ↵"),
+                    .when(focused, |this| this.border_color(rgb(ACCENT)))
+                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .when(!self.attachments.is_empty(), |this| {
+                        this.child(div().flex().flex_wrap().gap_2().children(
+                            self.attachments.iter().map(|name| {
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(rgb(SURFACE_HI))
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child(SharedString::from(name.clone()))
+                            }),
+                        ))
+                    })
+                    .child(input)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child("Enter to send")
+                                    .child("·")
+                                    .child("Shift+Enter newline")
+                                    .child("·")
+                                    .child("@ mention")
+                                    .child("·")
+                                    .child("⌘K"),
+                            )
+                            .child(
+                                div()
+                                    .id("send")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .cursor_pointer()
+                                    .when(empty, |this| {
+                                        this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                                    })
+                                    .when(!empty, |this| {
+                                        this.bg(rgb(ACCENT))
+                                            .text_color(rgb(BG))
+                                            .hover(|this| this.bg(rgb(ACCENT_HI)))
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _event, _window, cx| this.submit(cx)),
+                                    )
+                                    .child("Send ↵"),
+                            ),
+                    ),
             )
     }
 }
@@ -1353,12 +1728,13 @@ impl Render for HermesApp {
                 div()
                     .flex()
                     .flex_1()
+                    .min_h_0()
                     .overflow_hidden()
                     .child(self.sidebar(cx))
                     .child(self.chat(cx)),
             )
-            .children(cards)
-            .children(palette)
+            .when_some(cards, |this, cards| this.child(cards))
+            .when_some(palette, |this, palette| this.child(palette))
             .child(self.composer(cx))
     }
 }
