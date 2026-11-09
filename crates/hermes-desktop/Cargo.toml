@@ -1,0 +1,26 @@
+[package]
+name = "hermes-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native GPUI client for Hermes"
+
+[[bin]]
+name = "hermes-desktop"
+path = "src/main.rs"
+
+[dependencies]
+hermes-api.workspace = true
+hermes-rpc.workspace = true
+
+anyhow.workspace = true
+futures-util.workspace = true
+gpui = { package = "gpui-ce", version = "=0.3.0" }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", features = ["font-kit", "wayland", "x11"] }
+ksni = { version = "0.3", features = ["blocking"] }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

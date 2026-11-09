@@ -1,0 +1,35 @@
+hermes-gpui
+Copyright (c) 2026 reverb256
+Licensed under the MIT License (see LICENSE).
+
+This project is an independent desktop client. It is not a fork of, and is not
+affiliated with, Nous Research or Zed Industries.
+
+## Derived work
+
+The JSON-RPC transport in `crates/hermes-rpc` and the HTTP/WebSocket endpoint
+contract in `crates/hermes-api` are ports of the Hermes gateway client that
+ships with hermes-agent. The wire protocol, method names, event names and
+close codes are taken from that source so this client interoperates with an
+unmodified Hermes backend.
+
+  hermes-agent — https://github.com/NousResearch/hermes-agent
+  Copyright (c) 2025 Nous Research
+  Licensed under the MIT License.
+  Upstream files referenced:
+    apps/shared/src/json-rpc-channel.ts
+    apps/shared/src/json-rpc-gateway.ts
+    apps/shared/src/gateway-contract.generated.ts
+    hermes_cli/web_routers/{profiles,mcp,cron,status,chat_ws}.py
+
+The full text of the upstream MIT license is reproduced in
+`LICENSES/hermes-agent-MIT.txt`.
+
+## Dependencies
+
+* `gpui` / `gpui_platform` (GPUI Community Edition) — MIT OR Apache-2.0,
+  https://github.com/gpui-ce/gpui-ce. GPUI itself originates with Zed
+  Industries, https://github.com/zed-industries/zed.
+* `ksni` — MIT, StatusNotifierItem implementation used for the tray icon.
+* All other Rust dependencies are linked at build time; run
+  `cargo deny list` or `cargo license` for the resolved set.

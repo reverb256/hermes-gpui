@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+.cache/
+*.log
+.env
+.env.local
