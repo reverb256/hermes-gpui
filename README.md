@@ -6,7 +6,7 @@ It talks to the same two surfaces the official desktop app does:
 
 | Surface | Endpoint | Used for |
 | --- | --- | --- |
-| REST | `GET /api/profiles`, `/api/profiles/active`, `/api/mcp/servers`, `/api/cron/jobs`, `/api/status` | profile roster, tool inventory, cron, host telemetry |
+| REST | `GET /api/profiles`, `/api/profiles/active`, `/api/mcp/servers`, `/api/cron/jobs`, `/api/status`, `GET/PUT/DELETE /api/env` | profile roster, tool inventory, cron, host telemetry, secrets |
 | JSON-RPC over WebSocket | `ws(s)://host:9119/api/ws` | sessions, `prompt.submit`, streaming `message.delta`, approvals |
 
 The RPC layer is a Rust port of the gateway client Hermes ships in
@@ -80,6 +80,25 @@ before values, semantic colours, one accent, a 4 px spacing rhythm and one
 reading measure. [`STYLE.md`](STYLE.md) records the rules and token table;
 contrast and scale invariants are unit-tested.
 
+## Bot inspector
+
+`Ctrl+,` (or the `⚙ Bot` button) opens a panel for the selected bot:
+
+| Tab | What it does | Wire surface |
+| --- | --- | --- |
+| Look | icon glyph, accent colour and avatar image, shared by every client | `profiles.configure` (`ui_meta.icon`, `ui_meta.accent`), `profiles.set_asset` / `profiles.get_asset` |
+| Connectors | switch MCP servers and toolsets on or off | `profiles.describe`, `profiles.configure` (`enabled_mcp_servers`, `enabled_toolsets`) |
+| Secrets | list, add, replace and delete host env keys, always redacted | `GET/PUT/DELETE /api/env` |
+
+Look changes live in the host's `profile.yaml`, so a bot keeps its face on every
+machine. Avatar images are stored as `assets/avatar.*`; the client accepts
+PNG/JPEG/WebP up to 2 MB. Secret values arrive redacted and the reveal endpoint
+is never called, so the client can write a secret but cannot read one back.
+
+`HERMES_OPEN_INSPECTOR=1` opens the panel at launch, and
+`HERMES_INSPECTOR_TAB=look|connectors|secrets` picks the tab — that is how
+screenshot runs review the panel without input automation.
+
 ## System requirements (Linux)
 
 GPUI renders through the GPU: `wayland` or `x11`, `libxkbcommon`, `vulkan-icd-loader`,
@@ -93,8 +112,9 @@ gated hosts, profile roster, bot switching (`Ctrl+1…9`), streaming transcript
 with reasoning deltas, prompt submission, interrupt, approval cards
 (allow once / always allow / deny), clarify cards, `@`-mentions for bots and
 skills, file and image attachments, cron routines read-out, tray icon with
-show/quit and minimise-on-close.
+show/quit and minimise-on-close, and a per-bot inspector for look, connectors
+(MCP servers and toolsets) and host secrets.
 
-Not yet wired: file browser, voice mode, inline Vault-style secrets,
-multi-host switching. The composer handles printable keys, backspace and enter;
-there is no IME composition or text selection yet.
+Not yet wired: file browser, voice mode, multi-host switching, session history
+and markdown rendering. The composer handles printable keys, backspace and
+enter; there is no IME composition or text selection yet.

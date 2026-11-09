@@ -36,6 +36,7 @@ pub enum Action {
     OpenPalette,
     Refresh,
     Attach,
+    ToggleInspector,
     Dismiss,
     PaletteUp,
     PaletteDown,
@@ -79,6 +80,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "n" => Action::NewChat,
                     "r" => Action::Refresh,
                     "o" => Action::Attach,
+                    "," | "comma" => Action::ToggleInspector,
                     digit => match digit.parse::<usize>() {
                         Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),
                         _ => Action::Nothing,
@@ -139,6 +141,7 @@ mod tests {
         assert_eq!(resolve(ctrl("n"), Focus::Composer), Action::NewChat);
         assert_eq!(resolve(ctrl("r"), Focus::Composer), Action::Refresh);
         assert_eq!(resolve(ctrl("o"), Focus::Composer), Action::Attach);
+        assert_eq!(resolve(ctrl(","), Focus::Composer), Action::ToggleInspector);
         assert_eq!(
             resolve(ctrl("3"), Focus::Composer),
             Action::SwitchProfile(3)

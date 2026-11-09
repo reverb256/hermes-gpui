@@ -27,6 +27,9 @@ Everything concrete lives in `crates/hermes-desktop/src/theme.rs`.
    `ACCENT_SOFT` fill plus `ACCENT` ink. Every interactive div needs `.id(...)`.
 8. **Quiet labels.** Metadata is `text_xs` + `TEXT_MUTED`; eyebrows are
    `text_xs` + `BOLD` + `TEXT_DIM`. Body copy is `text_sm` + `TEXT`.
+9. **Same rules in the drawer.** The inspector is `PANEL_W` (340 px) with the
+   same plane, hairline and spacing scale as the rail; a bot is a 24 px tile in
+   the rail and a 52 px tile in the panel head.
 
 ## Tokens
 
@@ -48,6 +51,7 @@ Everything concrete lives in `crates/hermes-desktop/src/theme.rs`.
 | `REASONING` | `#b48ef5` | reasoning trace |
 | `WARN` | `#e0af68` | awaiting a decision |
 | `DANGER` | `#f7768e` | failure, deny |
+| `BOT_ACCENT_CYAN` | `#7dcfff` | sixth bot accent |
 
 ## Verification
 

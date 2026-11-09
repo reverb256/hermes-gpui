@@ -18,6 +18,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::backend::{
     ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command,
 };
+use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
 use crate::theme::*;
 use crate::transcript::{Line, Role, append_streaming};
@@ -92,6 +93,7 @@ pub struct HermesApp {
     scroll: ScrollHandle,
     tray: TrayStatus,
     tray_state: (bool, String),
+    inspector: Inspector,
 }
 
 impl Focusable for HermesApp {
@@ -126,10 +128,21 @@ impl HermesApp {
             scroll: ScrollHandle::new(),
             tray,
             tray_state: (false, String::new()),
+            inspector: Inspector::default(),
         };
 
         app.pump(events, cx);
         app.pump_tray(cx);
+        // QA hook: open the inspector (optionally on a given tab) at launch so
+        // a screenshot run can review the panel without input automation.
+        if std::env::var("HERMES_OPEN_INSPECTOR").is_ok() {
+            app.inspector.tab = match std::env::var("HERMES_INSPECTOR_TAB").ok().as_deref() {
+                Some("connectors") => Tab::Connectors,
+                Some("secrets") => Tab::Secrets,
+                _ => Tab::Look,
+            };
+            app.toggle_inspector(cx);
+        }
         app
     }
 
@@ -248,6 +261,26 @@ impl HermesApp {
                     kind: CardKind::Clarify(request),
                 });
             }
+            BackendEvent::ProfileDetail(detail) => {
+                self.inspector.detail_for = Some(detail.name.clone());
+                self.inspector.detail = Some(detail);
+            }
+            BackendEvent::Env(rows) => self.inspector.loaded_env(rows),
+            BackendEvent::Avatar {
+                profile,
+                mime,
+                bytes,
+            } => {
+                let format = match mime.as_str() {
+                    "image/jpeg" => gpui::ImageFormat::Jpeg,
+                    "image/webp" => gpui::ImageFormat::Webp,
+                    _ => gpui::ImageFormat::Png,
+                };
+                let image = std::sync::Arc::new(gpui::Image::from_bytes(format, bytes));
+                self.inspector.set_avatar(&profile, image);
+            }
+            BackendEvent::AvatarCleared { profile } => self.inspector.clear_avatar(&profile),
+            BackendEvent::InspectorStatus(text) => self.inspector.status = Some(text),
             BackendEvent::Attached { name } => {
                 self.attachments.push(name.clone());
                 self.lines
@@ -262,6 +295,9 @@ impl HermesApp {
     // ---- keyboard -------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.route_inspector_typing(event, cx) {
+            return;
+        }
         let keystroke = &event.keystroke;
         let focus = if self.palette.open {
             Focus::Palette
@@ -352,6 +388,7 @@ impl HermesApp {
             Action::NewChat => self.new_chat(cx),
             Action::Refresh => self.refresh(cx),
             Action::Attach => self.pick_attachment(cx),
+            Action::ToggleInspector => self.toggle_inspector(cx),
             Action::Interrupt => {
                 if self.busy {
                     self.backend.send(Command::Interrupt);
@@ -492,8 +529,213 @@ impl HermesApp {
         self.lines.clear();
         self.cards.clear();
         self.backend.send(Command::SwitchProfile(name.clone()));
+        if self.inspector.open {
+            let meta = self
+                .profiles
+                .iter()
+                .find(|profile| profile.name == name)
+                .and_then(|profile| profile.ui_meta.clone());
+            self.inspector.target(&name);
+            self.inspector.seed_look(meta.as_ref());
+            self.backend.send(Command::Inspect {
+                profile: name.clone(),
+            });
+        }
         self.lines
             .push(Line::new(Role::System, format!("Switched to {name}")));
+        cx.notify();
+    }
+
+    // ---- inspector ------------------------------------------------------
+
+    /// Typing into the inspector's fields takes precedence over the chat
+    /// shortcuts; returns true when the keystroke was consumed.
+    fn route_inspector_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(field) = self.inspector.focus else {
+            return false;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => self.inspector.focus = None,
+            "enter" | "tab" => match field {
+                Field::SecretKey => self.inspector.focus = Some(Field::SecretValue),
+                Field::SecretValue => self.add_secret(cx),
+                Field::Filter => self.inspector.focus = None,
+            },
+            "backspace" => {
+                if let Some(text) = self.field_mut(field) {
+                    text.pop();
+                }
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref()
+                    && let Some(text) = self.field_mut(field)
+                {
+                    text.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn field_mut(&mut self, field: Field) -> Option<&mut String> {
+        match field {
+            Field::Filter => Some(&mut self.inspector.filter),
+            Field::SecretKey => Some(&mut self.inspector.draft_key),
+            Field::SecretValue => Some(&mut self.inspector.draft_value),
+        }
+    }
+
+    fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector.open = !self.inspector.open;
+        if self.inspector.open {
+            let name = self.profile_name();
+            let meta = self
+                .current_profile()
+                .and_then(|profile| profile.ui_meta.clone());
+            self.inspector.target(&name);
+            self.inspector.seed_look(meta.as_ref());
+            self.backend.send(Command::Inspect { profile: name });
+        } else {
+            self.inspector.focus = None;
+        }
+        cx.notify();
+    }
+
+    fn save_look(&mut self, cx: &mut Context<Self>) {
+        let profile = self.profile_name();
+        let patch = inspector::look_patch(&self.inspector.glyph, self.inspector.accent);
+        self.inspector.status = Some("saving look…".into());
+        self.backend
+            .send(Command::ConfigureProfile { profile, patch });
+        cx.notify();
+    }
+
+    fn pick_avatar(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let profile = self.profile_name();
+        cx.spawn(async move |_this, _cx| {
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .add_filter("image", &["png", "jpg", "jpeg", "webp"])
+                .pick_file()
+                .await
+            {
+                backend.send(Command::AttachAvatar {
+                    profile,
+                    path: file.path().to_path_buf(),
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn remove_avatar(&mut self, cx: &mut Context<Self>) {
+        let profile = self.profile_name();
+        self.inspector.clear_avatar(&profile);
+        self.backend.send(Command::ClearAvatar { profile });
+        cx.notify();
+    }
+
+    fn toggle_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(detail) = self.inspector.detail.clone() else {
+            return;
+        };
+        let mut enabled: Vec<String> = detail
+            .mcp_servers
+            .iter()
+            .filter(|server| server.enabled)
+            .map(|server| server.name.clone())
+            .collect();
+        match enabled.iter().position(|candidate| candidate == name) {
+            Some(index) => {
+                enabled.remove(index);
+            }
+            None => enabled.push(name.to_string()),
+        }
+        let profile = self.profile_name();
+        self.backend.send(Command::ConfigureProfile {
+            profile,
+            patch: serde_json::json!({ "enabled_mcp_servers": enabled }),
+        });
+        if let Some(detail) = self.inspector.detail.as_mut() {
+            for server in &mut detail.mcp_servers {
+                if server.name == name {
+                    server.enabled = !server.enabled;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_toolset(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(detail) = self.inspector.detail.clone() else {
+            return;
+        };
+        let mut enabled: Vec<String> = detail
+            .toolsets
+            .iter()
+            .filter(|toolset| toolset.enabled)
+            .map(|toolset| toolset.name.clone())
+            .collect();
+        match enabled.iter().position(|candidate| candidate == name) {
+            Some(index) => {
+                // An empty pin means "everything enabled" server-side, so the
+                // last toolset cannot be switched off from here.
+                if enabled.len() == 1 {
+                    self.inspector.status = Some("a bot always keeps one toolset".into());
+                    cx.notify();
+                    return;
+                }
+                enabled.remove(index);
+            }
+            None => enabled.push(name.to_string()),
+        }
+        let profile = self.profile_name();
+        self.backend.send(Command::ConfigureProfile {
+            profile,
+            patch: serde_json::json!({ "enabled_toolsets": enabled }),
+        });
+        if let Some(detail) = self.inspector.detail.as_mut() {
+            for toolset in &mut detail.toolsets {
+                if toolset.name == name {
+                    toolset.enabled = !toolset.enabled;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn add_secret(&mut self, cx: &mut Context<Self>) {
+        let key = self.inspector.draft_key.trim().to_string();
+        let value = self.inspector.draft_value.clone();
+        if key.is_empty() || value.is_empty() {
+            self.inspector.status = Some("a secret needs a key and a value".into());
+            cx.notify();
+            return;
+        }
+        let profile = self.profile_name();
+        self.backend.send(Command::SetSecret {
+            profile,
+            key: key.clone(),
+            value,
+        });
+        self.inspector.draft_key.clear();
+        self.inspector.draft_value.clear();
+        self.inspector.focus = None;
+        self.inspector.status = Some(format!("saving {key}…"));
+        cx.notify();
+    }
+
+    fn delete_secret(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.backend.send(Command::DeleteSecret {
+            profile: self.profile_name(),
+            key: key.to_string(),
+        });
+        self.inspector.status = Some(format!("removing {key}…"));
         cx.notify();
     }
 
@@ -710,6 +952,24 @@ impl HermesApp {
             .child(div().flex_1())
             .child(
                 div()
+                    .id("inspector-toggle")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(self.inspector.open, |this| {
+                        this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                    })
+                    .when(!self.inspector.open, |this| {
+                        this.text_color(rgb(TEXT_MUTED))
+                            .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                    })
+                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)))
+                    .child("⚙ Bot"),
+            )
+            .child(
+                div()
                     .id("attach")
                     .px_2()
                     .py_1()
@@ -809,6 +1069,7 @@ impl HermesApp {
                         } else {
                             format!("{} · {} skills", subtitle, profile.skill_count)
                         };
+                        let (glyph, accent) = inspector::look_from_meta(profile.ui_meta.as_ref());
 
                         div()
                             .id(SharedString::from(format!("profile-{}", profile.name)))
@@ -828,7 +1089,26 @@ impl HermesApp {
                                 div()
                                     .w(px(2.))
                                     .rounded_full()
-                                    .when(selected, |this| this.bg(rgb(ACCENT))),
+                                    .when(selected, move |this| this.bg(rgb(accent))),
+                            )
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .h(px(24.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(rgb(SURFACE_HI))
+                                    .border_1()
+                                    .border_color(rgb(accent))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(accent))
+                                            .child(SharedString::from(glyph)),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1436,7 +1716,9 @@ impl HermesApp {
         div()
             .flex()
             .flex_col()
-            .mx_4()
+            .w_full()
+            .max_w(px(READ_W))
+            .mx_auto()
             .mb_2()
             .rounded_xl()
             .bg(rgb(SURFACE))
@@ -1526,7 +1808,9 @@ impl HermesApp {
         div()
             .flex()
             .flex_col()
-            .mx_4()
+            .w_full()
+            .max_w(px(READ_W))
+            .mx_auto()
             .mb_2()
             .rounded_xl()
             .bg(rgb(SURFACE))
@@ -1589,6 +1873,672 @@ impl HermesApp {
             )
     }
 
+    fn section_label(&self, text: &str) -> gpui::Div {
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(rgb(TEXT_DIM))
+            .child(SharedString::from(text.to_string()))
+    }
+
+    fn note(&self, text: &str) -> gpui::Div {
+        div()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(SURFACE))
+            .text_xs()
+            .text_color(rgb(TEXT_DIM))
+            .child(SharedString::from(text.to_string()))
+    }
+
+    fn stat(&self, label: &str, value: String) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(SharedString::from(value)),
+            )
+    }
+
+    fn inspector_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let tab = self.inspector.tab;
+        let body = match tab {
+            Tab::Look => self.look_tab(cx),
+            Tab::Connectors => self.connectors_tab(cx),
+            Tab::Secrets => self.secrets_tab(cx),
+        };
+
+        div()
+            .w(px(PANEL_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(BG_ELEV))
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(HEADER_H))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(TEXT_DIM))
+                            .child("BOT INSPECTOR"),
+                    )
+                    .child(
+                        div()
+                            .id("close-inspector")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(rgb(TEXT_MUTED))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                            .on_click(
+                                cx.listener(|this, _event, _window, cx| this.toggle_inspector(cx)),
+                            )
+                            .child("×"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .children(Tab::all().into_iter().map(|candidate| {
+                        let selected = candidate == tab;
+                        div()
+                            .id(SharedString::from(format!(
+                                "inspector-tab-{}",
+                                candidate.label()
+                            )))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(selected, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!selected, |this| {
+                                this.text_color(rgb(TEXT_MUTED))
+                                    .hover(|this| this.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.inspector.tab = candidate;
+                                cx.notify();
+                            }))
+                            .child(candidate.label())
+                    })),
+            )
+            .when_some(self.inspector.status.clone(), |this, status| {
+                this.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .bg(rgb(SURFACE))
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(SharedString::from(status)),
+                )
+            })
+            .child(
+                div()
+                    .id("inspector-body")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .px_4()
+                    .py_3()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
+    fn look_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let profile = self.inspector.detail_for.clone().unwrap_or_default();
+        let accent = self.inspector.accent;
+        let glyph = self.inspector.glyph.clone();
+        let avatar = self.inspector.avatar.clone();
+        let has_avatar = avatar.is_some();
+
+        let mut tile = div()
+            .w(px(52.))
+            .h(px(52.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
+            .rounded_xl()
+            .overflow_hidden()
+            .bg(rgb(SURFACE_HI))
+            .border_1()
+            .border_color(rgb(accent));
+        if let Some(image) = avatar {
+            tile = tile.child(gpui::img(image).w(px(52.)).h(px(52.)));
+        } else {
+            tile = tile.child(
+                div()
+                    .text_xl()
+                    .text_color(rgb(accent))
+                    .child(SharedString::from(glyph.clone())),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div().flex().items_center().gap_3().child(tile).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(TEXT))
+                                .child(SharedString::from(profile.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("avatar-pick")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(SURFACE))
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .cursor_pointer()
+                                        .hover(|this| {
+                                            this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.pick_avatar(cx)
+                                        }))
+                                        .child("Image…"),
+                                )
+                                .when(has_avatar, |this| {
+                                    this.child(
+                                        div()
+                                            .id("avatar-clear")
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .text_color(rgb(DANGER))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.remove_avatar(cx)
+                                            }))
+                                            .child("Remove"),
+                                    )
+                                }),
+                        ),
+                ),
+            )
+            .child(self.section_label("ICON"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(inspector::GLYPHS.iter().map(|candidate| {
+                        let selected = *candidate == self.inspector.glyph;
+                        let value = (*candidate).to_string();
+                        div()
+                            .id(SharedString::from(format!("glyph-{candidate}")))
+                            .w(px(28.))
+                            .h(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgb(SURFACE))
+                            .text_sm()
+                            .when(selected, |this| {
+                                this.border_1()
+                                    .border_color(rgb(accent))
+                                    .text_color(rgb(accent))
+                            })
+                            .when(!selected, |this| this.text_color(rgb(TEXT_MUTED)))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(SURFACE_HI)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.inspector.glyph = value.clone();
+                                cx.notify();
+                            }))
+                            .child(*candidate)
+                    })),
+            )
+            .child(self.section_label("ACCENT"))
+            .child(div().flex().items_center().gap_2().children(
+                inspector::ACCENT_CHOICES.iter().map(|choice| {
+                    let selected = *choice == accent;
+                    let value = *choice;
+                    div()
+                        .id(SharedString::from(format!("accent-{value:06x}")))
+                        .w(px(22.))
+                        .h(px(22.))
+                        .rounded_full()
+                        .bg(rgb(value))
+                        .when(selected, |this| this.border_2().border_color(rgb(TEXT)))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.inspector.accent = value;
+                            cx.notify();
+                        }))
+                }),
+            ))
+            .child(
+                div()
+                    .id("save-look")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(ACCENT))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(BG))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.save_look(cx)))
+                    .child("Save look"),
+            )
+            .when_some(self.inspector.detail.clone(), |this, detail| {
+                this.child(self.section_label("MODEL"))
+                    .child(self.stat("provider", detail.model.provider))
+                    .child(self.stat("model", detail.model.default))
+                    .child(self.stat("skills", format!("{}", detail.skills.len())))
+                    .child(self.stat(
+                        "connectors",
+                        format!(
+                            "{} MCP · {} toolsets",
+                            detail.mcp_servers.len(),
+                            detail.toolsets.len()
+                        ),
+                    ))
+            })
+            .into_any_element()
+    }
+
+    fn connectors_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(detail) = self.inspector.detail.clone() else {
+            return self.note("Loading connectors…").into_any_element();
+        };
+
+        let mut panel = div().flex().flex_col().gap_2();
+        panel = panel.child(self.section_label("MCP SERVERS"));
+        if detail.mcp_servers.is_empty() {
+            panel = panel.child(self.note("This bot has no MCP servers configured."));
+        }
+        for server in &detail.mcp_servers {
+            let name = server.name.clone();
+            let enabled = server.enabled;
+            let transport = server
+                .transport
+                .clone()
+                .unwrap_or_else(|| "stdio".to_string());
+            panel = panel.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(SURFACE))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(SharedString::from(format!("MCP · {transport}"))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("mcp-{name}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(enabled, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!enabled, |this| {
+                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                            })
+                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_mcp(&name, cx)
+                            }))
+                            .child(if enabled { "On" } else { "Off" }),
+                    ),
+            );
+        }
+
+        panel = panel.child(self.section_label("TOOLSETS"));
+        if detail.toolsets.is_empty() {
+            panel = panel.child(self.note("No toolsets reported."));
+        }
+        for toolset in &detail.toolsets {
+            let name = toolset.name.clone();
+            let enabled = toolset.enabled;
+            let label = if toolset.label.is_empty() {
+                toolset.name.clone()
+            } else {
+                toolset.label.clone()
+            };
+            panel = panel.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(SURFACE))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(label)),
+                            )
+                            .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
+                                SharedString::from(format!("{} tools", toolset.tool_count)),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("toolset-{name}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(enabled, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!enabled, |this| {
+                                this.bg(rgb(SURFACE_HI)).text_color(rgb(TEXT_DIM))
+                            })
+                            .hover(|this| this.bg(rgb(BORDER_HI)))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.toggle_toolset(&name, cx)
+                            }))
+                            .child(if enabled { "On" } else { "Off" }),
+                    ),
+            );
+        }
+
+        panel.into_any_element()
+    }
+
+    fn secret_field(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+        target: Field,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.section_label(label))
+            .child(
+                div()
+                    .id(SharedString::from(format!("secret-field-{label}")))
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .when(focused, |this| this.border_color(rgb(ACCENT)))
+                    .when(!focused, |this| this.border_color(rgb(BORDER)))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(value.is_empty(), |this| {
+                        this.text_color(rgb(TEXT_DIM))
+                            .child(SharedString::from(placeholder.to_string()))
+                    })
+                    .when(!value.is_empty(), |this| {
+                        this.text_color(rgb(TEXT))
+                            .child(SharedString::from(value.to_string()))
+                    })
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.inspector.focus = Some(target);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn secrets_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = inspector::visible_env(
+            &self.inspector.env,
+            &self.inspector.filter,
+            self.inspector.show_all,
+        );
+        let set_count = inspector::set_secret_count(&self.inspector.env);
+        let filter = self.inspector.filter.clone();
+        let key = self.inspector.draft_key.clone();
+        let value = self.inspector.draft_value.clone();
+        let focus = self.inspector.focus;
+
+        let mut list = div().flex().flex_col().gap_1();
+        if rows.is_empty() {
+            list = list.child(self.note(if !self.inspector.env_loaded {
+                "Loading secrets…"
+            } else if self.inspector.show_all {
+                "No keys match this filter."
+            } else {
+                "No secrets set on this host yet."
+            }));
+        }
+        let header = if self.inspector.env_loaded {
+            format!("SECRETS · {set_count} set")
+        } else {
+            "SECRETS".to_string()
+        };
+        for (name, entry) in rows {
+            let name_for_delete = name.clone();
+            let shown = entry.redacted_value.clone().unwrap_or_else(|| {
+                if entry.is_set {
+                    "set".to_string()
+                } else {
+                    "not set".to_string()
+                }
+            });
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(SURFACE))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(SharedString::from(shown)),
+                            ),
+                    )
+                    .when(entry.is_set, |this| {
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("secret-{name}")))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(DANGER))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(DANGER_SOFT)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.delete_secret(&name_for_delete, cx)
+                                }))
+                                .child("×"),
+                        )
+                    }),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(self.section_label(&header))
+                    .child(
+                        div()
+                            .id("show-all-secrets")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(self.inspector.show_all, |this| {
+                                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(ACCENT))
+                            })
+                            .when(!self.inspector.show_all, |this| {
+                                this.text_color(rgb(TEXT_MUTED))
+                                    .hover(|this| this.bg(rgb(SURFACE)))
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.inspector.show_all = !this.inspector.show_all;
+                                cx.notify();
+                            }))
+                            .child("Show all"),
+                    ),
+            )
+            .child(self.secret_field(
+                "FILTER",
+                &filter,
+                "OPENAI…",
+                focus == Some(Field::Filter),
+                Field::Filter,
+                cx,
+            ))
+            .child(list)
+            .child(self.section_label("ADD OR REPLACE"))
+            .child(self.secret_field(
+                "KEY",
+                &key,
+                "OPENAI_API_KEY",
+                focus == Some(Field::SecretKey),
+                Field::SecretKey,
+                cx,
+            ))
+            .child(self.secret_field(
+                "VALUE",
+                &value,
+                "sk-…",
+                focus == Some(Field::SecretValue),
+                Field::SecretValue,
+                cx,
+            ))
+            .child(
+                div()
+                    .id("save-secret")
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(ACCENT))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(BG))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(ACCENT_HI)))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.add_secret(cx)))
+                    .child("Save secret"),
+            )
+            .into_any_element()
+    }
+
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = self.composer.is_empty();
         let focused = self.focused;
@@ -1624,6 +2574,9 @@ impl HermesApp {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .w_full()
+                    .max_w(px(READ_W))
+                    .mx_auto()
                     .px_3()
                     .py_3()
                     .rounded_xl()
@@ -1731,7 +2684,10 @@ impl Render for HermesApp {
                     .min_h_0()
                     .overflow_hidden()
                     .child(self.sidebar(cx))
-                    .child(self.chat(cx)),
+                    .child(self.chat(cx))
+                    .when(self.inspector.open, |this| {
+                        this.child(self.inspector_panel(cx))
+                    }),
             )
             .when_some(cards, |this, cards| this.child(cards))
             .when_some(palette, |this, palette| this.child(palette))

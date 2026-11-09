@@ -59,12 +59,16 @@ pub const WARN: u32 = 0xe0af68;
 pub const WARN_SOFT: u32 = 0x2b2417;
 /// Destructive actions and failures.
 pub const DANGER: u32 = 0xf7768e;
+/// A sixth bot accent, for rosters that need more colours than meanings.
+pub const BOT_ACCENT_CYAN: u32 = 0x7dcfff;
 /// Failure chip fill.
 pub const DANGER_SOFT: u32 = 0x2e1a20;
 
 // ---- layout geometry ---------------------------------------------------
 /// Fixed bot rail.
 pub const RAIL_W: f32 = 248.;
+/// Inspector drawer width.
+pub const PANEL_W: f32 = 340.;
 /// Header bar height.
 pub const HEADER_H: f32 = 52.;
 /// Maximum width of the transcript, in pixels.
@@ -122,6 +126,7 @@ mod tests {
         assert!(contrast(WARN, SURFACE) >= 4.5);
         assert!(contrast(DANGER, SURFACE) >= 4.5);
         assert!(contrast(REASONING, SURFACE) >= 4.5);
+        assert!(contrast(BOT_ACCENT_CYAN, SURFACE) >= 4.5);
         // Primary buttons reverse the contrast: dark ink on the accent fill.
         assert!(contrast(BG, ACCENT) >= 4.5);
     }
@@ -130,6 +135,7 @@ mod tests {
     fn layout_measures_stay_in_a_readable_band() {
         assert!((560. ..=760.).contains(&READ_W), "reading measure drifted");
         assert!((220. ..=300.).contains(&RAIL_W), "rail drifted");
+        assert!((300. ..=420.).contains(&PANEL_W), "inspector drifted");
         assert!(BUBBLE_W <= READ_W);
         assert!(HEADER_H >= 44., "header must stay a comfortable hit target");
     }

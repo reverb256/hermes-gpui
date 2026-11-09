@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, GatewayClient, GatewayEvent, HostConfig, Profile, RestClient, gateway,
+    ActiveProfile, EnvEntry, GatewayClient, GatewayEvent, HostConfig, Profile, ProfileDetail,
+    RestClient, gateway,
 };
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
@@ -151,6 +152,20 @@ pub enum BackendEvent {
     Attached {
         name: String,
     },
+    /// `profiles.describe` answer for the inspector.
+    ProfileDetail(ProfileDetail),
+    /// The host `.env`, redacted server-side.
+    Env(Vec<(String, EnvEntry)>),
+    Avatar {
+        profile: String,
+        mime: String,
+        bytes: Vec<u8>,
+    },
+    AvatarCleared {
+        profile: String,
+    },
+    /// A line for the inspector's status strip, not the transcript.
+    InspectorStatus(String),
 }
 
 #[derive(Debug)]
@@ -174,6 +189,30 @@ pub enum Command {
         session_id: Option<String>,
     },
     Attach(PathBuf),
+    /// Load a profile's connectors, secrets and avatar.
+    Inspect {
+        profile: String,
+    },
+    ConfigureProfile {
+        profile: String,
+        patch: Value,
+    },
+    AttachAvatar {
+        profile: String,
+        path: PathBuf,
+    },
+    ClearAvatar {
+        profile: String,
+    },
+    SetSecret {
+        profile: String,
+        key: String,
+        value: String,
+    },
+    DeleteSecret {
+        profile: String,
+        key: String,
+    },
 }
 
 /// Handle used by the UI; the runtime lives as long as this value.
@@ -326,6 +365,130 @@ async fn worker(
                             }
                             let Some(session_id) = session.clone() else { continue };
                             attach(&client, &events, &session_id, path).await;
+                        }
+                        Command::Inspect { profile } => {
+                            match gateway::describe_profile(&client, &profile).await {
+                                Ok(detail) => {
+                                    tracing::debug!(
+                                        profile = %profile,
+                                        toolsets = detail.toolsets.len(),
+                                        mcp = detail.mcp_servers.len(),
+                                        "inspector: describe ok"
+                                    );
+                                    let _ = events.send(BackendEvent::ProfileDetail(detail));
+                                }
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "connectors failed: {err}"
+                                    )));
+                                }
+                            }
+                            match rest.env_vars(Some(&profile)).await {
+                                Ok(rows) => {
+                                    tracing::debug!(
+                                        rows = rows.len(),
+                                        set = rows.iter().filter(|(_, entry)| entry.is_set).count(),
+                                        "inspector: secrets loaded"
+                                    );
+                                    let _ = events.send(BackendEvent::Env(rows));
+                                }
+                                Err(err) => {
+                                    tracing::warn!("inspector: secrets failed: {err}");
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "secrets failed: {err}"
+                                    )));
+                                }
+                            }
+                            match gateway::profile_asset(&client, &profile).await {
+                                Ok(Some(asset)) => match base64_decode(&asset.data) {
+                                    Some(bytes) => {
+                                        let _ = events.send(BackendEvent::Avatar {
+                                            profile,
+                                            mime: asset.mime,
+                                            bytes,
+                                        });
+                                    }
+                                    None => {
+                                        let _ = events.send(BackendEvent::InspectorStatus(
+                                            "avatar could not be decoded".into(),
+                                        ));
+                                    }
+                                },
+                                Ok(None) => {}
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "avatar failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::ConfigureProfile { profile, patch } => {
+                            match gateway::configure_profile(&client, &profile, patch).await {
+                                Ok(_) => {
+                                    let _ = events
+                                        .send(BackendEvent::InspectorStatus("saved".into()));
+                                    refresh(&rest, &events).await;
+                                }
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "save failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::AttachAvatar { profile, path } => {
+                            attach_avatar(&client, &events, profile, path).await;
+                        }
+                        Command::ClearAvatar { profile } => {
+                            match gateway::clear_profile_avatar(&client, &profile).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::AvatarCleared {
+                                        profile: profile.clone(),
+                                    });
+                                    let _ = events
+                                        .send(BackendEvent::InspectorStatus("avatar removed".into()));
+                                    refresh(&rest, &events).await;
+                                }
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "remove failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::SetSecret { profile, key, value } => {
+                            match rest.set_env(Some(&profile), &key, &value).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "saved {key}"
+                                    )));
+                                    if let Ok(rows) = rest.env_vars(Some(&profile)).await {
+                                        let _ = events.send(BackendEvent::Env(rows));
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "save {key} failed: {err}"
+                                    )));
+                                }
+                            }
+                        }
+                        Command::DeleteSecret { profile, key } => {
+                            match rest.delete_env(Some(&profile), &key).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "removed {key}"
+                                    )));
+                                    if let Ok(rows) = rest.env_vars(Some(&profile)).await {
+                                        let _ = events.send(BackendEvent::Env(rows));
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = events.send(BackendEvent::InspectorStatus(format!(
+                                        "remove {key} failed: {err}"
+                                    )));
+                                }
+                            }
                         }
                         Command::Submit(text) => {
                             if session.is_none() {
@@ -507,6 +670,101 @@ async fn attach(
     }
 }
 
+async fn attach_avatar(
+    client: &GatewayClient,
+    events: &mpsc::UnboundedSender<BackendEvent>,
+    profile: String,
+    path: PathBuf,
+) {
+    /// `profiles.set_asset` refuses anything larger.
+    const MAX_AVATAR_BYTES: usize = 2_000_000;
+
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = events.send(BackendEvent::InspectorStatus(format!(
+                "read {} failed: {err}",
+                path.display()
+            )));
+            return;
+        }
+    };
+    let Some(mime) = image_mime(&bytes) else {
+        let _ = events.send(BackendEvent::InspectorStatus(
+            "avatar must be a PNG, JPEG or WebP image".into(),
+        ));
+        return;
+    };
+    if bytes.len() > MAX_AVATAR_BYTES {
+        let _ = events.send(BackendEvent::InspectorStatus(format!(
+            "avatar is larger than {} MB",
+            MAX_AVATAR_BYTES / (1024 * 1024)
+        )));
+        return;
+    }
+
+    let data_url = crate::inspector::avatar_data_url(mime, &hermes_rpc::base64_encode(&bytes));
+    match gateway::set_profile_avatar(client, &profile, &data_url).await {
+        Ok(_) => {
+            let _ = events.send(BackendEvent::Avatar {
+                profile: profile.clone(),
+                mime: mime.to_string(),
+                bytes,
+            });
+            let _ = events.send(BackendEvent::InspectorStatus("avatar saved".into()));
+        }
+        Err(err) => {
+            let _ = events.send(BackendEvent::InspectorStatus(format!(
+                "avatar save failed: {err}"
+            )));
+        }
+    }
+}
+
+/// Magic-byte sniffing: the gateway checks the same way server-side.
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Standard base64 (padding optional). The workspace's encoder lives in
+/// `hermes-rpc`; this is its decoder for avatar payloads.
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for byte in input.bytes() {
+        if matches!(byte, b'=' | b'\n' | b'\r' | b' ' | b'\t') {
+            continue;
+        }
+        acc = (acc << 6) | u32::from(value(byte)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 async fn refresh(rest: &RestClient, events: &mpsc::UnboundedSender<BackendEvent>) {
     match rest.profiles().await {
         Ok(profiles) => {
@@ -655,6 +913,66 @@ pub async fn probe(host: &HostConfig) -> Vec<String> {
         Err(err) => report.push(format!("session.create: FAILED {err}")),
     }
 
+    // The inspector's two data surfaces: one over the gateway, one over REST.
+    let profile = host.profile.clone().unwrap_or_else(|| "default".into());
+    match gateway::describe_profile(&client, &profile).await {
+        Ok(detail) => report.push(format!(
+            "describe {profile}: {} toolset(s), {} MCP server(s)",
+            detail.toolsets.len(),
+            detail.mcp_servers.len()
+        )),
+        Err(err) => report.push(format!("describe {profile}: FAILED {err}")),
+    }
+    match rest.env_vars(host.profile.as_deref()).await {
+        Ok(rows) => report.push(format!(
+            "secrets: {} catalogued, {} set",
+            rows.len(),
+            rows.iter().filter(|(_, entry)| entry.is_set).count()
+        )),
+        Err(err) => report.push(format!("secrets: FAILED {err}")),
+    }
+
     client.close();
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_decoder_round_trips_the_encoder() {
+        for payload in [
+            b"".as_slice(),
+            b"a".as_slice(),
+            b"ab".as_slice(),
+            b"avatar-bytes".as_slice(),
+            &[0u8, 255, 128, 7, 9, 9, 42],
+        ] {
+            let encoded = hermes_rpc::base64_encode(payload);
+            assert_eq!(base64_decode(&encoded).as_deref(), Some(payload));
+        }
+    }
+
+    #[test]
+    fn base64_decoder_rejects_non_alphabet_bytes() {
+        assert_eq!(base64_decode("AAAA$AAA"), None);
+        assert_eq!(
+            base64_decode("QVZBVEFS").as_deref(),
+            Some(b"AVATAR".as_slice())
+        );
+    }
+
+    #[test]
+    fn avatar_mime_is_sniffed_from_magic_bytes() {
+        assert_eq!(
+            image_mime(&[0x89, b'P', b'N', b'G', 0x0d]),
+            Some("image/png")
+        );
+        assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0xe0]), Some("image/jpeg"));
+        let mut webp = b"RIFF\0\0\0\0WEBP".to_vec();
+        webp.extend_from_slice(b"VP8 ");
+        assert_eq!(image_mime(&webp), Some("image/webp"));
+        assert_eq!(image_mime(b"GIF89a"), None);
+    }
 }

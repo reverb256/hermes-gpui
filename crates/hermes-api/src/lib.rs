@@ -124,6 +124,12 @@ pub struct Profile {
     pub bot_title: String,
     #[serde(default)]
     pub has_alias: bool,
+    #[serde(default)]
+    pub has_avatar: bool,
+    /// Client-agnostic UI metadata the host keeps in `profile.yaml` — the
+    /// roster's `icon`, `accent` and anything else a client wants to share.
+    #[serde(default)]
+    pub ui_meta: Option<Value>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -161,6 +167,95 @@ pub struct McpServer {
     pub error: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
+}
+
+/// One row of `GET /api/env`. Values arrive redacted; this client never asks
+/// for the reveal endpoint, so plaintext secrets never enter the process.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EnvEntry {
+    #[serde(default)]
+    pub is_set: bool,
+    #[serde(default)]
+    pub redacted_value: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub provider_label: String,
+    #[serde(default)]
+    pub is_password: bool,
+    /// A key the user added by hand rather than one from the catalog.
+    #[serde(default)]
+    pub custom: bool,
+    /// Owned by a messaging-channel card; the dashboard hides those here too.
+    #[serde(default)]
+    pub channel_managed: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NamedToggle {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Toolset {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tool_count: u32,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpToggle {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub transport: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetailModel {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub default: String,
+}
+
+/// `profiles.describe` — one profile's editable configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProfileDetail {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub model: DetailModel,
+    #[serde(default)]
+    pub skills: Vec<NamedToggle>,
+    #[serde(default)]
+    pub toolsets: Vec<Toolset>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpToggle>,
+}
+
+/// `profiles.get_asset` answer for a stored avatar.
+#[derive(Debug, Clone, Default)]
+pub struct AvatarAsset {
+    pub mime: String,
+    /// Base64 payload, no `data:` prefix.
+    pub data: String,
 }
 
 /// REST side of a Hermes host.
@@ -213,8 +308,9 @@ impl RestClient {
         }
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        let mut req = self.http.get(format!("{}{}", self.base, path));
+    /// Request builder with this host's credentials applied.
+    fn authed(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let mut req = self.http.request(method, format!("{}{}", self.base, path));
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         } else if let Some(cookie) = &self.cookie {
@@ -224,11 +320,18 @@ impl RestClient {
         } else if let Some((user, pass)) = &self.basic {
             req = req.basic_auth(user, Some(pass));
         }
+        req
+    }
 
-        let response = req.send().await.map_err(|source| ApiError::Transport {
-            path: path.to_string(),
-            source,
-        })?;
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let response = self
+            .authed(reqwest::Method::GET, path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.to_string(),
+                source,
+            })?;
 
         let status = response.status();
         let body = response
@@ -285,6 +388,84 @@ impl RestClient {
 
     pub async fn status(&self) -> Result<Value, ApiError> {
         self.get("/api/status").await
+    }
+
+    /// `GET /api/env` — every catalogued key plus any arbitrary ones, with
+    /// values redacted server-side. Sorted for a stable list.
+    pub async fn env_vars(
+        &self,
+        profile: Option<&str>,
+    ) -> Result<Vec<(String, EnvEntry)>, ApiError> {
+        let path = match profile {
+            Some(profile) if !profile.is_empty() => {
+                format!("/api/env?profile={}", percent_encode(profile))
+            }
+            _ => "/api/env".to_string(),
+        };
+        let payload: std::collections::HashMap<String, EnvEntry> = self.get(&path).await?;
+        let mut rows: Vec<(String, EnvEntry)> = payload.into_iter().collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows)
+    }
+
+    /// `PUT /api/env` — writes `.env` and reconciles config.yaml mirrors.
+    pub async fn set_env(
+        &self,
+        profile: Option<&str>,
+        key: &str,
+        value: &str,
+    ) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/env";
+        let body = serde_json::json!({ "key": key, "value": value, "profile": profile });
+        let response = self
+            .authed(reqwest::Method::PUT, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `DELETE /api/env` — clears the key and every mirror of that credential.
+    pub async fn delete_env(&self, profile: Option<&str>, key: &str) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/env";
+        let body = serde_json::json!({ "key": key, "profile": profile });
+        let response = self
+            .authed(reqwest::Method::DELETE, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    async fn decode_response(
+        &self,
+        path: &str,
+        response: reqwest::Response,
+    ) -> Result<Value, ApiError> {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.to_string(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                path: path.to_string(),
+                body: body.chars().take(400).collect(),
+            });
+        }
+        Ok(serde_json::from_str(&body).unwrap_or(Value::Null))
     }
 
     /// Name of the password provider advertised by `GET /api/auth/providers`,
@@ -524,6 +705,90 @@ pub mod gateway {
             )
             .await
     }
+
+    /// `profiles.describe` — soul, model, skills, toolsets and MCP servers.
+    pub async fn describe_profile(
+        client: &GatewayClient,
+        name: &str,
+    ) -> Result<ProfileDetail, hermes_rpc::RpcError> {
+        client
+            .request("profiles.describe", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    /// `profiles.configure` — every section is best-effort server-side; the
+    /// result reports what was applied.
+    pub async fn configure_profile(
+        client: &GatewayClient,
+        name: &str,
+        mut patch: Value,
+    ) -> Result<Value, hermes_rpc::RpcError> {
+        if let Value::Object(map) = &mut patch {
+            map.insert("name".into(), Value::String(name.to_string()));
+        }
+        client.request("profiles.configure", patch).await
+    }
+
+    /// `profiles.get_asset` — the stored avatar, when the profile has one.
+    pub async fn profile_asset(
+        client: &GatewayClient,
+        name: &str,
+    ) -> Result<Option<AvatarAsset>, hermes_rpc::RpcError> {
+        let answer: Value = client
+            .request(
+                "profiles.get_asset",
+                serde_json::json!({ "name": name, "asset": "avatar" }),
+            )
+            .await?;
+        if answer.get("found").and_then(Value::as_bool) != Some(true) {
+            return Ok(None);
+        }
+        let Some(data) = answer.get("data").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let mime = answer
+            .get("mime")
+            .and_then(Value::as_str)
+            .unwrap_or("image/png")
+            .to_string();
+        // The gateway hands back a data URL; the caller wants the payload.
+        let payload = data
+            .split_once(";base64,")
+            .map(|(_, payload)| payload)
+            .unwrap_or(data)
+            .to_string();
+        Ok(Some(AvatarAsset {
+            mime,
+            data: payload,
+        }))
+    }
+
+    /// `profiles.set_asset` — store `data_url` as this profile's avatar.
+    pub async fn set_profile_avatar(
+        client: &GatewayClient,
+        name: &str,
+        data_url: &str,
+    ) -> Result<Value, hermes_rpc::RpcError> {
+        client
+            .request(
+                "profiles.set_asset",
+                serde_json::json!({ "name": name, "asset": "avatar", "data": data_url }),
+            )
+            .await
+    }
+
+    /// `profiles.set_asset` with `clear` — removes `assets/avatar.*`.
+    pub async fn clear_profile_avatar(
+        client: &GatewayClient,
+        name: &str,
+    ) -> Result<Value, hermes_rpc::RpcError> {
+        client
+            .request(
+                "profiles.set_asset",
+                serde_json::json!({ "name": name, "asset": "avatar", "clear": true }),
+            )
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +873,65 @@ mod tests {
     fn percent_encode_escapes_query_unsafe_bytes() {
         assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
         assert_eq!(percent_encode("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn env_rows_parse_the_dashboard_shape() {
+        let payload = serde_json::json!({
+            "OPENAI_API_KEY": {
+                "is_set": true,
+                "redacted_value": "sk-…abcd",
+                "description": "OpenAI",
+                "category": "model",
+                "provider_label": "OpenAI",
+                "is_password": true,
+                "custom": false
+            },
+            "MY_TOKEN": { "is_set": true, "custom": true, "is_password": true }
+        });
+        let rows: std::collections::HashMap<String, EnvEntry> =
+            serde_json::from_value(payload).expect("env rows parse");
+        assert!(rows["OPENAI_API_KEY"].is_set);
+        assert_eq!(rows["OPENAI_API_KEY"].provider_label, "OpenAI");
+        assert!(rows["MY_TOKEN"].custom);
+        assert_eq!(rows["MY_TOKEN"].redacted_value, None);
+    }
+
+    #[test]
+    fn profile_detail_parses_connectors_and_toolsets() {
+        let payload = serde_json::json!({
+            "name": "fleet-dev",
+            "description": "builder",
+            "model": { "provider": "deepseek", "default": "deepseek-v4.1-flash" },
+            "skills": [{ "name": "rust", "enabled": true }],
+            "toolsets": [{ "name": "web", "label": "Web", "tool_count": 4, "enabled": false }],
+            "mcp_servers": [{ "name": "github", "enabled": true, "transport": "http" }]
+        });
+        let detail: ProfileDetail = serde_json::from_value(payload).expect("detail parses");
+        assert_eq!(detail.model.default, "deepseek-v4.1-flash");
+        assert_eq!(detail.toolsets[0].tool_count, 4);
+        assert!(!detail.toolsets[0].enabled);
+        assert_eq!(detail.mcp_servers[0].transport.as_deref(), Some("http"));
+    }
+
+    #[test]
+    fn profile_keeps_ui_meta_out_of_extra() {
+        let profile: Profile = serde_json::from_value(serde_json::json!({
+            "name": "coo",
+            "has_avatar": true,
+            "ui_meta": { "icon": "✦", "accent": "#9ed072" }
+        }))
+        .expect("profile parses");
+        assert!(profile.has_avatar);
+        assert_eq!(
+            profile
+                .ui_meta
+                .as_ref()
+                .and_then(|m| m.get("icon"))
+                .and_then(Value::as_str),
+            Some("✦")
+        );
+        assert!(!profile.extra.contains_key("ui_meta"));
     }
 
     #[test]

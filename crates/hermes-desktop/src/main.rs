@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod inspector;
 mod keys;
 mod theme;
 mod transcript;
