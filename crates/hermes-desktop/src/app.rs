@@ -176,7 +176,7 @@ impl HermesApp {
             ));
             app.lines.push(Line::new(
                 Role::Assistant,
-                "All four nodes are Ready. Nexus has one pod restarting; everything else is stable. Forge is at 78% GPU memory and worker-1 at 41%.",
+                "All four nodes are Ready. One pod is restarting; everything else is stable. GPU memory is at 78% and 41%.",
             ));
         }
         // QA hook: open the inspector (optionally on a given tab) at launch so

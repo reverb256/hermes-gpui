@@ -61,9 +61,9 @@ HERMES_URL=https://hermes.example.com HERMES_BASIC=user:pass   ./target/debug/he
 ```
 
 
-### Pointing at the hermes deployment
+### Pointing at a remote deployment
 
-The k3s pod serves the same dashboard and gateway, so no special mode is needed:
+A remote k3s deployment serves the same dashboard and gateway, so no special mode is needed:
 
 ```bash
 HERMES_URL=https://hermes.example.com \

@@ -1295,10 +1295,7 @@ mod tests {
             base_url: "https://hermes.example.com".into(),
             ..HostConfig::local()
         };
-        assert_eq!(
-            remote.ws_url(),
-            "wss://hermes.example.com/api/ws"
-        );
+        assert_eq!(remote.ws_url(), "wss://hermes.example.com/api/ws");
     }
 
     #[test]
@@ -1379,10 +1376,7 @@ mod tests {
             ..HostConfig::local()
         };
         let cfg = host.connection_config();
-        assert_eq!(
-            cfg.url,
-            "wss://hermes.example.com/api/ws?ticket=t-1_2"
-        );
+        assert_eq!(cfg.url, "wss://hermes.example.com/api/ws?ticket=t-1_2");
         assert!(matches!(cfg.auth, Some(Auth::Cookie(_))));
     }
 

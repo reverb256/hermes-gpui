@@ -104,5 +104,5 @@ widget that summons the window. No QML rewrite.
   need a system package decision.
 - Never stage multi-GB database copies in `/tmp`: it is an 8 GiB tmpfs, and a
   6.3 GB recovery dump filled it once. Use `/var/tmp` or
-  `~/hermes-db-repair` (disk-backed). `/etc/tmpfiles.d/tmp.conf` already ages
+  `/var/tmp/hermes-db-repair` (disk-backed). `/etc/tmpfiles.d/tmp.conf` already ages
   `/tmp` out after 3 days and `/var/tmp` after 14.
