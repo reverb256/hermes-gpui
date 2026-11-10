@@ -1,80 +1,209 @@
 # Roadmap
 
-**Last updated:** 2026-11-10. **Status:** planning. This is the single roadmap
-for reaching Grok Bot + Hermes parity. Feature-level status lives in
-[`PARITY.md`](PARITY.md); the reasoning, architecture decisions, risks and
-verification strategy live in [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md).
+**Last updated:** 2026-11-10. **Status:** planning. **Scope:** one person, their
+own hosts and devices.
+
+This is the single roadmap for reaching Grok Bot + Hermes parity *for a single
+user*. Feature-level status lives in [`PARITY.md`](PARITY.md); architecture,
+risks and verification strategy live in
+[`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md).
 
 Status values: **Not started**, **In progress**, **Blocked**, **Done**.
 A phase is only **Done** when its exit demo has been run and recorded.
+
+## What this is not
+
+Explicitly out of scope unless the user reverses the decision:
+
+- Teams, organisations, members, invitations, roles and RBAC.
+- Shared bots, group chat, bot-to-bot collaboration, templates as share links.
+- Team-managed connector credentials, per-team policy, SSO/SCIM, admin console.
+- Metering, plans, entitlements, invoicing and billing.
+- Multi-tenant isolation and fleet capacity management.
+
+Those are withdrawn from the plan, not deferred. The personal equivalents that
+remain are a single owner, paired devices, a personal audit log and self-imposed
+cost caps.
+
+## Two scopes
+
+- **Client parity** (`hermes-gpui` only, sprints S1–S4): every gap the client can
+  close against the current host. Exit: those rows are **Done** or **Blocked** on
+  a named host contract.
+- **Single-user parity** (client + host + personal hub): phases 0–7 below.
+  Exit: the conditions in
+  [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md#10-what-done-means).
+
+Single-user parity is 15–20 engineering-months including integration: roughly
+8–11 months with two engineers, 15–18 with one. Client parity (S1–S4) is 6–8
+weeks and lands first because it is useful without the hub.
 
 ## Where we are
 
 | Layer | State |
 | --- | --- |
-| Client (`hermes-gpui`) | In progress — chat, sessions, profiles, skills, MCP, cron, memory, Kanban with details/comments/attachments, sessions paging, reply copy, board archive/delete |
-| Host agent (`hermes-agent`) | Mature single-user agent; needs multi-tenant seams |
-| Platform (control plane, cloud computers, collaboration, billing) | Not started |
+| Client (`hermes-gpui`) | In progress — chat, sessions, profiles, skills, MCP, cron, memory, Kanban details/comments/attachments, transcript find, Omarchy theme/notifications/bar widget, building PKGBUILD |
+| Host agent (`hermes-agent`) | Mature single-user agent; needs token auth for remote access, pagination, typed events, screen/input, sync, artifacts and voice |
+| Personal hub (`hermes-control`) | Not started — single-owner OCI service for pairing, host registry, sync and push |
+
+## Target shape
+
+```
+GPUI client ──Tailscale/WSS──► hermes-hub (k3s, OCI)
+                                  │  volumes: SQLite, sync, artifacts
+                                  │  node registry + command router
+                                  └──► hermes-node on every connected computer
+                                        forge, nexus, sentry, zephyr, laptops
+                                        └─ local executor: shell/PTY, files,
+                                           screen, browser, GPU, host services
+```
+
+The hub is single-tenant by construction: one owner row, no orgs, roles or
+tenancy columns. It does not reach into machines; every computer runs
+`hermes-node`, which dials **out** to the hub over WSS/mTLS, registers its
+capabilities and executes commands locally under its own policy. This is the
+Grok Bot shape: the installed client is the agent on that computer, and the
+remote model acts on any connected computer through the hub.
+
+The GPUI client can embed the same node runtime, so the machine running the UI
+is also one of the computers Hermes can act on. Tailscale is only the path from
+the UI to the hub, plus an optional direct LAN path for SSH; it is not what
+connects the computers. There is no fleet or provisioner.
+
+## Deployment
+
+Everything server-side ships as OCI images and runs on any OCI runtime:
+
+- `hermes-hub` — pairing, device and host registry, sync, push, audit index.
+- `hermes-computer` — agent host plus an isolated desktop: Xvfb, Chromium/CDP,
+  PTY, files. Headless variants can skip Chromium and Xvfb.
+
+State lives in named volumes: hub SQLite, host data, browser profile, artifact
+directory (or an S3-compatible endpoint). The hub is deployed by a Helm chart in
+Git and synced by ArgoCD; the chart also carries the optional Tailscale
+Connector. `hermes-node` is installed on each computer as a systemd user
+service, an OCI container, or bundled with the GPUI client; all three speak the
+same node protocol. Supported hub targets, in preference order:
+
+1. Helm chart via ArgoCD on the existing k3s cluster (primary).
+2. `docker compose` or `podman-compose` on a single host.
+3. Direct `docker run`/`podman run` for a minimal install.
+
+Remote access uses the **Tailscale Kubernetes operator already running in the
+cluster**. The hub is published with a Tailscale Ingress
+(`hermes.<tailnet>.ts.net`), so paired devices join the tailnet and reach it with
+no inbound port. Tailscale ACLs restrict those devices to the hub and, if
+enabled, the four host IPs. A hub-issued short-lived device token remains a
+second factor; Tailscale identity alone is not enough to call the API.
+
+Node reachability does not depend on a VPN: each `hermes-node` keeps an
+outbound connection to the hub, so NAT, changing addresses and laptops work
+without routes. For direct host access (SSH, per-host agent ports, debugging),
+add one or two Tailscale **Connector** resources advertising the host LAN CIDR
+(`<host-lan-cidr>`), shared by forge, nexus, sentry and zephyr. The CRD exists in
+the cluster but no Connector is deployed yet. Prefer two Connectors on different
+nodes for HA. Do not advertise the pod/service CIDRs unless a concrete client
+need appears.
+
+Pangolin is not part of the default path: it duplicates the existing Tailscale
+overlay with its own Traefik/Badger/Gerbil stack and a browser-oriented auth flow
+that fits an API/WebSocket desktop client poorly. It remains an optional
+public-web front for browser dashboards, not the transport. Plain WireGuard is
+kept as a fallback transport profile for installations without Tailscale;
+neither VPN is required for node connectivity.
+
+Snapshots are volume archives (restic or k8s volume snapshots where available),
+not a custom image format, so restore works on any runtime.
+
+## Node protocol
+
+`hermes-node` is the installed agent on each computer. The protocol is versioned
+and runs over an authenticated WSS/mTLS connection:
+
+- `register` — hostname, OS/arch, node version, labels, trust roots and a
+  capability manifest (shell, PTY, files, screen, browser, GPU, services, secret
+  prompts).
+- `heartbeat` — presence, load and current jobs.
+- `command` — id, idempotency key, timeout, cancellation token, approval token,
+  working root and argv. Secrets never travel in argv.
+- `stream` — stdout/stderr, PTY bytes, screen frames, file chunks and progress.
+- `prompt` — typed request for a secret, password, sudo password or credential,
+  with a one-time challenge, requester context, allowed scope and expiry.
+- `event` — tool, approval, audit and usage events for the hub and personal
+  audit.
+
+Reconnect resumes by sequence number; a command is idempotent by key; an offline
+node rejects rather than queues unless the command is explicitly resumable.
+Local policy can always refuse a command and the hub cannot bypass it. Protocol
+version negotiation happens at registration, so older nodes fail closed.
+
+### Secret and credential prompts
+
+Secret prompts are cards, never terminal echo. The node opens a one-time
+challenge and the client shows a card naming the requester, purpose, scope and
+expiry, with masked input, show/hide, paste, submit and cancel. The value travels
+only in the prompt response over the authenticated channel, is never written to
+the transcript, logs, crash reports, command line or shell history, and is
+zeroized after use. “Remember” is opt-in and uses the OS keyring (Secret
+Service); sudo passwords are fed on stdin, never argv. Closing the card, a
+reconnect or expiry invalidates the challenge.
 
 ## Phase roadmap
 
 | Phase | Scope | Exit demo | Est. (eng-mo) | Status |
 | --- | --- | --- | --- | --- |
-| **0. Tenancy spine** | `hermes-control` skeleton, Postgres schema (accounts, orgs, members, roles, bots, devices), OIDC login, device pairing, sandbox provisioner, per-user tokens | Two users sign in, each gets an isolated sandbox, neither can see the other | 2–3 | Not started |
-| **1. Cloud computer MVP** | Per-user sandbox (Xvfb + Chromium + CDP + files + PTY), screen view-only stream, file browser, terminal, snapshot/resume | Close the client mid-turn, reopen elsewhere, watch the same turn finish | 3–4 | Not started |
-| **2. Takeover, approvals, audit** | Input injection with takeover tokens, policy engine, audit pipeline, team rules | Every action traceable; a blocked action is blocked server-side | 3 | Not started |
-| **3. Collaboration** | Shared bots with scopes, group chat, bot-to-bot handoff, templates, shared-bot analytics | Shared bot answers a teammate on their own computer, attributed in audit | 3–4 | Not started |
-| **4. Connectors and vault** | Connector catalog, OAuth broker, team-managed credentials, per-user email identity, MCP parity | Connect an app, revoke it, prove tokens never reach the sandbox | 3 | Not started |
-| **5. Sync and notifications** | Cross-device sync, push (APNs/FCM + desktop), resumable streams, device registry | Same state on desktop and phone; notification opens the exact turn | 2–3 | Not started |
-| **6. Triggers and routines** | Webhook/email/Slack triggers, ownership, approvals, retries, dead-letter, budgets | Webhook trigger runs exactly once with a budget cap enforced | 2 | Not started |
-| **7. Artifacts** | Artifact store, provenance, previews, sharing, retention | Artifact found, previewed, shared and audited | 1–2 | Not started |
-| **8. Metering and billing** | Usage events, ledger, entitlements, budget caps, invoices | Cap blocks work at the boundary; invoice reconciles with events | 2 | Not started |
-| **9. Enterprise** | SSO/SCIM, network policy, DLP, retention, private deployment, admin console | Admin enables a team, enforces egress, exports audit | 3–4 | Not started |
-| **10. Hardening and GA** | SLOs, load/chaos tests, pen test, DR drill, signed packaging, auto-update | 1000 concurrent streams; sandbox kill recovers; restore drill passes | 3–4 | Not started |
+| **0. Personal spine** | Helm chart + ArgoCD app for `hermes-hub`; node protocol v1 (register, heartbeat, capabilities, command, cancel, resume, prompt); `hermes-node` on all four hosts; pairing, node registry and capability map; Tailscale Ingress and optional Connector; client login/node picker; personal audit skeleton | A paired device reaches the hub over Tailscale with no inbound port; all four node agents are connected and one remote command has run on each; revoking the device cuts access | 2–3 | Not started |
+| **1. Node execution** | Local executors on `hermes-node`: shell/PTY, files, screen (Xvfb or real display), browser/CDP, GPU; optional `hermes-computer` container for an isolated desktop; named volumes; view-only screen stream, terminal, file browser, snapshot/restore, client surfaces | Close the client mid-turn, reopen on another device, watch the same turn finish; restoring the volume brings back the same browser state | 2–3 | Not started |
+| **2. Approvals, secret prompts, takeover, audit** | Secret/password/sudo/credential prompt cards with one-time challenges; input injection with a takeover lease; approval expiry/replay/idempotency; typed tool results; personal audit from tool/approval/shell events | Every action answers what happened and why from the personal audit; a secret card completes without the value appearing in transcript, logs or argv; a blocked action is blocked server-side | 2–2.5 | Not started |
+| **3. Connectors and vault** | Connector catalog, server-side OAuth broker, personal credential vault, rotation/revocation, MCP per-tool schemas and costs | Connect an app, use it, revoke it; the computer never holds the token | 2 | Not started |
+| **4. Sync and notifications** | Revisioned transcripts, drafts and read state, idempotent appends, resumable streams, device registry, desktop/mobile push with action routing | Same state on two devices within seconds; a notification opens the exact turn | 2 | Not started |
+| **5. Triggers and routines** | Cron, webhook and email triggers; retries, dead-letter, run history and self-imposed cost caps | A misconfigured trigger retries without duplicate side effects and stops at its cap | 1.5 | Not started |
+| **6. Artifacts** | Artifact store with hashes and provenance, previews, signed URLs, retention, client browser | Artifact found, previewed, downloaded and attributable without exposing the host filesystem | 1.5 | Not started |
+| **7. Hardening and GA** | Backup/restore drills, 24 h soak, signed client packages, auto-update, crash reporting, accessibility, optional phone companion | Restore drill passes; signed install updates itself; accessibility walkthrough passes | 2 | Not started |
 
-Critical path: **0 → 1 → (2, 3, 4, 6, 7) → 5 → 8 → 9 → 10**.
+**Critical path:** 0 → 1 → (2, 3, 5, 6) → 4 → 7.
 
-## Workstreams (parallel tracks)
-
-Each workstream has a dedicated section in
-[`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md#3-workstreams-that-are-not-a-port).
+## Workstreams
 
 | ID | Workstream | Phase | Status |
 | --- | --- | --- | --- |
-| A | Identity, tenancy, access | 0 | Not started |
-| B | Cloud computer fleet | 1–2 | Not started |
-| C | Collaboration substrate | 3 | Not started |
-| D | Connectors, apps, credentials | 4 | Not started |
-| E | Sync, continuity, notifications | 5 | Not started |
-| F | Scheduling and triggers | 6 | Not started |
-| G | Artifacts and files | 7 | Not started |
-| H | Governance, policy, audit | 2, 9 | Not started |
-| I | Metering and billing | 8 | Not started |
-| J | Reliability and operations | 10 (continuous) | Not started |
-| K | Distribution | 5, 10 | Not started |
+| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | Not started |
+| B | Node agents, capability registry, remote execution and screen/input relay | 0–2 | Not started |
+| C | Connectors, vault and credentials | 3 | Not started |
+| D | Sync, continuity and notifications | 4 | Not started |
+| E | Triggers and routines | 5 | Not started |
+| F | Artifacts and files | 6 | Not started |
+| G | Reliability, backup and restore | 7 (continuous) | Not started |
+| H | Distribution and updates | 4, 7 | Not started |
 
 ## Client track (hermes-gpui)
 
-Maps to [`PARITY.md`](PARITY.md); only the items the client can own.
+Sprint order is the commitment; a row moves only when its exit check passes.
+Anything marked **Blocked** stays out of the UI rather than shipping a stub.
 
-| Item | Depends on phase | Status |
-| --- | --- | --- |
-| Projects/workspaces, worktree picker | none (host routes exist) | Not started |
-| Transcript search, virtualization, selection, retry/fork | none | In progress — find bar over loaded lines; virtualization, selection, retry/fork remain |
-| Multi-session tiles and layout | none | Not started |
-| File browser and uploads | 1 | Not started |
-| Embedded terminal | 1 | Not started |
-| Computer screen view, takeover, per-bot screens | 1–2 | Not started |
-| Artifact browser and previews | 7 | Not started |
-| Voice capture, device pickers, call state | host voice work | Not started |
-| Notifications and approval routing | 5 | Not started |
-| Accessibility, IME and scaling validation | none | Not started |
-| Packaging, auto-update, crash reporting | 10 | Not started |
-| Multi-host selection and credentials | 0 | Not started |
-| Command palette and complete key map | none | Not started |
-| i18n scaffolding | none | Not started |
-| Drag-and-drop and live Kanban updates | none | Not started |
-| Task runs, diagnostics, recovery, dispatch | Kanban plugin routes | Not started |
+| Sprint | Item | Depends on | Status |
+| --- | --- | --- | --- |
+| S1 | `--version` / `--help` CLI | none | Not started |
+| S1 | Command palette coverage and complete key map | none | Not started |
+| S1 | Markdown link activation with scheme allowlist | none | Not started |
+| S1 | Correct stale parity/roadmap claims | none | In progress (this update) |
+| S2 | Transcript find | none | Done — `Ctrl+F`, highlighting, match cycling |
+| S2 | Older-turn pagination, virtualization, text selection | host pagination; none for virtualization | In progress — search done; pagination, virtualization and selection remain |
+| S2 | Edit/retry/fork, replies, reactions, drafts | host persistence and gateway lifecycle | Blocked |
+| S3 | Projects/workspaces and worktree picker | host routes exist; needs contract audit | Not started |
+| S3 | Multi-session tiles and layout | none | Not started |
+| S4 | Kanban plugin contract audit (board fields, events, runs) | disposable host + plugin source | Not started — next client action |
+| S4 | Board metadata, drag/drop, live updates | verified plugin schema and events | Blocked until S4 audit |
+| S4 | Task dispatch, runs, diagnostics, recovery | verified routes plus cost/approval disclosure | Blocked |
+| S5 | Node/host picker with live capabilities and presence | Phase 0 | Not started |
+| S5 | File browser, embedded terminal, screen view/takeover | Phase 1–2 | Not started |
+| S5 | Secret/password/sudo/credential prompt cards | Phase 2 node prompt API | Not started |
+| S6 | Artifact browser and previews | Phase 6 | Not started |
+| S6 | Voice capture, device pickers, call state | host voice work | Not started |
+| S6 | Notification action routing and per-bot preferences | Phase 4 | Not started |
+| S7 | Accessibility, IME and scaling validation | none | Not started |
+| S7 | Packaging auto-update, crash reporting, uninstall | Phase 7 | Partial — PKGBUILD builds and installs the binary, desktop entry and widget |
+| Later | i18n scaffolding | none | Optional |
 
 ### Omarchy desktop track
 
@@ -86,41 +215,85 @@ Details and commands in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 | Single instance, `--toggle`, tray show/quit | Implemented |
 | `omarchy-notification-send` on turn completion and approvals, click-to-focus, `--replace-id` collapsing, reminder action | Implemented (approval cards notify with Open + Remind; no in-notification Approve) |
 | `omarchy-shell` bar widget reading `status --json` (state, approvals, tooltip) | Implemented in `packaging/omarchy-shell-hermes`; joining `omarchy.agents` not attempted |
-| `omarchy-launch-or-focus` binding, `.desktop` entry and PKGBUILD | Implemented: entry + PKGBUILD ship in `packaging/`; binding documented, not yet run on a live bar |
+| `omarchy-launch-or-focus` binding, `.desktop` entry and PKGBUILD | Implemented: entry + PKGBUILD ship in `packaging/`; package build verified, live bar binding not yet run |
 | Screenshot attachment via `omarchy capture`; OCR prompt via `omarchy capture text` | Implemented as composer actions “▣ Shot” and “T Text” |
 | Superwhisper-aware composer affordance | Not started (dictation itself is Superwhisper's) |
 | `--diagnostics`, `status --json`, `--install-omarchy-hooks` | Implemented |
 
 ## Host-agent extensions (`hermes-agent`)
 
-Sequenced so the client and platform can consume them:
+Ordered by what it unblocks. Dependencies in parentheses.
 
-1. AuthN/AuthZ middleware (control-plane JWTs, per-route scoping) — Phase 0.
-2. Tenant-scoped storage and quotas — Phase 0.
-3. Event bus publication (tools, approvals, routines, usage) — Phase 2.
-4. Screen streaming and input injection endpoints — Phase 1–2.
-5. Artifact APIs — Phase 7.
-6. Sync APIs (revisions, idempotent appends) — Phase 5.
-7. Approval hardening (expiry, replay, concurrency) — Phase 2.
-8. Typed tool results — Phase 2.
-9. Streaming voice (duplex, interruption, devices) — post-Phase 5.
-10. Pagination everywhere — continuous.
+0. **Contract snapshot** — generate and commit the host's OpenAPI/JSON-RPC route
+   and event inventory; every later change diffs against it (none, week 1).
+1. Token auth for remote access, with scoped device tokens (Phase 0).
+2. Cursor pagination for sessions, messages, runs and audit (Phase 0,
+   continuous).
+3. Typed tool results and event publication for tools, approvals, routines and
+   usage (Phase 2).
+4. Approval hardening: expiry, replay protection, concurrency, reconnect replay
+   (Phase 2).
+5. Secret prompt API: one-time challenge, requester scope, expiry and a
+   response channel that never logs (Phase 2).
+6. Screen streaming and input injection endpoints with takeover leases
+   (Phase 1–2).
+7. Sync APIs: revisions, idempotent appends, resumable sequences (Phase 4).
+8. Artifact APIs with provenance and signed fetch (Phase 6).
+9. Streaming voice: duplex, interruption, device selection (when voice work
+   starts).
+
+## Execution gates
+
+1. **Contract before UI**: every new control maps to a committed route, field or
+   event, covered by a fake-server test and a live disposable-host test.
+2. **Access control**: only paired, scoped devices reach the hub or host; a
+   revoked device or node fails immediately; Tailscale guards the UI path and the
+   hub enforces its own device token; no inbound port.
+3. **Secrets**: redaction tests across transcripts, logs, crash reports,
+   command lines and shell history. A prompt value is one-time, scoped, masked,
+   expires with its challenge and is never fed through argv; the personal computer
+   never receives brokered connector tokens.
+4. **Resilience**: kill mid-turn, restart, snapshot/restore, quota and
+   egress-denial tests.
+5. **Cost**: usage is visible and self-imposed caps block at the boundary.
+6. **GitOps only**: every cluster change lands as a Helm chart value or template
+   in git and syncs through ArgoCD; no kubectl-only mutations. `helm lint`,
+   `helm template` and a kubeconform pass run in CI.
+7. **Reproducible images**: hub and computer images build from pinned
+   Dockerfiles/Containerfiles, are tagged by version and digest, and run under
+   k3s, Docker and Podman before a deployment is called done.
+8. **Evidence in the same commit**: a row changes status only with its test,
+   live run or drill linked from the commit.
+9. **Client accessibility**: keyboard-only and screen-reader walkthrough on
+   Wayland and X11; visual QA on an isolated display, never the active desktop.
+
+## Open decisions
+
+These change the plan and need an ADR before the affected phase starts:
+
+| Decision | Affects | Default if unresolved |
+| --- | --- | --- |
+| First runtime for the OCI images: k3s, Docker or Podman | 0–1 | k3s on the existing cluster, with compose as the portable fallback |
+| Which machine runs `hermes-computer`: `nexus`, `zephyr` or `forge` | 1 | `nexus`, where the agent data already lives |
+| Node transport: outbound WSS/mTLS through the hub, or direct Tailscale path | 0 | Outbound to the hub; Tailscale only for the UI and optional direct SSH |
+| Node runtime: systemd user service, OCI container, or bundled in the GPUI client | 0 | Ship all three against the same protocol |
+| Secret “remember”: OS keyring or hub vault | 2 | OS keyring (Secret Service); the hub vault is for connector tokens only |
+| Sync devices: desktop only, or desktop + phone companion | 4, 7 | Desktop first, phone later |
+| Auth: device pairing tokens or an OIDC login | 0 | Pairing tokens |
+| Platforms at GA: Linux/Omarchy only, or macOS/Windows too | 7 | Linux/Omarchy only |
 
 ## Milestones
 
 | Milestone | Definition | Phase |
 | --- | --- | --- |
-| M0 “Two users” | Isolated accounts, sandboxes, no cross-tenant reads | 0 |
-| M1 “Keeps working” | Turn survives client exit; screen view resumes | 1 |
-| M2 “Accountable” | Audit answers who/what/why for any action | 2 |
-| M3 “Teammates” | Shared bot works for a teammate, attributed | 3 |
-| M4 “Connected” | Brokered app OAuth, revocable, never in sandbox | 4 |
-| M5 “Everywhere” | Same state on two devices; push opens the turn | 5 |
-| M6 “Hands off” | Event trigger runs with budget and retry safety | 6 |
-| M7 “Deliverables” | Artifact lifecycle with provenance | 7 |
-| M8 “Metered” | Budget cap and reconciling invoice | 8 |
-| M9 “Governed” | Admin policy, SSO, network policy, audit export | 9 |
-| M10 “GA” | SLOs met, pen test closed, restore drill passed | 10 |
+| M0 “Private remote” | A paired device reaches the hub over Tailscale without an inbound port; all four node agents are connected and one action has run on each | 0 |
+| M1 “Keeps working” | A turn survives client exit; screen, terminal and files resume | 1 |
+| M2 “Accountable” | Every tool call and approval is answerable from the personal audit; a secret prompt completes without leaking its value | 2 |
+| M3 “Connected” | Connector tokens are brokered, revocable and never in the computer | 3 |
+| M4 “Everywhere” | Same state on two devices; a notification opens the exact turn | 4 |
+| M5 “Hands off” | A trigger runs with retry safety and a cost cap | 5 |
+| M6 “Deliverables” | An artifact is found, previewed, downloaded and traced | 6 |
+| M7 “GA” | Restore drill passes, signed install updates itself, accessibility passes | 7 |
 
 ## How this roadmap is maintained
 
@@ -130,6 +303,9 @@ Sequenced so the client and platform can consume them:
 - Scope changes go in [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) and
   are reflected here in the same commit.
 - Per-feature client status lives in [`PARITY.md`](PARITY.md); this roadmap
-  tracks phases and only the client work that blocks one.
+  tracks phases, the client sprint order and only the client work that blocks a
+  phase.
+- Team, organisation, sharing, SSO/SCIM, metering and billing work is out of
+  scope. Reintroducing any of it requires a roadmap change first.
 - No parity claim is made in `README.md` until `PARITY.md` and this roadmap
   agree.

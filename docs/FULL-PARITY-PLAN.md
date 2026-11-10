@@ -4,6 +4,14 @@
 status list; this file is the build plan behind it. Nothing here is implemented
 merely because it is written down.
 
+**Scope decision (2026-11-10): single user.** This document was first written
+for a multi-tenant Grok Bot analogue. Teams, organisations, roles, invitations,
+shared bots, group chat, connector sharing, SSO/SCIM, enterprise policy,
+metering and billing are withdrawn. The personal phases in
+[`../ROADMAP.md`](../ROADMAP.md) supersede the phase table in §7; workstreams A
+(tenancy), C (collaboration), I (metering) and the enterprise parts of H are
+kept below only as analysis of what is deliberately not being built.
+
 ## 1. The honest shape of the problem
 
 There are three layers, and only the first one is "porting Hermes":
@@ -294,10 +302,10 @@ Build:
 
 These are extensions, not a rewrite:
 
-1. **AuthN/AuthZ middleware** — accept control-plane JWTs, scope every route by
-   account/bot, remove reliance on a single dashboard token for API access.
-2. **Tenant-scoped storage** — per-account paths, no shared SQLite between
-   accounts, explicit quota enforcement.
+1. **Token auth middleware** — accept short-lived hub-issued, per-device tokens
+   for remote access instead of the single dashboard token.
+2. **Single-user storage hardening** — one owner, one data root, documented
+   backup/restore and no account or tenancy columns.
 3. **Event bus** — publish tool/approval/routine/usage events to the control
    plane (NATS or Redis Streams) instead of only local logs.
 4. **Screen streaming endpoints** — screencast subscribe, input injection with
@@ -309,19 +317,24 @@ These are extensions, not a rewrite:
    requests, reconnection replay, choice validation.
 8. **Typed tool results** — structured payloads (not just text) so cards can
    render diffs, files, images and errors.
-9. **Streaming voice** — STT/TTS duplex with interruption and device selection.
-10. **Pagination everywhere** — sessions, messages, runs, audit export.
+9. **Secret prompt API** — one-time challenge, requester context, scope and
+   expiry for password, sudo and credential cards; values never logged, echoed
+   or passed through argv.
+10. **Streaming voice** — STT/TTS duplex with interruption and device selection.
+11. **Pagination everywhere** — sessions, messages, runs, audit export.
 
 ## 5. Client work remaining (hermes-gpui)
 
-Sequenced against the phases below; this is `PARITY.md` filtered to what the
-client can own:
+The sprint order, dependencies and current status live in the client track of
+[`../ROADMAP.md`](../ROADMAP.md#client-track-hermes-gpui); this section is the
+capability list behind it.
 
 - Projects/workspaces: first-class project model, worktree picker, multi-session
   tiles.
 - Transcript: search, virtualization for large histories, selection, edit/retry,
   fork, link activation with scheme allowlist.
-- Files and artifacts: browser, previews, downloads, uploads to the sandbox.
+- Files and artifacts: browser, previews, downloads, uploads to the personal
+  computer container.
 - Terminal: PTY transport, resize, multiple sessions, scrollback.
 - Computer: screen view, takeover request, input, per-bot screens.
 - Voice: capture, device pickers, call state, transcripts.
@@ -340,71 +353,69 @@ billing choices in [ADR-0006](adr/0006-control-plane-stack.md).
 
 ## 7. Phased roadmap
 
-Effort is engineering-months for one focused engineer; parallelisable across
-workstreams once Phase 0 lands.
-
-| Phase | Scope | Exit demo | Est. |
-| --- | --- | --- | --- |
-| **0. Tenancy spine** | `hermes-control` skeleton, Postgres schema, OIDC login, sandbox provisioner, per-user token, client host/login UI | Two users log in, each gets an isolated sandbox, neither can see the other | 2–3 |
-| **1. Cloud computer MVP** | Per-user sandbox, screen view-only stream, file browser, terminal, snapshot/resume | Close client mid-turn; reopen elsewhere; watch the same turn finish | 3–4 |
-| **2. Takeover, approvals, audit** | Input injection with takeover tokens, policy engine, audit pipeline, team rules | Every action traceable; a blocked action is blocked server-side | 3 |
-| **3. Collaboration** | Sharing, group chat, bot-to-bot handoff, templates | Shared bot answers a teammate on their own computer, attributed | 3–4 |
-| **4. Connectors and vault** | Catalog, OAuth broker, team credentials, email identity, MCP parity | Connect an app, revoke it, prove tokens never reach the sandbox | 3 |
-| **5. Sync and notifications** | Cross-device sync, push, resumable streams | Same state on desktop and phone; notification opens the turn | 2–3 |
-| **6. Triggers and routines** | Event triggers, retries, approvals, budgets | Webhook/email trigger runs exactly once with a budget cap | 2 |
-| **7. Artifacts** | Store, previews, sharing, provenance | Artifact found, previewed, shared, audited | 1–2 |
-| **8. Metering and billing** | Usage events, ledger, entitlements, invoices | Cap blocks work; invoice reconciles with events | 2 |
-| **9. Enterprise** | SSO/SCIM, network policy, DLP, retention, private deploy | Admin enables a team, enforces egress, exports audit | 3–4 |
-| **10. Hardening/GA** | SLOs, load/chaos, pen test, DR drill, packaging/updates | 1000 concurrent streams; sandbox kill recovers; restore drill passes | 3–4 |
-
-Critical path: **A → B → (C, D, F, G) → E → H → I → enterprise → GA**, with the
-client's terminal/screen/artifact/voice surfaces tracking Phases 1, 3, 5, 7.
+The single-user phase plan, OCI deployment shape, estimates and exit demos live
+in [`../ROADMAP.md`](../ROADMAP.md#phase-roadmap). In short: 0 personal spine,
+1 personal computer container, 2 approvals/takeover/audit, 3 connectors/vault,
+4 sync and notifications, 5 triggers, 6 artifacts, 7 hardening/GA. Critical
+path: **0 → 1 → (2, 3, 5, 6) → 4 → 7**. The earlier multi-tenant phase table is
+withdrawn together with collaboration, metering and enterprise.
 
 ## 8. Verification strategy (per capability, not per release)
 
 - **Contracts**: every new route lands with a client-side contract test against
   a fake server (already the pattern in `crates/hermes-api`) and a live test
   against a disposable host (`HERMES_GPUI_LIVE_HOST`), as done for Kanban.
-- **Isolation matrix**: automated tests asserting 403/404 across tenants for
-  every route class: sessions, files, artifacts, bots, routines, audit, usage.
-- **Policy tests**: table-driven allow/deny cases for roles × actions.
-- **Sandbox tests**: kill mid-turn, restart, snapshot/restore, quota, egress
-  denial, takeover arbitration.
-- **Billing tests**: ledger replay from events must reproduce invoices.
+- **Access control**: the hub is reachable only through Tailscale ingress;
+  `hermes-node` dials out to the hub. Only paired devices with scoped hub tokens
+  reach the hub or a node; revoked devices and nodes fail immediately; no inbound
+  port is published.
+- **Container tests**: kill mid-turn, restart, volume snapshot/restore, egress
+  denial and takeover arbitration against the OCI image.
+- **Cost tests**: usage events reconcile with the displayed total; a cap blocks
+  the next turn. No invoices.
 - **Client**: accessibility pass with a screen reader, keyboard-only walkthrough,
   IME checks on Wayland/X11, contrast/scale checks, visual review on an isolated
   display.
 - **Security**: threat model per phase, secret-leak tests (transcripts, logs,
-  crash reports), pen test before GA.
+  crash reports, argv and shell history), secret-prompt challenge expiry and
+  replay tests, pen test before GA.
 
 ## 9. Risk register
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Shared computer leaks context between bots | High | Document it as a boundary (Grok does), per-bot screens, explicit warnings, optional per-bot sandbox tier |
-| Secrets exposed to the sandbox | High | Broker tokens server-side; never inject into env; redaction tests |
-| Sandbox cost and idle waste | Medium | Idle suspend, quotas, capacity forecasting, per-account budgets |
-| Screen streaming latency | Medium | CDP screencast first, WebRTC where needed, region-local relays |
-| Multi-tenant data leakage | Critical | Storage-layer scoping, isolation matrix in CI, pen test |
-| Model/provider terms and rate limits | Medium | Provider abstraction already exists; per-account keys; fallback routing |
-| Scope creep into a full SaaS build | High | Phase gates with exit demos; no phase starts before its dependency exits |
+| Shared browser profile leaks context between bots | High | Per-bot browser contexts or profiles, explicit warnings, reset action |
+| Secrets exposed to the personal computer | High | Broker tokens server-side; never inject into env; redaction tests |
+| Container or volume loss destroys state | Critical | Volume backups, restic-style archives, a restore drill before GA |
+| Screen streaming latency | Medium | CDP screencast first; WebRTC only if measurements demand it |
+| Remote exposure of the hub | High | Tailscale ingress with ACLs, outbound-only node connections, scoped device tokens, revocation test |
+| Model/provider terms and rate limits | Medium | Provider abstraction already exists; per-provider keys; fallback routing |
+| Scope creep into a team product | High | Single-user scope in ROADMAP; reintroducing teams requires a roadmap change |
 
 ## 10. What "done" means
 
-Full parity is done when all of the following are true and demonstrated:
+Single-user parity is done when all of the following are true and demonstrated:
 
-1. A new account signs in, gets a private cloud computer, and works with a bot
-   from desktop and phone with nothing lost across devices.
-2. Work continues with the client closed; the user can watch and take over any
-   bot's screen.
-3. A bot shared with a teammate works in their chat without exposing the owner's
-   private data, with usage attributed and auditable.
-4. Every tool call, approval and admin change is answerable from audit.
-5. A team admin can enforce connector, network and local-execution policy.
-6. Usage is metered, capped and invoiced from the same events that drove the
-   work.
-7. The desktop client covers the functions in `PARITY.md` marked client-side,
-   with accessibility and packaging verified on the platforms claimed.
+1. The owner pairs a device, reaches the hub through Tailscale with no inbound
+   port, and can revoke that device immediately; every computer runs
+   `hermes-node` and acts only on commands it accepts locally.
+2. Work continues with the client closed; screen, terminal and files resume on
+   another device, and a snapshot restores the same session.
+3. Every tool call and approval is answerable from the personal audit, and a
+   blocked action is blocked server-side.
+4. A secret, password, sudo or credential card completes without the value
+   appearing in the transcript, logs, argv or shell history, and an expired or
+   replayed challenge is rejected.
+5. Connector tokens are brokered and revocable; the personal computer never
+   holds them.
+6. Usage is visible and a self-imposed cap blocks work at the boundary. There is
+   no invoicing.
+7. A misconfigured trigger retries without duplicate side effects.
+8. An artifact is found, previewed, downloaded and traced to its run.
+9. The desktop client covers the functions in `PARITY.md` marked client-side,
+   with accessibility verified on Wayland and X11 and a signed package that
+   updates itself.
+10. A backup/restore drill passes from an empty machine.
 
 Until those hold, `PARITY.md` stays the source of truth and no parity claim is
 made.

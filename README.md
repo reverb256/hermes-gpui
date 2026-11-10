@@ -21,7 +21,7 @@ timeouts, `gateway.ping` keepalive with a 45 s liveness deadline,
 
 - [`ROADMAP.md`](ROADMAP.md) — phases, workstreams, milestones and status.
 - [`PARITY.md`](PARITY.md) — per-feature status against Hermes Desktop and Grok Bot.
-- [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) — the platform build plan (tenancy, cloud computers, collaboration, connectors, governance, billing).
+- [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) — the single-user build plan (personal hub, node agents, connectors, sync, artifacts).
 - [`docs/README.md`](docs/README.md) — full documentation index.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/FEATURES.md`](docs/FEATURES.md) — how it is built and what each surface does.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — build/test and run/operate.

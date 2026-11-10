@@ -12,6 +12,11 @@ collaboration, connectors, sync, governance, metering and distribution. Phases
 and status are tracked in [`ROADMAP.md`](ROADMAP.md); Omarchy integration
 conventions are in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 
+**Scope decision (2026-11-10): single user.** Team, organisation, sharing,
+SSO/SCIM, enterprise policy and billing rows are out of scope and kept here only
+to document what is deliberately not being built. The single-user plan is in
+[`ROADMAP.md`](ROADMAP.md).
+
 Legend: **Implemented** = client code exists; **Partial** = only the stated
 subset exists; **Missing** = no equivalent client feature identified;
 **Unknown** = behavior or host support needs investigation. Unless stated
@@ -28,7 +33,7 @@ product work beyond this GPUI repository.
 | Submit, interrupt and start a conversation | Implemented; verify active-turn resume and interruption against host. |
 | Send another instruction while a turn is active | Missing; verify host steer/queue semantics and surface them safely. |
 | Approval and clarification cards | Partial; audit every gateway request type, choices, expiration, multiple concurrent requests and reconnect replay. |
-| Secret, password and sudo prompts | Unknown; audit gateway prompt types and safe masking. |
+| Secret, password and sudo prompts | Planned Phase 2: typed node prompt with a one-time challenge, masked card naming requester/scope/expiry, stdin delivery for sudo, no transcript/log/argv leaks, opt-in OS keyring memory. |
 | Markdown, code blocks, syntax highlighting, copy | Partial: CommonMark blocks and inline bold, italic, code and link styling; link activation, syntax highlighting and copy remain. |
 | Links and safe external navigation | Partial; audit schemes, confirmation and remote content handling. |
 | Image, file and other attachments | Partial: file picker/upload; audit multi-file, paste, previews, size limits and failures. |
@@ -67,11 +72,11 @@ product work beyond this GPUI repository.
 | Bot pinning, sections, hiding and search | Partial: roster search; pinning, sections and hiding missing. |
 | Per-bot instructions, model, memory, skills and routines | Partial; audit profile-scoped editing and isolation end to end. |
 | Bot-to-bot messaging and delegation | Unknown; requires host capability, routing, transcript and permission model. |
-| Group chat, members, mentions and hand-offs | Missing; backend protocol and shared ownership required. |
-| Shared bots, collaboration roles and access management | Missing; requires backend identity, authorization, discovery and audit. |
-| Bot templates and share links | Missing; define what configuration is exported and protect secrets. |
-| Bot analytics and shared-bot usage | Missing; backend metrics and privacy controls required. |
-| Background work when client closes | Backend-dependent; validate daemon lifecycle, progress and notifications. |
+| Group chat, members, mentions and hand-offs | Out of scope (single-user). |
+| Shared bots, collaboration roles and access management | Out of scope (single-user). |
+| Bot templates and share links | Out of scope as sharing; local config templates remain possible. |
+| Bot analytics and shared-bot usage | Out of scope (single-user); local usage reporting remains. |
+| Background work when client closes | Planned: `hermes-node` keeps running under systemd/OCI, reconnects to the hub and resumes streams by sequence; validate daemon lifecycle and notifications. |
 
 ## Skills, tools, MCP and connectors
 
@@ -81,13 +86,13 @@ product work beyond this GPUI repository.
 | Skill hub discovery, preview, scan and install | Implemented; verify host contract, trust and failure paths. |
 | Skill authoring, editing, removal and version management | Missing; inspect host capability and secure file access. |
 | Teach a task by demonstration | Missing; requires secure computer capture, draft/review and host workflow. |
-| Private/team skill sharing and permissions | Missing; requires identity and backend support. |
+| Private/team skill sharing and permissions | Out of scope (single-user); local export remains. |
 | MCP configured servers, enable, test, add, edit, delete | Partial; audit profile scope and concurrent configuration edits. |
 | MCP catalog discovery and installation | Implemented; verify background install outcomes and credentials. |
 | MCP OAuth browser hand-off | Implemented against start/status/cancel routes; live OAuth, cancellation, URL launch failures and non-default profile behavior need verification. |
 | MCP per-tool selection, schemas and costs | Missing; inspect host contract and authorization. |
 | Application connector catalog, OAuth, disconnect and health | Partial: MCP and provider account surfaces only; Grok-style app connectors not generally implemented. |
-| Connector account selection, credential ownership and sharing | Missing; backend identity/secret isolation required. |
+| Connector account selection, credential ownership and sharing | Partial: personal credential selection remains; sharing and team ownership are out of scope. |
 | Toolsets and detailed computer-use configuration | Partial: inspector toggles; full settings and permissions missing. |
 | General plugin install, enable, disable and contributed views | Missing; Hermes Desktop plugin SDK and lifecycle need separate compatibility design. |
 
@@ -98,7 +103,7 @@ product work beyond this GPUI repository.
 | List cron jobs, create, pause/resume, run, delete, history | Implemented; verify actual host responses, timezone and all error paths. |
 | Cron editing, richer schedules, timezone and delivery | Partial; validate supported fields and full edit lifecycle. |
 | Event-triggered routines and webhook triggers | Missing; requires host event integration and access controls. |
-| Routine ownership, shared access and approvals | Missing; backend permissions and audit needed. |
+| Routine ownership, shared access and approvals | Out of scope (single-user); personal trigger approvals remain. |
 | Kanban current board and basic status transitions | Partial: `/api/plugins/kanban/board` and task PATCH; optional plugin required; transitions are host-validated. |
 | Kanban create/edit/delete tasks, comments and attachments | Partial: title-only triage creation, title/description/assignee/priority editing, confirmed deletion, comments and attachments (upload/save/remove); priority, model overrides and other task fields remain. |
 | Board selection, creation, settings, archive and deletion | Partial: local selection, creation, display-name editing, confirmed archive and confirmed hard delete; description/icon/colour and workdir settings remain. |
@@ -115,13 +120,13 @@ product work beyond this GPUI repository.
 | Artifact browser, search and provenance | Missing; inspect host artifact APIs and storage semantics. |
 | Image/audio/video/document/code previews and downloads | Partial: host-local image preview and JSON export only. |
 | Canvas/interactive artifact rendering and share links | Missing; isolate untrusted content and define host support. |
-| Remote file browser, upload, download and workspace operations | Missing; audit host filesystem APIs, authorization, traversal and allowed roots. |
-| Embedded terminal, output, resize and multiple terminals | Missing; needs safe PTY transport and session management. |
+| Remote file browser, upload, download and workspace operations | Planned Phase 1 through `hermes-node` with explicit roots, traversal checks and per-node policy. |
+| Embedded terminal, output, resize and multiple terminals | Planned Phase 1 through `hermes-node` PTY executors; needs resize and session management. |
 | Embedded browser and live computer screen | Missing; needs host-supported display/session transport and isolation. |
 | Watch/take over computer use and demonstrate workflows | Missing; needs remote control arbitration, permissions and audit. |
-| Persistent shared computer, browser sessions and files | Backend/infrastructure work; Hermes GPUI is a client and does not provision a Grok-like cloud computer. |
-| User isolation, bot screens, execution approvals and reset | Backend/infrastructure/security work; no parity claim without threat modeling. |
-| Connected-device local execution | Missing; explicit per-device approval and audit required. |
+| Persistent personal computer, browser sessions and files | Planned as Phase 1: one OCI `hermes-computer` container with saved volumes; a Grok-style per-user fleet is out of scope. |
+| User isolation, bot screens, execution approvals and reset | Partial: personal approval/takeover work is Phase 2 with per-bot browser contexts; multi-user isolation is out of scope. |
+| Connected-device local execution | Planned Phase 0–1: `hermes-node` on each computer, explicit pairing, local policy and per-node audit. |
 
 ## Voice and sound
 
@@ -145,9 +150,9 @@ product work beyond this GPUI repository.
 | Secrets vault and profile-specific secret edits | Partial; audit redaction, confirmation, permissions and no secret logging. |
 | Memory provider selection, config and confirmed reset | Partial; memory browsing/editing, review, per-profile scope and retention need audit. |
 | Human approval settings, auto-review, scoped execution policies | Missing; requires host-side enforcement, not UI-only controls. |
-| Identity, multi-user RBAC, team sharing and audit logs | Missing; backend/product architecture required. |
-| Auth sessions, logout, tokens, cookie refresh and TLS | Partial; login exists; audit credential lifecycle, rotation and failure states. |
-| Account usage, billing and cost reporting | Partial: existing analytics and billing links; feature and provider coverage unverified. |
+| Identity, multi-user RBAC, team sharing and audit logs | Out of scope (multi-user); the personal audit log remains Phase 2. |
+| Auth sessions, logout, tokens, cookie refresh and TLS | Partial: existing host login remains; device pairing, short-lived tokens, revocation and Tailscale-terminated ingress TLS are Phase 0. |
+| Account usage, billing and cost reporting | Partial: host cost analytics remain; billing, plans and invoicing are out of scope (single-user). |
 
 ## Desktop, Omarchy and operations
 
@@ -156,15 +161,15 @@ product work beyond this GPUI repository.
 | Native GPUI application, no Electron | Implemented; Linux execution checked in isolated Xvfb. |
 | Omarchy theme following | Implemented; validate light/dark/custom palettes, contrast and live updates. |
 | Singleton, `--toggle`, tray show/quit | Implemented; validate Wayland/X11 minimize, visibility, stale socket and race handling. |
-| Dedicated Omarchy bar widget and status | Missing; tray action and example keybind are not a bar widget. |
-| Launch at login, package/install/update/uninstall | Missing or unknown; audit packaging and lifecycle for target platforms. |
-| Desktop notifications, sound, focus and privacy | Missing; include action routing, per-bot preferences and disabled states. |
-| Multi-host selection, SSH/remotes and credentials | Missing; host currently configured at startup. |
+| Dedicated Omarchy bar widget and status | Implemented in `packaging/omarchy-shell-hermes` reading `status --json`; live bar insertion, click behavior and multi-monitor layout remain unverified. |
+| Launch at login, package/install/update/uninstall | Partial: PKGBUILD builds and installs the binary, `.desktop` entry and bar widget; signed packages, auto-update, uninstall and launch-at-login remain. |
+| Desktop notifications, sound, focus and privacy | Partial: Omarchy notifications on turn completion and approvals, click-to-focus, `--replace-id` collapsing and a reminder action; sound, in-notification approve, per-bot preferences and disabled states remain. |
+| Multi-host selection, SSH/remotes and credentials | Partial: node registry, Tailscale ingress and paired device tokens are Phase 0; multi-host picker and SSH credentials remain. |
 | Appearance, font scaling, shortcuts and user preferences | Partial: theme sync only; settings persistence and key rebinding missing. |
 | Resizing and small-screen layout | Unknown; inspect responsive behavior and settings sheet overflow. |
 | Cross-platform builds and accessibility APIs | Unknown; no macOS/Windows parity claim from Linux testing. |
 | Offline errors and reconnect behavior | Partial: disconnected actions fail visibly rather than being replayed; REST is not independently usable while gateway is offline. |
-| CI, tests, versioning and licensing | Partial: fmt/clippy/tests exist; add contract, integration, security and release checks as features mature. |
+| CI, tests, versioning and licensing | Partial: fmt/clippy/tests and a release workflow exist, but the binary has no `--version`/`--help`; add contract, integration, security and release checks as features mature. |
 
 ## Sources and validation gaps
 
