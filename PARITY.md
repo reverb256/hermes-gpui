@@ -36,7 +36,7 @@ product work beyond this GPUI repository.
 | Reply to a specific message and reactions | Missing; requires a compatible persistence and gateway contract. |
 | Editable drafts and review before external send | Missing; needs host-supported draft/approval lifecycle. |
 | Message copy, selection, editing, retry and fork | Partial: copy a reply to the clipboard; selection, editing, retry and fork remain. |
-| Search within transcripts, navigation and large histories | Missing; measure virtualization and loading on real large sessions. |
+| Search within transcripts, navigation and large histories | Partial: `Ctrl+F` searches the loaded lines, highlights hits and cycles matches; virtualization, server-wide search and loading of older turns remain. |
 | Composer text selection, cursor navigation, undo/redo, IME | Partial: GPUI editable-text primitive, labeled text input and native selection/IME handling; end-to-end keyboard, assistive technology and platform validation remain. |
 | Keyboard shortcuts and command palette | Partial; audit actual behavior and reachability against both products. |
 | Mentions | Partial: profile mention UI; groups, routines, apps and completion semantics missing. |

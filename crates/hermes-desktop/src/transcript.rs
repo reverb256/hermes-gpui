@@ -204,6 +204,22 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
     blocks
 }
 
+/// Line indices whose text contains `needle`, in reading order. Matching is
+/// case-insensitive; an empty or whitespace-only needle has no matches, so the
+/// find bar never reports the whole transcript as a hit.
+pub fn find_lines(lines: &[Line], needle: &str) -> Vec<usize> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.text.to_lowercase().contains(&needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// Append streamed text to the trailing line of the same role, or start a new
 /// one when the speaker changed. Deltas from the gateway arrive per token, so
 /// this runs once per frame.
@@ -299,6 +315,20 @@ mod tests {
                 .iter()
                 .any(|span| span.link && &text.text[span.range.clone()] == "link")
         );
+    }
+
+    #[test]
+    fn find_lines_is_case_insensitive_and_ignores_blank_needles() {
+        let lines = vec![
+            Line::new(Role::User, "Show me the Cluster health."),
+            Line::new(Role::Assistant, "All four nodes are Ready."),
+            Line::new(Role::System, "shell: cluster ok"),
+        ];
+        assert_eq!(find_lines(&lines, "cluster"), vec![0, 2]);
+        assert_eq!(find_lines(&lines, "  READY "), vec![1]);
+        assert_eq!(find_lines(&lines, ""), Vec::<usize>::new());
+        assert_eq!(find_lines(&lines, "   "), Vec::<usize>::new());
+        assert_eq!(find_lines(&lines, "absent"), Vec::<usize>::new());
     }
 
     #[test]

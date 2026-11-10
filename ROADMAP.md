@@ -60,7 +60,7 @@ Maps to [`PARITY.md`](PARITY.md); only the items the client can own.
 | Item | Depends on phase | Status |
 | --- | --- | --- |
 | Projects/workspaces, worktree picker | none (host routes exist) | Not started |
-| Transcript search, virtualization, selection, retry/fork | none | Not started |
+| Transcript search, virtualization, selection, retry/fork | none | In progress — find bar over loaded lines; virtualization, selection, retry/fork remain |
 | Multi-session tiles and layout | none | Not started |
 | File browser and uploads | 1 | Not started |
 | Embedded terminal | 1 | Not started |

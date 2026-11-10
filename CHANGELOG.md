@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `Ctrl+F` transcript find bar: case-insensitive search over loaded lines with
+  match highlighting, Enter/Shift+Enter cycling and scroll-to-match.
 - Session resume with a read-only fallback, project filtering and JSON export.
 - On-demand inline host-local PNG, JPEG and WebP image previews.
 - Single-instance `--toggle` IPC, tray show action and a Hyprland binding example.

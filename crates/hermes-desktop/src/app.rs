@@ -132,6 +132,10 @@ pub struct HermesApp {
     viewing_history: Option<String>,
     rail_search: bool,
     rail_filter: String,
+    /// In-transcript find bar (Ctrl+F), matching the loaded lines only.
+    search_open: bool,
+    search_query: String,
+    search_index: usize,
 }
 
 impl Focusable for HermesApp {
@@ -202,6 +206,9 @@ impl HermesApp {
             },
             rail_search: false,
             rail_filter: String::new(),
+            search_open: false,
+            search_query: String::new(),
+            search_index: 0,
         };
 
         app.pump(events, cx);
@@ -926,6 +933,16 @@ impl HermesApp {
             }
             return;
         }
+        // The find bar owns the keyboard while it is open; Ctrl+F closes it.
+        if self.search_open {
+            let primary = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+            if event.keystroke.key == "escape" || (primary && event.keystroke.key == "f") {
+                self.close_search(cx);
+                return;
+            }
+            self.route_search_typing(event, cx);
+            return;
+        }
         if event.keystroke.key == "escape" && self.sessions.renaming.is_some() {
             self.sessions.cancel_rename();
             cx.notify();
@@ -963,6 +980,7 @@ impl HermesApp {
                     keystroke.key.as_str(),
                     "k" | "n"
                         | "r"
+                        | "f"
                         | "o"
                         | ","
                         | "comma"
@@ -1104,6 +1122,7 @@ impl HermesApp {
             Action::ToggleInspector => self.toggle_inspector(cx),
             Action::ToggleVault => self.toggle_vault(cx),
             Action::ToggleUsage => self.toggle_usage(cx),
+            Action::Find => self.open_search(cx),
             Action::ToggleModels => self.toggle_models(cx),
             Action::ToggleAssignments => self.toggle_assignments(cx),
             Action::ToggleSessions => self.toggle_sessions(cx),
@@ -1342,6 +1361,73 @@ impl HermesApp {
         }
         self.lines
             .push(Line::new(Role::System, format!("Switched to {name}")));
+        cx.notify();
+    }
+
+    // ---- transcript search ----------------------------------------------
+
+    fn search_matches(&self) -> Vec<usize> {
+        crate::transcript::find_lines(&self.lines, &self.search_query)
+    }
+
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = true;
+        self.search_query.clear();
+        self.search_index = 0;
+        self.palette = Palette::default();
+        self.mention = Mention::default();
+        cx.notify();
+    }
+
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.search_query.clear();
+        self.search_index = 0;
+        cx.notify();
+    }
+
+    fn scroll_to_first_match(&mut self) {
+        if let Some(line) = self.search_matches().first() {
+            self.scroll.scroll_to_item(*line);
+        }
+    }
+
+    /// Move through matches, wrapping at either end.
+    fn search_go(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let hits = self.search_matches();
+        if hits.is_empty() {
+            cx.notify();
+            return;
+        }
+        let len = hits.len() as isize;
+        let next = (self.search_index as isize + delta).rem_euclid(len);
+        self.search_index = next as usize;
+        self.scroll.scroll_to_item(hits[self.search_index]);
+        cx.notify();
+    }
+
+    /// Keystrokes for the find bar. Enter and Shift+Enter cycle matches.
+    fn route_search_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "enter" if keystroke.modifiers.shift => self.search_go(-1, cx),
+            "enter" => self.search_go(1, cx),
+            "backspace" => {
+                self.search_query.pop();
+                self.search_index = 0;
+                self.scroll_to_first_match();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.search_query.push_str(chars);
+                    self.search_index = 0;
+                    self.scroll_to_first_match();
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -7953,6 +8039,89 @@ impl HermesApp {
             )
     }
 
+    fn find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.search_open {
+            return div();
+        }
+        let hits = self.search_matches();
+        let total = hits.len();
+        let current = if total == 0 {
+            0
+        } else {
+            self.search_index.min(total - 1) + 1
+        };
+        let count = if self.search_query.is_empty() {
+            "type to search".to_string()
+        } else if total == 0 {
+            "no matches".to_string()
+        } else {
+            format!("{current}/{total}")
+        };
+        let query_color = if self.search_query.is_empty() {
+            rgb(text_dim())
+        } else {
+            rgb(text())
+        };
+        let display = if self.search_query.is_empty() {
+            "Search transcript".to_string()
+        } else {
+            format!("{}▌", self.search_query)
+        };
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(36.))
+            .flex_shrink_0()
+            .px_4()
+            .bg(rgb(bg_elev()))
+            .border_b_1()
+            .border_color(rgb(border()))
+            .child(div().text_xs().text_color(rgb(text_dim())).child("⌕"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(query_color)
+                    .child(SharedString::from(display)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(count)),
+            );
+        for (id, label, delta) in [("find-prev", "↑", -1isize), ("find-next", "↓", 1)] {
+            bar = bar.child(
+                div()
+                    .id(id)
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(accent()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface_hi())))
+                    .on_click(cx.listener(move |this, _, _, cx| this.search_go(delta, cx)))
+                    .child(label),
+            );
+        }
+        bar.child(
+            div()
+                .id("find-close")
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(text_muted()))
+                .cursor_pointer()
+                .hover(|this| this.bg(rgb(surface_hi())))
+                .on_click(cx.listener(|this, _, _, cx| this.close_search(cx)))
+                .child("Esc"),
+        )
+    }
+
     fn chat(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if !self.has_conversation() {
             return div()
@@ -7965,28 +8134,35 @@ impl HermesApp {
                 .into_any_element();
         }
 
+        let hits = self.search_matches();
+        let active_hit = hits.get(self.search_index).copied();
+        // The line wrappers are direct children of the tracked container so a
+        // match index is also a scroll item index (`ScrollHandle::scroll_to_item`).
         div()
             .id("transcript")
             .track_scroll(&self.scroll)
             .flex()
             .flex_col()
+            .gap_5()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
             .bg(rgb(bg()))
-            .child(
+            .px_6()
+            .py_5()
+            .children(self.lines.iter().enumerate().map(|(index, line)| {
+                let matched = hits.binary_search(&index).is_ok();
+                let active = active_hit == Some(index);
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_5()
                     .w_full()
                     .max_w(px(READ_W))
                     .mx_auto()
-                    .px_6()
-                    .py_5()
-                    .children(self.lines.iter().map(|line| self.render_line(line, cx))),
-            )
+                    .rounded_lg()
+                    .when(matched, |row| row.bg(rgb(surface())))
+                    .when(active, |row| row.bg(rgb(accent_soft())))
+                    .child(self.render_line(line, cx))
+            }))
             .into_any_element()
     }
 
@@ -10365,6 +10541,7 @@ impl Render for HermesApp {
         let modal = self.settings.open
             || self.sessions.open
             || self.rail_search
+            || self.search_open
             || self.inspector.focus.is_some()
             || self.palette.open;
         let target = if modal {
@@ -10426,6 +10603,7 @@ impl Render for HermesApp {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .child(self.find_bar(cx))
                             .child(self.chat(cx))
                             .when_some(cards, |this, cards| this.child(cards))
                             .child(self.composer(cx)),

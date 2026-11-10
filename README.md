@@ -304,8 +304,9 @@ with generic schema-driven configuration and confirmed resets, a scan-gated
 skills-hub browser with confirmed
 installs, TTS playback of the last reply through `voice-models`, and an Omarchy
 theme that follows the live desktop palette.
-Dictation remains Superwhisper's job (`Alt+Space`), since the client does not
-capture audio itself.
+`Ctrl+F` opens a find bar over the loaded transcript: it highlights matches and
+cycles them with Enter / Shift+Enter. Dictation remains Superwhisper's job
+(`Alt+Space`), since the client does not capture audio itself.
 
 Not yet wired: file browser, voice mode, multi-host switching, full Markdown
 formatting, general artifact previews, and advanced Kanban management. The

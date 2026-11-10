@@ -14,12 +14,13 @@ source=()
 sha256sums=()
 
 build() {
-  cd "$startdir"
-  cargo build --release --locked
+  # This PKGBUILD lives in packaging/, one level below the workspace root.
+  cd "$startdir/.."
+  cargo build --release --locked -p hermes-desktop
 }
 
 package() {
-  cd "$startdir"
+  cd "$startdir/.."
   install -Dm755 target/release/hermes-desktop "$pkgdir/usr/bin/hermes-desktop"
   install -Dm644 packaging/hermes-gpui.desktop "$pkgdir/usr/share/applications/hermes-gpui.desktop"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

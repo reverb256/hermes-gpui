@@ -71,10 +71,19 @@ is on the tray menu and in the command palette.
 
 ## Packaging and install status
 
-There is no distro package yet. `make release` produces
-`target/release/hermes-desktop`; installation, signed packages, auto-update and
-crash reporting are Phase 10 in [`../ROADMAP.md`](../ROADMAP.md). Until then,
-install the binary where you keep local tools and add your own `.desktop` entry.
+`make release` produces `target/release/hermes-desktop`. An Arch PKGBUILD is
+checked in at `packaging/PKGBUILD` and builds from that directory:
+
+```bash
+cd packaging && makepkg -si
+```
+
+It installs the binary, `.desktop` entry and Omarchy bar widget under
+`/usr/share/hermes-gpui/`. There is still no signed package, auto-update channel
+or crash reporting; those remain Phase 10 in [`../ROADMAP.md`](../ROADMAP.md).
+The GitHub release workflow publishes an unsigned Linux x86_64 tarball plus
+`SHA256SUMS`. To run from a download instead of a package, unpack it and put
+`hermes-desktop` where your local tools live.
 
 A user unit is optional; if you write one, keep it in the user manager and pass
 credentials through `Environment=` rather than the unit's `ExecStart`:

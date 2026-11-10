@@ -45,6 +45,7 @@ pub enum Action {
     ToggleMcp,
     ToggleSessions,
     ToggleUsage,
+    Find,
     Dismiss,
     PaletteUp,
     PaletteDown,
@@ -89,6 +90,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "k" => Action::OpenPalette,
                     "n" => Action::NewChat,
                     "r" => Action::Refresh,
+                    "f" => Action::Find,
                     "o" => Action::Attach,
                     "," | "comma" => Action::ToggleInspector,
                     "v" if chord.shift => Action::ToggleVault,
@@ -158,6 +160,7 @@ mod tests {
         assert_eq!(resolve(ctrl("r"), Focus::Composer), Action::Refresh);
         assert_eq!(resolve(ctrl("v"), Focus::Composer), Action::Paste);
         assert_eq!(resolve(ctrl("o"), Focus::Composer), Action::Attach);
+        assert_eq!(resolve(ctrl("f"), Focus::Composer), Action::Find);
         assert_eq!(resolve(ctrl(","), Focus::Composer), Action::ToggleInspector);
         assert_eq!(
             resolve(

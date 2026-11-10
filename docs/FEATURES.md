@@ -18,11 +18,13 @@ products is in [`../PARITY.md`](../PARITY.md).
 | Markdown | CommonMark blocks (paragraph, heading, code, quote, list, rule) and inline bold/italic/code/link styling; links are styled text, not fetched | `transcript::markdown_blocks` |
 | Inline images | Standalone host-local PNG/JPEG/WebP references offer **Load image** | `/api/media?path=` |
 | Copy reply | Each assistant reply has a **Copy** action that writes the full text to the clipboard | client-side |
+| Find in transcript | `Ctrl+F` opens a find bar over the loaded lines, highlights matches and cycles them with Enter / Shift+Enter; Esc closes | `transcript::find_lines` |
 | Speak | Reads the last reply through the external TTS service and plays it locally | `POST {HERMES_TTS_URL}/tts`, `pw-play`/`paplay`/`aplay` |
 | Session switch | `Ctrl+1…9`, sidebar bots, or history rail | `session.resume` |
 
-Limits: no transcript search, selection, retry/fork; no syntax highlighting; no
-remote content fetching by design.
+Limits: search covers only the lines already loaded (no server-wide or
+virtualized search), and there is no message selection, retry/fork or syntax
+highlighting. Remote content is never fetched by design.
 
 ## Sessions
 

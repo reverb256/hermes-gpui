@@ -121,10 +121,10 @@ to `~/.config/omarchy/plugins/`), `validate <dir>` against the manifest schema,
 `update`, `remove`. Remove or validate before enabling; plugins are unsandboxed
 Quickshell code.
 
-Planned widget: connection state (green/amber/red), streaming indicator, pending
-approval count; left click toggles the window, right click opens a panel with the
-last reply. A widget cannot read the client's memory, so it needs a small
-state channel — options, in preference order:
+The widget shows connection state (green/amber/red), a streaming indicator and
+the pending approval count; left click toggles the window. A widget cannot read
+the client's memory, so it uses a small state channel — options, in preference
+order:
 
 1. A Unix socket in the runtime dir that the widget queries (mirrors the IPC
    socket; no new daemon).
