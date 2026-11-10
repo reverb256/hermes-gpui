@@ -6,6 +6,10 @@ Bot's public documentation reviewed on 2026-11-10. Product releases, hidden or
 account-specific features, and deployment-specific plugins can add requirements.
 Do not count an item complete merely because a backend route exists.
 
+The build plan for the gaps that are not client work lives in
+[`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md): tenancy, cloud computers,
+collaboration, connectors, sync, governance, metering and distribution.
+
 Legend: **Implemented** = client code exists; **Partial** = only the stated
 subset exists; **Missing** = no equivalent client feature identified;
 **Unknown** = behavior or host support needs investigation. Unless stated

@@ -17,6 +17,11 @@ The RPC layer is a Rust port of the gateway client Hermes ships in
 timeouts, `gateway.ping` keepalive with a 45 s liveness deadline,
 `client.capabilities` advertisement, and replay of server→client requests.
 
+## Documents
+
+- [`PARITY.md`](PARITY.md) — per-feature status against Hermes Desktop and Grok Bot.
+- [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) — the platform build plan (tenancy, cloud computers, collaboration, connectors, governance, billing).
+
 ## Layout
 
 ```
