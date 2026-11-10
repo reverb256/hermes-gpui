@@ -8,7 +8,9 @@ Do not count an item complete merely because a backend route exists.
 
 The build plan for the gaps that are not client work lives in
 [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md): tenancy, cloud computers,
-collaboration, connectors, sync, governance, metering and distribution.
+collaboration, connectors, sync, governance, metering and distribution. Phases
+and status are tracked in [`ROADMAP.md`](ROADMAP.md); Omarchy integration
+conventions are in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 
 Legend: **Implemented** = client code exists; **Partial** = only the stated
 subset exists; **Missing** = no equivalent client feature identified;
