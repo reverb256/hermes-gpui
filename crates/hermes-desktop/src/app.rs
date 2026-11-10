@@ -7030,7 +7030,7 @@ impl HermesApp {
                         div()
                             .text_xs()
                             .text_color(rgb(text_dim()))
-                            .child("Ctrl+Shift+H · timeout 120 s"),
+                            .child("interactive shell · no wall-clock timeout"),
                     ),
             );
 
@@ -7218,6 +7218,8 @@ impl HermesApp {
                         let Some(bounds) = bounds.first() else {
                             return;
                         };
+                        // Layout bounds are the border box; `measured` drops the
+                        // output area's padding before it counts cells.
                         let (width, height) =
                             (f32::from(bounds.size.width), f32::from(bounds.size.height));
                         measurer
@@ -7232,7 +7234,7 @@ impl HermesApp {
                             .overflow_y_scroll()
                             .rounded_md()
                             .bg(rgb(surface()))
-                            .p_2()
+                            .p(px(computers::TERMINAL_OUTPUT_PADDING))
                             .font_family("monospace")
                             .text_xs()
                             .text_color(rgb(text_muted()))
