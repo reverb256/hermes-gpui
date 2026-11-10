@@ -29,6 +29,10 @@ use gpui_ce_elements::editable_text::actions::{DEFAULT_INPUT_CONTEXT, default_bi
 use hermes_api::HostConfig;
 
 fn main() {
+    // The hub device socket uses wss://; install a provider before rustls is
+    // asked to infer one from a feature graph that can contain both providers.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

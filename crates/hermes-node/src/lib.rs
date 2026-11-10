@@ -16,8 +16,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use hermes_protocol::{
-    Capabilities, CommandRequest, CommandStatus, Frame, HostInfo, HubToNode, NodeToHub,
-    PromptAnswer, PromptDecision, SecretPrompt, SecretSpec, StreamChannel,
+    Capabilities, CommandRequest, CommandStatus, Frame, HostInfo, HubToNode, MAX_PTY_INPUT_BYTES,
+    NodeToHub, PromptAnswer, PromptDecision, PtySpec, SecretPrompt, SecretSpec, StreamChannel,
 };
 use rand::Rng;
 use tokio::io::AsyncReadExt;
@@ -32,6 +32,15 @@ use zeroize::Zeroizing;
 
 const MAX_RECONNECT_SECS: u64 = 30;
 const STREAM_CHUNK: usize = 16 * 1024;
+
+#[cfg(unix)]
+mod pty;
+
+/// What the hub forwards to one live terminal command.
+pub enum TerminalControl {
+    Input(Vec<u8>),
+    Resize(PtySpec),
+}
 
 /// Node configuration. Secrets are deliberately not `Debug`.
 #[derive(Clone)]
@@ -185,6 +194,8 @@ pub struct Agent {
     config: Config,
     capabilities: Capabilities,
     running: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Live terminals, keyed by command id, for input and resize frames.
+    terminals: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<TerminalControl>>>>,
     pending_prompts: Arc<Mutex<HashMap<String, oneshot::Sender<PromptAnswer>>>>,
     slots: Arc<tokio::sync::Semaphore>,
 }
@@ -194,8 +205,12 @@ impl Agent {
         let slots = Arc::new(tokio::sync::Semaphore::new(config.max_concurrency));
         Self {
             config,
-            capabilities: Capabilities::baseline(),
+            capabilities: Capabilities {
+                pty: cfg!(unix),
+                ..Capabilities::baseline()
+            },
             running: Arc::new(Mutex::new(HashMap::new())),
+            terminals: Arc::new(Mutex::new(HashMap::new())),
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             slots,
         }
@@ -225,6 +240,18 @@ impl Agent {
             }
             self.cancel_running();
             tokio::time::sleep(Duration::from_secs(backoff)).await;
+        }
+    }
+
+    /// Forward one control frame to a live terminal, if it is still running.
+    fn terminal(&self, command_id: String, control: TerminalControl) {
+        if let Some(sender) = self
+            .terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&command_id)
+        {
+            let _ = sender.send(control);
         }
     }
 
@@ -370,6 +397,34 @@ impl Agent {
                                 .get(&command_id)
                             {
                                 let _ = sender.send(true);
+                            }
+                        }
+                        HubToNode::TerminalInput {
+                            command_id,
+                            data_b64,
+                        } => {
+                            // Input is never logged: a terminal may hold a
+                            // secret the user typed on purpose.
+                            match STANDARD.decode(&data_b64) {
+                                Ok(data) if data.len() <= MAX_PTY_INPUT_BYTES => {
+                                    self.terminal(command_id, TerminalControl::Input(data));
+                                }
+                                Ok(_) => {
+                                    warn!("terminal input exceeded {MAX_PTY_INPUT_BYTES} bytes")
+                                }
+                                Err(_) => warn!("terminal input was not valid base64"),
+                            }
+                        }
+                        HubToNode::TerminalResize {
+                            command_id,
+                            cols,
+                            rows,
+                        } => {
+                            let spec = PtySpec { cols, rows };
+                            if spec.validate().is_ok() {
+                                self.terminal(command_id, TerminalControl::Resize(spec));
+                            } else {
+                                warn!(cols, rows, "terminal resize rejected");
                             }
                         }
                         HubToNode::PromptAnswer { answer } => {
@@ -564,6 +619,11 @@ impl Agent {
             .as_ref()
             .zip(secret.as_ref())
             .map(|(spec, value)| (spec.env_var.as_str(), value.as_str()));
+        if command.pty.is_some() {
+            return self
+                .run_terminal(&command, &cwd, secret_binding, cancel_rx, started, tx)
+                .await;
+        }
         let mut child = match self.build_child(&command, &cwd, secret_binding) {
             Ok(child) => child,
             Err(err) => {
@@ -655,6 +715,94 @@ impl Agent {
             exit_code,
             duration_ms: now_ms().saturating_sub(started),
             message: None,
+        });
+        Ok(())
+    }
+
+    /// Run a terminal command: no wall-clock timeout, input and resize frames
+    /// until it exits or the hub cancels it.
+    #[cfg(unix)]
+    async fn run_terminal(
+        &self,
+        command: &CommandRequest,
+        cwd: &Path,
+        secret: Option<(&str, &str)>,
+        cancel: watch::Receiver<bool>,
+        started: u64,
+        tx: mpsc::UnboundedSender<NodeToHub>,
+    ) -> Result<()> {
+        let spec = command.pty.unwrap_or(PtySpec { cols: 80, rows: 24 });
+        let env = child_environment(cwd, &command.env, secret);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        self.terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(command.id.clone(), control_tx);
+
+        let outcome = pty::run(
+            pty::Job {
+                command_id: command.id.clone(),
+                argv: &command.argv,
+                cwd,
+                env: &env,
+                spec,
+            },
+            tx.clone(),
+            control_rx,
+            cancel,
+        )
+        .await;
+
+        self.terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&command.id);
+        self.running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&command.id);
+        let (status, exit_code, message) = match outcome {
+            Ok((status, exit_code)) => (status, exit_code, None),
+            Err(err) => {
+                warn!(error = %err, "terminal session failed");
+                (
+                    CommandStatus::Failed,
+                    None,
+                    Some(format!("terminal: {err}")),
+                )
+            }
+        };
+        let _ = tx.send(NodeToHub::CommandResult {
+            command_id: command.id.clone(),
+            status,
+            exit_code,
+            duration_ms: now_ms().saturating_sub(started),
+            message,
+        });
+        Ok(())
+    }
+
+    /// Terminals need a Unix pseudo-terminal; other platforms deny them.
+    #[cfg(not(unix))]
+    async fn run_terminal(
+        &self,
+        command: &CommandRequest,
+        _cwd: &Path,
+        _secret: Option<(&str, &str)>,
+        _cancel: watch::Receiver<bool>,
+        started: u64,
+        tx: mpsc::UnboundedSender<NodeToHub>,
+    ) -> Result<()> {
+        self.running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&command.id);
+        let _ = tx.send(NodeToHub::CommandResult {
+            command_id: command.id.clone(),
+            status: CommandStatus::Denied,
+            exit_code: None,
+            duration_ms: now_ms().saturating_sub(started),
+            message: Some("terminals need a Unix node".into()),
         });
         Ok(())
     }
@@ -830,6 +978,7 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: 5_000,
             secret: None,
+            pty: None,
         }
     }
 

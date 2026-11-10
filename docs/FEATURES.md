@@ -129,11 +129,14 @@ from the gateway connection, so a hub outage does not interrupt chat.
 | --- | --- | --- |
 | Roster and presence | Enrolled nodes, online count, automatic selection of an online node, live presence updates | `GET /api/v1/nodes`; `/v1/device` `NodeList` / `NodePresence` |
 | Remote command | Quote-aware argv parsing, no shell; optional cwd; 120 s timeout; streamed stdout/stderr; cancel; 256 KiB client output cap; last 20 commands kept locally | `SubmitCommand`, `CancelCommand`, `CommandState`, `CommandStream` |
+| Terminal | On nodes that advertise `pty`, the entered argv runs on a pseudo-terminal: keystrokes, arrows, Tab and Ctrl+C are forwarded, output is echoed by the remote terminal and rendered as a plain text screen; `Ctrl+Shift+D` detaches the keyboard, `Ctrl+Shift+X` stops the session; terminal bytes are never stored by the hub | `SubmitCommand` with `pty`, `TerminalInput`, `TerminalResize`, `CommandStream` (channel `pty`) |
 | Secret prompt | Optional env var and purpose ask the remote node for a one-time value; top-most masked card, Enter to provide, Escape to cancel; nothing stored in settings or the transcript | `PromptRequest` / `PromptAnswer` / `PromptClosed` |
 | Offline behaviour | Reconnects with backoff; requests are not replayed or queued for later | device socket |
 
-Only the shell executor exists today. PTY, file transfer, screen capture,
-browser and GPU executors, and SSH credentials are later node capabilities.
+Shell and terminal executors exist today. File transfer, screen capture, browser
+and GPU executors, and SSH credentials are later node capabilities. Client-side
+resize frames are supported by the protocol, hub and node; this client sends its
+fixed panel geometry with the request instead of measuring the panel.
 
 ## Desktop integration
 
@@ -147,5 +150,5 @@ browser and GPU executors, and SSH credentials are later node capabilities.
 
 See [`OPERATIONS.md`](OPERATIONS.md) for every environment variable and
 [`../PARITY.md`](../PARITY.md) for what is still missing (notifications, voice
-capture, a terminal surface, node executors beyond shell, artifacts and SSH
-credentials).
+capture, a full terminal emulator with cursor addressing, node executors beyond
+shell and terminal, artifacts and SSH credentials).

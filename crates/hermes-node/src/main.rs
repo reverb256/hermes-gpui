@@ -5,6 +5,10 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `tokio-tungstenite` can pull both rustls providers through the workspace
+    // feature graph. Choose one explicitly before any TLS connection is built.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()

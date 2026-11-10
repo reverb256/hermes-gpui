@@ -121,12 +121,12 @@ product work beyond this GPUI repository.
 | Image/audio/video/document/code previews and downloads | Partial: host-local image preview and JSON export only. |
 | Canvas/interactive artifact rendering and share links | Missing; isolate untrusted content and define host support. |
 | Remote file browser, upload, download and workspace operations | Planned Phase 1 through `hermes-node` with explicit roots, traversal checks and per-node policy. |
-| Embedded terminal, output, resize and multiple terminals | Planned Phase 1 through `hermes-node` PTY executors; needs resize and session management. |
+| Embedded terminal, output, resize and multiple terminals | Partial: one live terminal per client over a `hermes-node` PTY, with keystrokes, resize frames and hangup cancellation; no multi-tab sessions, scrollback search or cursor addressing. |
 | Embedded browser and live computer screen | Missing; needs host-supported display/session transport and isolation. |
 | Watch/take over computer use and demonstrate workflows | Missing; needs remote control arbitration, permissions and audit. |
 | Persistent personal computer, browser sessions and files | Planned as Phase 1: one OCI `hermes-computer` container with saved volumes; a Grok-style per-user fleet is out of scope. |
 | User isolation, bot screens, execution approvals and reset | Partial: personal approval/takeover work is Phase 2 with per-bot browser contexts; multi-user isolation is out of scope. |
-| Connected-device local execution | Implemented for shell: outbound `hermes-node`, one-time enrollment, local roots/allowlist, timeout/cancel, streamed output and per-node audit. PTY, files, screen and GPU are not implemented. |
+| Connected-device local execution | Implemented for shell and PTY: outbound `hermes-node`, one-time enrollment, local roots/allowlist, timeout/cancel, streamed output, terminals and per-node audit. Files, screen and GPU are not implemented. |
 
 ## Voice and sound
 
@@ -164,7 +164,7 @@ product work beyond this GPUI repository.
 | Dedicated Omarchy bar widget and status | Implemented in `packaging/omarchy-shell-hermes` reading `status --json`; live bar insertion, click behavior and multi-monitor layout remain unverified. |
 | Launch at login, package/install/update/uninstall | Partial: PKGBUILD builds and installs the binary, `.desktop` entry and bar widget; signed packages, auto-update, uninstall and launch-at-login remain. |
 | Desktop notifications, sound, focus and privacy | Partial: Omarchy notifications on turn completion and approvals, click-to-focus, `--replace-id` collapsing and a reminder action; sound, in-notification approve, per-bot preferences and disabled states remain. |
-| Multi-host selection, SSH/remotes and credentials | Partial: hub node registry/presence/revoke, Tailscale ingress, the GPUI node picker, argv-only remote commands, streamed output/cancel and one-time credential cards are implemented; PTY/file/screen/browser/GPU executors and SSH credentials remain. |
+| Multi-host selection, SSH/remotes and credentials | Partial: hub node registry/presence/revoke, Tailscale ingress, the GPUI node picker, argv-only remote commands, streamed output/cancel, terminals and one-time credential cards are implemented; file/screen/browser/GPU executors and SSH credentials remain. |
 | Appearance, font scaling, shortcuts and user preferences | Partial: theme sync only; settings persistence and key rebinding missing. |
 | Resizing and small-screen layout | Unknown; inspect responsive behavior and settings sheet overflow. |
 | Cross-platform builds and accessibility APIs | Unknown; no macOS/Windows parity claim from Linux testing. |

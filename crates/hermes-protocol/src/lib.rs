@@ -30,6 +30,8 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Largest single stream chunk a node may send.
 pub const MAX_CHUNK_BYTES: usize = 64 * 1024;
+/// Largest terminal input chunk a device may send or a node may accept.
+pub const MAX_PTY_INPUT_BYTES: usize = 16 * 1024;
 /// Longest command timeout the hub will forward.
 pub const MAX_COMMAND_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 /// Shortest and longest secret prompt lifetime.
@@ -251,6 +253,25 @@ pub struct SecretSpec {
     pub timeout_ms: u64,
 }
 
+/// Terminal geometry for a PTY command. A PTY command has no wall-clock
+/// timeout (`timeout_ms` is zero) and stays open until cancelled or exited.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PtySpec {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl PtySpec {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if !(1..=500).contains(&self.cols) || !(1..=300).contains(&self.rows) {
+            return Err(ProtocolError::Invalid(
+                "pty size must be 1..=500 columns and 1..=300 rows".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A command the hub asks a node to run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandRequest {
@@ -267,6 +288,10 @@ pub struct CommandRequest {
     /// When set, the node raises a prompt card before spawning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<SecretSpec>,
+    /// When set, run the command on a pseudo-terminal and accept terminal
+    /// input/resize frames until it exits or is cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty: Option<PtySpec>,
 }
 
 impl CommandRequest {
@@ -287,7 +312,14 @@ impl CommandRequest {
         if self.argv[0].trim().is_empty() {
             return Err(ProtocolError::Invalid("argv[0] is empty".into()));
         }
-        if self.timeout_ms == 0 || self.timeout_ms > MAX_COMMAND_TIMEOUT_MS {
+        if let Some(pty) = self.pty {
+            pty.validate()?;
+            if self.timeout_ms != 0 {
+                return Err(ProtocolError::Invalid(
+                    "pty commands must set timeout_ms to 0 (no timeout)".into(),
+                ));
+            }
+        } else if self.timeout_ms == 0 || self.timeout_ms > MAX_COMMAND_TIMEOUT_MS {
             return Err(ProtocolError::Invalid(format!(
                 "timeout_ms must be 1..={MAX_COMMAND_TIMEOUT_MS}"
             )));
@@ -514,6 +546,15 @@ pub enum HubToNode {
     Cancel {
         command_id: String,
     },
+    TerminalInput {
+        command_id: String,
+        data_b64: String,
+    },
+    TerminalResize {
+        command_id: String,
+        cols: u16,
+        rows: u16,
+    },
     PromptAnswer {
         answer: PromptAnswer,
     },
@@ -540,6 +581,15 @@ pub enum DeviceToHub {
     },
     CancelCommand {
         command_id: String,
+    },
+    TerminalInput {
+        command_id: String,
+        data_b64: String,
+    },
+    TerminalResize {
+        command_id: String,
+        cols: u16,
+        rows: u16,
     },
     PromptAnswer {
         answer: PromptAnswer,
@@ -614,6 +664,7 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: 30_000,
             secret: None,
+            pty: None,
         }
     }
 
@@ -659,6 +710,24 @@ mod tests {
         assert!(request.validate().is_err());
 
         command().validate().expect("baseline is valid");
+    }
+
+    #[test]
+    fn pty_commands_have_a_valid_size_and_no_timeout() {
+        let mut request = command();
+        request.pty = Some(PtySpec {
+            cols: 120,
+            rows: 32,
+        });
+        assert!(
+            request.validate().is_err(),
+            "nonzero timeout must be refused"
+        );
+        request.timeout_ms = 0;
+        request.validate().expect("pty command is valid");
+
+        request.pty = Some(PtySpec { cols: 0, rows: 32 });
+        assert!(request.validate().is_err());
     }
 
     #[test]
@@ -747,6 +816,14 @@ mod tests {
         let frame = Frame::new(DeviceToHub::SubmitCommand {
             node_id: "n-1".into(),
             command: command(),
+        });
+        let text = frame.encode().expect("encode");
+        let decoded: Frame<DeviceToHub> = Frame::decode(&text).expect("decode");
+        assert_eq!(decoded, frame);
+
+        let frame = Frame::new(DeviceToHub::TerminalInput {
+            command_id: "c-1".into(),
+            data_b64: "aGk=".into(),
         });
         let text = frame.encode().expect("encode");
         let decoded: Frame<DeviceToHub> = Frame::decode(&text).expect("decode");

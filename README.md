@@ -69,9 +69,9 @@ cargo run -p hermes-desktop
 The hub deploys from `charts/hermes-hub` through the ArgoCD Application in
 `deploy/argocd/hermes-hub.yaml`, behind a Tailscale Ingress. Compose is in
 `deploy/compose`. The GPUI client connects to `/v1/device`: `Ctrl+Shift+H` or the
-**Computers** header button lists enrolled nodes, runs argv-only commands and
-shows one-time credential cards. `HERMES_OPEN_SETTINGS=computers` opens the sheet
-at launch for QA.
+**Computers** header button lists enrolled nodes, runs argv-only commands, opens
+a terminal on nodes that advertise `pty`, and shows one-time credential cards.
+`HERMES_OPEN_SETTINGS=computers` opens the sheet at launch for QA.
 
 ## Running
 

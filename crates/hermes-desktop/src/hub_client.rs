@@ -170,6 +170,11 @@ pub enum HubCommand {
     Cancel {
         command_id: String,
     },
+    /// Raw keystrokes for a live terminal. Never logged or recorded.
+    TerminalInput {
+        command_id: String,
+        data: Vec<u8>,
+    },
     Answer {
         answer: PromptAnswer,
     },
@@ -186,6 +191,11 @@ impl fmt::Debug for HubCommand {
             Self::Cancel { command_id } => f
                 .debug_struct("Cancel")
                 .field("command_id", command_id)
+                .finish(),
+            Self::TerminalInput { command_id, data } => f
+                .debug_struct("TerminalInput")
+                .field("command_id", command_id)
+                .field("bytes", &data.len())
                 .finish(),
             Self::Answer { answer } => f.debug_struct("Answer").field("answer", answer).finish(),
         }
@@ -377,6 +387,10 @@ impl HubCommand {
                 Some(DeviceToHub::SubmitCommand { node_id, command })
             }
             Self::Cancel { command_id } => Some(DeviceToHub::CancelCommand { command_id }),
+            Self::TerminalInput { command_id, data } => Some(DeviceToHub::TerminalInput {
+                command_id,
+                data_b64: BASE64.encode(data),
+            }),
             Self::Answer { answer } => Some(DeviceToHub::PromptAnswer { answer }),
         }
     }
@@ -434,6 +448,27 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret-token"));
         assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn terminal_input_is_encoded_and_never_shown_in_debug() {
+        let command = HubCommand::TerminalInput {
+            command_id: "cmd-1".into(),
+            data: b"secret\r".to_vec(),
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("secret"), "{debug}");
+        assert!(debug.contains('7'), "{debug}");
+        match command.into_message() {
+            Some(DeviceToHub::TerminalInput {
+                command_id,
+                data_b64,
+            }) => {
+                assert_eq!(command_id, "cmd-1");
+                assert_eq!(BASE64.decode(data_b64).expect("base64"), b"secret\r");
+            }
+            other => panic!("expected terminal input, got {other:?}"),
+        }
     }
 
     #[test]
@@ -567,6 +602,7 @@ mod tests {
                     env: BTreeMap::new(),
                     timeout_ms: 30_000,
                     secret: None,
+                    pty: None,
                 },
             })
             .expect("queue command");

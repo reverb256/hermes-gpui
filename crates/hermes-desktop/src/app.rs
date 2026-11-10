@@ -47,6 +47,68 @@ const SUGGESTIONS: [&str; 3] = [
     "Summarise today's cron runs",
 ];
 
+/// Translate one keystroke into terminal bytes.
+///
+/// Control letters become their ASCII control code so Ctrl+C, Ctrl+D and
+/// friends reach the shell, and Alt+key is sent as ESC followed by the key, as
+/// a terminal emulator would.
+fn terminal_keys(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
+    let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
+    if primary {
+        let ch = keystroke.key.chars().last()?.to_ascii_lowercase();
+        return match ch {
+            'a'..='z' => Some(vec![(ch as u8) - b'a' + 1]),
+            '[' => Some(vec![0x1b]),
+            '\\' => Some(vec![0x1c]),
+            ']' => Some(vec![0x1d]),
+            ' ' => Some(vec![0x00]),
+            _ => None,
+        };
+    }
+    let named = match keystroke.key.as_str() {
+        "enter" => Some(b"\r".as_slice()),
+        "tab" => Some(b"\t".as_slice()),
+        "backspace" => Some(b"\x7f".as_slice()),
+        "escape" => Some(b"\x1b".as_slice()),
+        "up" => Some(b"\x1b[A".as_slice()),
+        "down" => Some(b"\x1b[B".as_slice()),
+        "right" => Some(b"\x1b[C".as_slice()),
+        "left" => Some(b"\x1b[D".as_slice()),
+        "home" => Some(b"\x1b[H".as_slice()),
+        "end" => Some(b"\x1b[F".as_slice()),
+        "delete" => Some(b"\x1b[3~".as_slice()),
+        "pageup" => Some(b"\x1b[5~".as_slice()),
+        "pagedown" => Some(b"\x1b[6~".as_slice()),
+        _ => None,
+    };
+    if let Some(bytes) = named {
+        return Some(bytes.to_vec());
+    }
+    let text = keystroke.key_char.as_deref()?;
+    if text.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    if keystroke.modifiers.alt {
+        bytes.push(0x1b);
+    }
+    bytes.extend_from_slice(text.as_bytes());
+    Some(bytes)
+}
+
+/// Label and colour for one command status, shared by command and terminal cards.
+fn command_status_label(status: CommandStatus) -> (&'static str, u32) {
+    match status {
+        CommandStatus::Succeeded => ("succeeded", user()),
+        CommandStatus::Failed => ("failed", danger()),
+        CommandStatus::Denied => ("denied", danger()),
+        CommandStatus::TimedOut => ("timed out", danger()),
+        CommandStatus::Cancelled => ("cancelled", text_dim()),
+        CommandStatus::Running => ("running", warn()),
+        CommandStatus::Queued => ("queued", warn()),
+    }
+}
+
 #[derive(Default)]
 struct Palette {
     open: bool,
@@ -939,6 +1001,13 @@ impl HermesApp {
                 self.close_settings(cx);
                 return;
             }
+            // A focused terminal owns the keyboard before any field does.
+            if self.settings.section == Section::Computers
+                && self.computers.terminal_input_id().is_some()
+                && self.route_terminal_typing(event, cx)
+            {
+                return;
+            }
             if (self.settings.section == Section::Vault && self.route_vault_typing(event, cx))
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
                 || (self.settings.section == Section::Skills && self.route_skills_typing(event, cx))
@@ -1677,6 +1746,76 @@ impl HermesApp {
                 .problem("Hub is not configured or disconnected; nothing was sent.".into());
         }
         cx.notify();
+    }
+
+    fn open_terminal(&mut self, cx: &mut Context<Self>) {
+        let node_id = match self.computers.selected.clone() {
+            Some(id) => id,
+            None => {
+                self.computers.status = Some("Select a computer first.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let request = match self.computers.build_terminal_request() {
+            Ok(request) => request,
+            Err(message) => {
+                self.computers.status = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let sent = self.backend.hub_send(HubCommand::Submit {
+            node_id,
+            command: request.clone(),
+        });
+        if sent {
+            self.computers.terminal_started(&request);
+        } else {
+            self.computers
+                .problem("Hub is not configured or disconnected; nothing was sent.".into());
+        }
+        cx.notify();
+    }
+
+    /// Keys for the focused terminal. Ctrl+Shift+D detaches the keyboard and
+    /// Ctrl+Shift+X stops the session; everything else is forwarded verbatim.
+    fn route_terminal_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(command_id) = self.computers.terminal_input_id().map(str::to_string) else {
+            return false;
+        };
+        let keystroke = &event.keystroke;
+        let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
+        if primary && keystroke.modifiers.shift {
+            match keystroke.key.as_str() {
+                "d" => {
+                    self.computers.focus_terminal(false);
+                    self.computers.status =
+                        Some("keyboard detached; click the terminal to type into it again".into());
+                    cx.notify();
+                    return true;
+                }
+                "x" => {
+                    self.computers.focus_terminal(false);
+                    self.cancel_remote(&command_id, cx);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        let Some(bytes) = terminal_keys(keystroke) else {
+            return true;
+        };
+        if !self.backend.hub_send(HubCommand::TerminalInput {
+            command_id,
+            data: bytes,
+        }) {
+            self.computers.problem(
+                "Hub is not configured or disconnected; the keystroke was not sent.".into(),
+            );
+        }
+        cx.notify();
+        true
     }
 
     fn cancel_remote(&mut self, command_id: &str, cx: &mut Context<Self>) {
@@ -6863,6 +7002,7 @@ impl HermesApp {
                             }))
                             .child("Run on computer"),
                     )
+                    .child(self.terminal_button(cx))
                     .child(
                         div()
                             .text_xs()
@@ -6870,6 +7010,11 @@ impl HermesApp {
                             .child("Ctrl+Shift+H · timeout 120 s"),
                     ),
             );
+
+        if let Some(terminal) = self.computers.terminal.as_ref() {
+            body = body.child(self.section_label("TERMINAL"));
+            body = body.child(self.terminal_card(terminal, cx));
+        }
 
         if let Some(status) = self.computers.status.clone() {
             body = body.child(
@@ -6940,20 +7085,186 @@ impl HermesApp {
             .child(field)
     }
 
+    fn terminal_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let supported = self.computers.terminal_supported();
+        let button = div()
+            .id("computers-terminal")
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(border()))
+            .text_xs()
+            .text_color(rgb(if supported { text() } else { text_dim() }))
+            .child(if supported {
+                "Open terminal"
+            } else {
+                "No terminal on this computer"
+            });
+        if supported {
+            button
+                .cursor_pointer()
+                .hover(|this| this.bg(rgb(surface_hi())))
+                .on_click(cx.listener(|this, _event, _window, cx| this.open_terminal(cx)))
+                .into_any_element()
+        } else {
+            button.into_any_element()
+        }
+    }
+
+    /// The terminal panel: a plain text screen, its status, and the two
+    /// keyboard escapes (detach and stop).
+    fn terminal_card(
+        &self,
+        terminal: &computers::Terminal,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (status_label, status_color) = command_status_label(terminal.status);
+        let running = terminal.is_running();
+        let focused = terminal.focused;
+        let exit = terminal
+            .exit_code
+            .map(|code| format!(" · exit {code}"))
+            .unwrap_or_default();
+        let output = if terminal.output.is_empty() {
+            if running {
+                "waiting for output…".to_string()
+            } else {
+                "no output".to_string()
+            }
+        } else {
+            terminal.output.clone()
+        };
+        let hint = if focused {
+            format!(
+                "keys go to {} · Ctrl+Shift+D detach · Ctrl+Shift+X stop",
+                terminal.node_name
+            )
+        } else if running {
+            "click the terminal to type into it again".to_string()
+        } else {
+            "session ended".to_string()
+        };
+
+        let mut card = div()
+            .id("terminal-card")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(rgb(bg()))
+            .border_1()
+            .border_color(rgb(if focused { accent() } else { border() }))
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                this.computers.focus_terminal(true);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(terminal.title.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(status_color))
+                            .child(SharedString::from(format!("{status_label}{exit}"))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("terminal-output")
+                    .max_h(px(280.))
+                    .min_h(px(96.))
+                    .overflow_y_scroll()
+                    .rounded_md()
+                    .bg(rgb(surface()))
+                    .p_2()
+                    .font_family("monospace")
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .child(SharedString::from(output)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(hint)),
+            );
+        if let Some(message) = terminal.message.clone() {
+            card = card.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(status_color))
+                    .child(SharedString::from(message)),
+            );
+        }
+        if terminal.truncated {
+            card = card.child(div().text_xs().text_color(rgb(text_dim())).child(
+                "Older terminal output was dropped in the client; the session kept running.",
+            ));
+        }
+        if focused {
+            card = card.child(
+                div()
+                    .id("terminal-detach")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(surface()))
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface_hi())))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.computers.focus_terminal(false);
+                        cx.notify();
+                    }))
+                    .child("Detach keyboard"),
+            );
+        }
+        if !running {
+            card = card.child(
+                div()
+                    .id("terminal-close")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(surface_hi()))
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface())))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.computers.close_terminal();
+                        cx.notify();
+                    }))
+                    .child("Close terminal"),
+            );
+        }
+        card.into_any_element()
+    }
+
     fn remote_command_card(
         &self,
         command: &RemoteCommand,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (status_label, status_color) = match command.record.status {
-            CommandStatus::Succeeded => ("succeeded", user()),
-            CommandStatus::Failed => ("failed", danger()),
-            CommandStatus::Denied => ("denied", danger()),
-            CommandStatus::TimedOut => ("timed out", danger()),
-            CommandStatus::Cancelled => ("cancelled", text_dim()),
-            CommandStatus::Running => ("running", warn()),
-            CommandStatus::Queued => ("queued", warn()),
-        };
+        let (status_label, status_color) = command_status_label(command.record.status);
         let id = command.record.id.clone();
         let output = if command.output.is_empty() {
             if command.is_running() {
@@ -11465,5 +11776,60 @@ impl Render for HermesApp {
             .when(!self.computers.prompts.is_empty(), |this| {
                 this.child(self.secret_prompt_overlay(cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_keys;
+    use gpui::{Keystroke, Modifiers};
+
+    fn keystroke(key: &str, key_char: Option<&str>, control: bool, alt: bool) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers {
+                control,
+                alt,
+                ..Modifiers::default()
+            },
+            key: key.into(),
+            key_char: key_char.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn terminal_keys_translates_control_and_named_keys() {
+        assert_eq!(
+            terminal_keys(&keystroke("c", None, true, false)),
+            Some(vec![0x03])
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("d", None, true, false)),
+            Some(vec![0x04])
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("enter", Some("\r"), false, false)),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("up", None, false, false)),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("pageup", None, false, false)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("backspace", None, false, false)),
+            Some(vec![0x7f])
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("x", Some("x"), false, true)),
+            Some(b"\x1bx".to_vec())
+        );
+        assert_eq!(
+            terminal_keys(&keystroke("a", Some("a"), false, false)),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(terminal_keys(&keystroke("f1", None, false, false)), None);
     }
 }

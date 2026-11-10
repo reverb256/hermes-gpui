@@ -110,15 +110,20 @@ a shell. There is no string form of the command line on the wire.
 | Type | Fields | Notes |
 | --- | --- | --- |
 | `hello_ack` | `node_id`, `heartbeat_ms`, `max_command_timeout_ms` | before any command |
-| `command` | `command{id,idempotency_key,argv,cwd,env,timeout_ms,secret?}` | one delivery per idempotency key |
+| `command` | `command{id,idempotency_key,argv,cwd,env,timeout_ms,secret?,pty?}` | one delivery per idempotency key |
 | `cancel` | `command_id` | node kills the child and reports `cancelled` |
+| `terminal_input` | `command_id`, `data_b64` | raw keystrokes, at most 16 KiB; dropped if the terminal is gone |
+| `terminal_resize` | `command_id`, `cols`, `rows` | applied with `TIOCSWINSZ`; 1–500 × 1–300 |
 | `prompt_answer` | `answer{prompt_id,challenge,decision}` | `provide{value,remember}` or `cancel` |
 | `ping` | `at_ms` | node replies with a heartbeat |
 | `error` | `code`, `message` | `replaced` closes a superseded node socket |
 
 Capabilities are advertised, not inferred: `shell`, `pty`, `files`, `screen`,
-`browser`, `gpu`, `services`, `secret_prompts`. Version 1 advertises shell and
-secret prompts; the rest are `false` until their executors exist.
+`browser`, `gpu`, `services`, `secret_prompts`. A Unix node advertises `shell`,
+`pty` and `secret_prompts`; the rest are `false` until their executors exist.
+A client must not offer a terminal unless the node advertises `pty`, and the
+node answers a `pty` request it cannot serve with `denied` rather than
+substituting pipes.
 
 ## Device ↔ hub messages
 
@@ -129,6 +134,8 @@ secret prompts; the rest are `false` until their executors exist.
 | `hello` | `device_id`, `name` |
 | `submit_command` | `node_id`, `command` |
 | `cancel_command` | `command_id` |
+| `terminal_input` | `command_id`, `data_b64` |
+| `terminal_resize` | `command_id`, `cols`, `rows` |
 | `prompt_answer` | `answer` |
 | `ping` | `at_ms` |
 
@@ -163,9 +170,28 @@ device socket.
    cleared environment, execution timeout, cancellation. A refused command is
    reported as `denied`, not executed.
 5. Output is streamed with a monotonically increasing `seq` per command and
-   persisted in `command_events` for replay.
+   persisted in `command_events` for replay — except `pty` output, which is
+   relayed only.
 6. One terminal `command_result` wins. A late duplicate cannot rewrite a
    succeeded or cancelled command.
+
+### Terminal commands
+
+A request with `pty{cols,rows}` runs on a pseudo-terminal instead of pipes. The
+pairing is enforced at validation: `pty` requires `timeout_ms` to be `0`, so a
+terminal has no wall-clock deadline and stays open until it exits or is
+cancelled.
+
+- The node opens the pair, makes the slave the child's controlling terminal
+  (`setsid` + `TIOCSCTTY`) and applies the requested size, so shells, job
+  control, `vim` and `less` behave normally.
+- Output arrives on `stream{channel:"pty"}`. The hub forwards it live and stores
+  nothing; `terminal_input` bytes are never persisted, logged or audited.
+- Cancellation hangs up the child's process group (`SIGHUP`) and kills it after
+  two seconds, so background jobs do not survive a closed terminal.
+- A client renders the byte stream itself. The GPUI client keeps a plain text
+  screen: escape sequences are dropped, `\r` rewrites the line and `\t` expands
+  to the next tab stop. Cursor addressing is not emulated.
 
 The hub never persists `env` or the secret spec; `CommandRecord` contains only
 argv, cwd, status, timings and exit code. The request is held in memory for the
@@ -200,8 +226,9 @@ node                       hub                         device
   in the child environment. It is zeroized after injection. It is never in the
   transcript, audit detail, command record, argv, logs or shell history.
 - `remember` is parsed but v1 does not persist it; OS keyring support is Phase 2.
-- Sudo password delivery over stdin is not implemented yet. The env-var path is
-  for credentials such as `PGPASSWORD`; do not treat it as a PTY.
+- The env-var path is for credentials such as `PGPASSWORD`. Interactive password
+  prompts belong in a terminal command, where the client forwards keystrokes and
+  nothing is stored.
 
 ## Reconnect and failure semantics
 
@@ -236,8 +263,13 @@ Phase 1 feature. Device reconnect replay is implemented.
   application-level bearer token is still required.
 - One hub replica only: SQLite is a single writer. HA and Postgres are not part
   of v1.
-- Shell execution is the only executor. PTY, files, screen, browser and GPU are
-  represented in the protocol and capability manifest but not implemented.
+- Shell and terminal (PTY) execution are the only executors. Files, screen,
+  browser and GPU are represented in the protocol and capability manifest but
+  not implemented.
+- A terminal session is one child process group on the node. Anyone holding the
+  device token can type into it, so treat that token like local shell access.
+  Terminal output and input are not stored by the hub, and a device reconnect
+  does not replay them.
 
 ## Adding a message
 

@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use hermes_protocol::{
     Capabilities, Frame, HubToNode, MAX_CHUNK_BYTES, MAX_FRAME_BYTES, NodeToHub, PromptAnswer,
-    PromptDecision, SecretPrompt,
+    PromptDecision, SecretPrompt, StreamChannel,
 };
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -266,9 +266,13 @@ async fn handle_node_message(
                 anyhow::bail!("stream chunk exceeds {MAX_CHUNK_BYTES} bytes");
             }
             state.db.mark_command_running(&command_id, now_ms())?;
-            state
-                .db
-                .insert_command_event(&command_id, seq, channel, &data_b64, now_ms())?;
+            // Terminal bytes are relayed live but never stored: a terminal can
+            // echo a typed password, and the hub keeps no copy of either.
+            if !matches!(channel, StreamChannel::Pty) {
+                state
+                    .db
+                    .insert_command_event(&command_id, seq, channel, &data_b64, now_ms())?;
+            }
             state.broadcast_device(hermes_protocol::HubToDevice::CommandStream {
                 node_id: principal.id.clone(),
                 command_id,

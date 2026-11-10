@@ -4,12 +4,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use hermes_hub::{Config, HubState};
 use hermes_node::{Agent, Config as NodeConfig};
 use hermes_protocol::{
     CommandRequest, CommandStatus, DeviceToHub, Frame, HubToDevice, PromptAnswer, PromptDecision,
-    SecretSpec,
+    PtySpec, SecretSpec, StreamChannel,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -179,6 +181,7 @@ async fn command_and_secret_prompt_flow_end_to_end() {
         env: BTreeMap::new(),
         timeout_ms: 5_000,
         secret: None,
+        pty: None,
     };
     send_device(
         &mut device,
@@ -239,6 +242,7 @@ async fn command_and_secret_prompt_flow_end_to_end() {
             scope: "one command".into(),
             timeout_ms: 5_000,
         }),
+        pty: None,
     };
     send_device(
         &mut device,
@@ -397,6 +401,7 @@ async fn a_wrong_prompt_challenge_is_rejected_and_burned() {
                 cwd: Some(root.display().to_string()),
                 env: BTreeMap::new(),
                 timeout_ms: 5_000,
+                pty: None,
                 secret: Some(SecretSpec {
                     env_var: "MY_SECRET".into(),
                     purpose: "e2e".into(),
@@ -450,6 +455,132 @@ async fn a_wrong_prompt_challenge_is_rejected_and_burned() {
         .await
         .expect("prompts json");
     assert_eq!(prompts["prompts"].as_array().map(Vec::len), Some(0));
+
+    node_task.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn terminal_input_is_relayed_and_never_stored() {
+    init_tracing();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let base = format!("http://{address}");
+    let state = HubState::in_memory(hub_config());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, state.router()).await.expect("serve");
+    });
+    let client = reqwest::Client::new();
+    let (node_id, node_token) = enroll(&client, &base, "node", "zephyr-e2e").await;
+    let (device_id, device_token) = enroll(&client, &base, "device", "laptop-terminal").await;
+    let root = std::env::temp_dir().join(format!("hermes-e2e-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("root");
+    let node = Agent::new(NodeConfig {
+        hub_url: format!("ws://{address}/v1/node"),
+        token: node_token,
+        node_id: node_id.clone(),
+        name: "zephyr-e2e".into(),
+        allowed_roots: vec![root.clone()],
+        allowed_commands: vec!["sh".into()],
+        max_concurrency: 2,
+    });
+    let node_capabilities = node.capabilities().clone();
+    assert!(node_capabilities.pty, "a unix node advertises a terminal");
+    let node_task = tokio::spawn(async move { node.run().await });
+    wait_for_node(&client, &base, &node_id).await;
+    let mut device = connect_device(&base, &device_id, &device_token).await;
+
+    let typed = "hello-terminal";
+    send_device(
+        &mut device,
+        DeviceToHub::SubmitCommand {
+            node_id,
+            command: CommandRequest {
+                id: "cmd-terminal".into(),
+                idempotency_key: "idem-terminal".into(),
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf ready; read line; printf 'got:%s' \"$line\"; sleep 30".to_string(),
+                ],
+                cwd: Some(root.display().to_string()),
+                env: BTreeMap::new(),
+                timeout_ms: 0,
+                pty: Some(PtySpec { cols: 80, rows: 24 }),
+                secret: None,
+            },
+        },
+    )
+    .await;
+
+    let mut terminal = String::new();
+    let mut sent_input = false;
+    let mut status = None;
+    while status.is_none() {
+        match next_device(&mut device).await {
+            HubToDevice::CommandState { command } if command.id == "cmd-terminal" => {
+                if command.status.is_terminal() {
+                    status = Some(command.status);
+                }
+            }
+            HubToDevice::CommandStream {
+                command_id,
+                channel,
+                data_b64,
+                ..
+            } if command_id == "cmd-terminal" => {
+                let bytes = STANDARD.decode(data_b64).expect("base64");
+                if channel == StreamChannel::Pty {
+                    terminal.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                if !sent_input && terminal.contains("ready") {
+                    sent_input = true;
+                    send_device(
+                        &mut device,
+                        DeviceToHub::TerminalInput {
+                            command_id: "cmd-terminal".into(),
+                            data_b64: STANDARD.encode(format!("{typed}\r")),
+                        },
+                    )
+                    .await;
+                }
+                if terminal.contains(typed) {
+                    send_device(
+                        &mut device,
+                        DeviceToHub::CancelCommand {
+                            command_id: "cmd-terminal".into(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            HubToDevice::Error { code, message } => panic!("hub error {code}: {message}"),
+            _ => {}
+        }
+    }
+    assert!(
+        terminal.contains(&format!("got:{typed}")),
+        "terminal never echoed the typed line: {terminal:?}"
+    );
+    assert_eq!(status, Some(CommandStatus::Cancelled));
+
+    // The hub relays terminal bytes but keeps none of them.
+    let events: Value = client
+        .get(format!("{base}/api/v1/commands/cmd-terminal/events"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .expect("events")
+        .json()
+        .await
+        .expect("events json");
+    assert_eq!(
+        events["events"].as_array().map(Vec::len),
+        Some(0),
+        "terminal output must not be persisted: {events}"
+    );
 
     node_task.abort();
     server.abort();

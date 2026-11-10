@@ -14,6 +14,7 @@ base64 = "0.22"
 futures-util.workspace = true
 hostname = "0.4"
 rand = "0.9"
+rustls.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "signal", "fs"] }
 tokio-tungstenite.workspace = true
@@ -21,6 +22,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Terminal commands need openpty/TIOCSCTTY/TIOCSWINSZ and a process-group
+# hangup; libc is the smallest way to get them without a terminal crate.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

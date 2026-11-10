@@ -130,8 +130,9 @@ HERMES_HUB_DEVICE_TOKEN=… \
 ```
 
 `Ctrl+Shift+H` (or the **Computers** header button) shows the node roster,
-presence, an argv-only command form, streamed output and one-time credential
-cards. The client sends the token only in the WebSocket `Authorization` header;
+presence, an argv-only command form, streamed output, a terminal panel on nodes
+that advertise `pty`, and one-time credential cards. The client sends the token
+only in the WebSocket `Authorization` header;
 it reconnects with backoff and dequeues no offline commands. If only some hub
 variables are set, the Computers page reports the configuration error instead
 of silently falling back to gateway-only mode. The token header is never written
@@ -150,6 +151,17 @@ kubectl -n hermes create secret generic hermes-hub-admin \
   --from-literal=admin-token="$(openssl rand -base64 48)"
 kubectl apply -f deploy/argocd/hermes-hub.yaml
 kubectl -n hermes rollout status deploy/hermes-hub
+```
+
+The Application pins the image by digest in `helm.valuesObject` while the chart
+keeps generic defaults. Build and publish a new image to the in-cluster
+registry, then update that digest and let ArgoCD sync:
+
+```bash
+sudo docker build -f docker/hub.Dockerfile -t localhost:5000/hermes/hub:<tag> .
+sudo docker push localhost:5000/hermes/hub:<tag>
+# digest from `sudo docker inspect --format='{{index .RepoDigests 0}}' …`,
+# then edit deploy/argocd/hermes-hub.yaml and push; ArgoCD applies it.
 ```
 
 Do not expose the Service with a public LoadBalancer. The tailnet ACL limits the
@@ -203,7 +215,8 @@ The agent clears the child environment: it does not inherit
 `HERMES_NODE_TOKEN`, the hub URL or host secrets. Only `PATH`, `HOME`, `LANG`,
 `TERM`, the request's explicit env and a prompted secret are passed. A command
 is executed without a shell, inside an allowed root, with a timeout and
-cancellation.
+cancellation. On Unix the agent also advertises `pty` (see **Terminals** below);
+other platforms deny terminal requests.
 
 Container variant (own filesystem, not the host's):
 
@@ -214,6 +227,21 @@ docker run --rm --read-only --tmpfs /tmp \
   -v "$HOME/work:/home/hermes/work" \
   ghcr.io/reverb256/hermes-node:0.1.0
 ```
+
+### Terminals
+
+On a node that advertises `pty`, **Open terminal** in Computers runs the entered
+argv on a pseudo-terminal on that computer. The panel owns the keyboard while
+it is focused: keys, arrows, Tab completion and Ctrl+C reach the remote process
+as bytes, and the remote terminal echoes them back. `Ctrl+Shift+D` detaches the
+keyboard (the session keeps running; click the panel to type again) and
+`Ctrl+Shift+X` stops the session, which hangs up the process group.
+
+A terminal has no timeout, so `timeout_ms` must be zero with a `pty` spec. The
+hub relays terminal bytes and stores none of them: they are absent from
+`command_events`, the audit log and the transcript. Terminal records also stay
+off the command output list. Treat the device token as local shell access,
+because that is what it grants on every enrolled node.
 
 ### Secret prompt cards
 

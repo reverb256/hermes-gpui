@@ -6,8 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Hub, node and desktop install the rustls `ring` provider explicitly, so a
+  `wss://` connection no longer panics with "could not automatically determine
+  the process-level CryptoProvider".
+
 ### Added
 
+- Terminals: a `pty` command runs on a pseudo-terminal on the node, with
+  bidirectional input, resize, hangup-based cancellation and no wall-clock
+  timeout. The hub relays terminal bytes without storing them, and the client
+  renders a plain text screen with `Ctrl+Shift+D` to detach the keyboard and
+  `Ctrl+Shift+X` to stop the session.
+- Deployment: the hub ships as an ArgoCD Application pinned to a digest in the
+  in-cluster registry, and a node agent runs as a systemd user service.
 - Computers: the GPUI client now connects to `hermes-hub` over `/v1/device`, with a
   node roster and presence, argv-only remote command execution, streamed output,
   cancel, reconnect/backoff, and top-most masked one-time credential cards

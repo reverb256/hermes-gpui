@@ -61,6 +61,9 @@ pub struct SubmitCommandBody {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub secret: Option<SecretSpec>,
+    /// When set, the command runs on a pseudo-terminal with no timeout.
+    #[serde(default)]
+    pub pty: Option<hermes_protocol::PtySpec>,
     #[serde(default)]
     pub id: Option<String>,
 }
@@ -302,8 +305,11 @@ pub async fn submit_command(
     if body.node_id.trim().is_empty() {
         return Err(ApiError::bad_request("node_id is required"));
     }
-    let timeout_ms = body.timeout_ms.unwrap_or(30_000);
-    if timeout_ms == 0 || timeout_ms > state.config.max_command_timeout_ms {
+    // A terminal stays open until it exits or is cancelled, so it carries no
+    // wall-clock timeout; `CommandRequest::validate` enforces the pairing.
+    let default_timeout = if body.pty.is_some() { 0 } else { 30_000 };
+    let timeout_ms = body.timeout_ms.unwrap_or(default_timeout);
+    if body.pty.is_none() && (timeout_ms == 0 || timeout_ms > state.config.max_command_timeout_ms) {
         return Err(ApiError::bad_request(format!(
             "timeout_ms must be 1..={}",
             state.config.max_command_timeout_ms
@@ -320,6 +326,7 @@ pub async fn submit_command(
         env: body.env,
         timeout_ms,
         secret: body.secret,
+        pty: body.pty,
     };
     request.validate()?;
     match state.db.principal(&body.node_id)? {

@@ -13,17 +13,26 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hermes_protocol::{
-    CommandRecord, CommandRequest, NodeSummary, SecretPrompt, SecretSpec, StreamChannel,
+    CommandRecord, CommandRequest, CommandStatus, NodeSummary, PtySpec, SecretPrompt, SecretSpec,
+    StreamChannel,
 };
 use uuid::Uuid;
 use zeroize::Zeroize;
 
 /// Remote commands are bounded so a stuck process cannot hold the node forever.
 pub const COMMAND_TIMEOUT_MS: u64 = 120_000;
+/// The terminal panel's geometry; a terminal has no wall-clock timeout.
+pub const TERMINAL_COLS: u16 = 120;
+pub const TERMINAL_ROWS: u16 = 32;
 /// Keep the sheet responsive even when a command prints for a long time.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// A terminal scrolls, so it keeps more than one command's worth of output.
+const MAX_TERMINAL_BYTES: usize = 512 * 1024;
 /// Newest commands first; older entries leave the sheet.
 const MAX_COMMANDS: usize = 20;
+/// How many finished terminal ids are remembered, so their records never
+/// reappear as ordinary command cards.
+const MAX_TERMINALS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -69,6 +78,113 @@ pub struct PromptCard {
     pub submitting: bool,
 }
 
+/// Escape-sequence state that survives a chunk boundary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Esc {
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+/// A live (or finished) terminal on a computer.
+///
+/// The transcript is a plain text screen: escape sequences are dropped, `\r`
+/// rewrites the current line and `\t` becomes spaces. Cursor addressing is not
+/// rendered, which keeps a chat panel readable; the node side still sees the
+/// real terminal. Terminal output is never stored in a command record.
+pub struct Terminal {
+    pub command_id: String,
+    pub node_name: String,
+    pub title: String,
+    pub status: CommandStatus,
+    pub exit_code: Option<i32>,
+    pub message: Option<String>,
+    pub output: String,
+    pub truncated: bool,
+    /// Keyboard input goes to this terminal while true.
+    pub focused: bool,
+    /// Cursor column in the current line, so `\r` rewrites instead of wiping.
+    col: usize,
+    esc: Esc,
+}
+
+impl Terminal {
+    pub fn is_running(&self) -> bool {
+        !self.status.is_terminal()
+    }
+
+    /// Write one character at the cursor, overwriting what was there.
+    fn put(&mut self, ch: char) {
+        let start = self.output.rfind('\n').map(|index| index + 1).unwrap_or(0);
+        let existing = self.output[start..]
+            .char_indices()
+            .nth(self.col)
+            .map(|(offset, ch)| (start + offset, ch.len_utf8()));
+        match existing {
+            Some((offset, len)) => self
+                .output
+                .replace_range(offset..offset + len, &ch.to_string()),
+            None => self.output.push(ch),
+        }
+        self.col += 1;
+    }
+
+    fn feed(&mut self, data: &[u8]) {
+        let text = String::from_utf8_lossy(data);
+        for ch in text.chars() {
+            match self.esc {
+                Esc::Ground => match ch {
+                    '\u{1b}' => self.esc = Esc::Escape,
+                    '\r' => self.col = 0,
+                    '\n' => {
+                        self.output.push('\n');
+                        self.col = 0;
+                    }
+                    '\u{08}' => self.col = self.col.saturating_sub(1),
+                    '\t' => {
+                        let next = (self.col / 8 + 1) * 8;
+                        while self.col < next {
+                            self.put(' ');
+                        }
+                    }
+                    ch if (ch as u32) < 0x20 || ch == '\u{7f}' => {}
+                    ch => self.put(ch),
+                },
+                Esc::Escape => match ch {
+                    '[' => self.esc = Esc::Csi,
+                    ']' => self.esc = Esc::Osc,
+                    _ => self.esc = Esc::Ground,
+                },
+                Esc::Csi => {
+                    if ('\u{40}'..='\u{7e}').contains(&ch) {
+                        self.esc = Esc::Ground;
+                    }
+                }
+                Esc::Osc => match ch {
+                    '\u{07}' => self.esc = Esc::Ground,
+                    '\u{1b}' => self.esc = Esc::OscEscape,
+                    _ => {}
+                },
+                Esc::OscEscape => {
+                    self.esc = if ch == '\\' { Esc::Ground } else { Esc::Osc };
+                }
+            }
+        }
+        if self.output.len() > MAX_TERMINAL_BYTES {
+            let mut cut = self.output.len() - MAX_TERMINAL_BYTES;
+            while cut < self.output.len() && !self.output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.output.drain(..cut);
+            self.truncated = true;
+            let line = self.output.rfind('\n').map(|index| index + 1).unwrap_or(0);
+            self.col = self.col.min(self.output[line..].chars().count());
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Computers {
     /// False when the hub environment variables are absent.
@@ -86,6 +202,11 @@ pub struct Computers {
     pub commands: Vec<RemoteCommand>,
     pub status: Option<String>,
     pub prompts: Vec<PromptCard>,
+    /// The terminal panel, if a terminal was opened in this session.
+    pub terminal: Option<Terminal>,
+    /// Every terminal command id seen, so their records stay out of the
+    /// ordinary command list and their output stays out of storage.
+    terminal_ids: Vec<String>,
 }
 
 impl Computers {
@@ -221,6 +342,7 @@ impl Computers {
             env: Default::default(),
             timeout_ms: COMMAND_TIMEOUT_MS,
             secret,
+            pty: None,
         };
         request.validate().map_err(|err| err.to_string())?;
         Ok(request)
@@ -230,7 +352,116 @@ impl Computers {
         self.status = Some(format!("sent to {node}…"));
     }
 
+    /// Whether the selected computer advertises a terminal.
+    pub fn terminal_supported(&self) -> bool {
+        self.selected_node()
+            .is_some_and(|node| node.online && node.capabilities.pty)
+    }
+
+    /// Build the request that opens a terminal. A terminal is interactive, so
+    /// it carries no secret spec, no timeout and fixed geometry.
+    pub fn build_terminal_request(&mut self) -> Result<CommandRequest, String> {
+        let node = self
+            .selected_node()
+            .ok_or_else(|| "Select a computer first.".to_string())?;
+        if !node.online {
+            return Err(format!("{} is offline.", node.name));
+        }
+        if !node.capabilities.pty {
+            return Err(format!("{} does not offer a terminal.", node.name));
+        }
+        if !self.secret_env.trim().is_empty() {
+            return Err(
+                "A terminal is already interactive; clear the secret variable first.".into(),
+            );
+        }
+        let argv = parse_argv(&self.argv)?;
+        if argv.is_empty() {
+            return Err("Enter a program and its arguments.".into());
+        }
+        let cwd = self.cwd.trim();
+        let request = CommandRequest {
+            id: format!("cmd-{}", Uuid::new_v4()),
+            idempotency_key: format!("idem-{}", Uuid::new_v4()),
+            argv,
+            cwd: (!cwd.is_empty()).then(|| cwd.to_string()),
+            env: Default::default(),
+            timeout_ms: 0,
+            secret: None,
+            pty: Some(PtySpec {
+                cols: TERMINAL_COLS,
+                rows: TERMINAL_ROWS,
+            }),
+        };
+        request.validate().map_err(|err| err.to_string())?;
+        Ok(request)
+    }
+
+    /// Record a submitted terminal so its stream is routed to the panel.
+    pub fn terminal_started(&mut self, request: &CommandRequest) {
+        let node_name = self
+            .selected_node()
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| "computer".into());
+        self.terminal_ids.insert(0, request.id.clone());
+        self.terminal_ids.truncate(MAX_TERMINALS);
+        self.status = Some(format!("terminal opened on {node_name}"));
+        self.terminal = Some(Terminal {
+            command_id: request.id.clone(),
+            node_name,
+            title: request.argv.join(" "),
+            status: CommandStatus::Queued,
+            exit_code: None,
+            message: None,
+            output: String::new(),
+            truncated: false,
+            focused: true,
+            col: 0,
+            esc: Esc::Ground,
+        });
+    }
+
+    /// The command id that should receive keystrokes, if any.
+    pub fn terminal_input_id(&self) -> Option<&str> {
+        let terminal = self.terminal.as_ref()?;
+        (terminal.focused && terminal.is_running()).then_some(terminal.command_id.as_str())
+    }
+
+    pub fn focus_terminal(&mut self, focused: bool) {
+        if let Some(terminal) = self.terminal.as_mut()
+            && terminal.is_running()
+        {
+            terminal.focused = focused;
+        }
+    }
+
+    pub fn close_terminal(&mut self) {
+        self.terminal = None;
+    }
+
+    /// Consume a record that belongs to a terminal instead of adding a card.
+    fn terminal_state(&mut self, record: &CommandRecord) -> bool {
+        if !self.terminal_ids.iter().any(|id| id == &record.id) {
+            return false;
+        }
+        if let Some(terminal) = self.terminal.as_mut()
+            && terminal.command_id == record.id
+        {
+            terminal.status = record.status;
+            terminal.exit_code = record.exit_code;
+            terminal.message = record.message.clone();
+            if record.status.is_terminal() {
+                terminal.focused = false;
+                self.status = Some(format!("terminal {}", record.status.as_str()));
+            }
+        }
+        true
+    }
+
     pub fn command_state(&mut self, record: CommandRecord) {
+        if self.terminal_state(&record) {
+            return;
+        }
         if let Some(existing) = self
             .commands
             .iter_mut()
@@ -254,6 +485,14 @@ impl Computers {
 
     pub fn stream(&mut self, command_id: &str, channel: StreamChannel, data: &[u8]) {
         if matches!(channel, StreamChannel::File | StreamChannel::Screen) {
+            return;
+        }
+        if channel == StreamChannel::Pty {
+            if let Some(terminal) = self.terminal.as_mut()
+                && terminal.command_id == command_id
+            {
+                terminal.feed(data);
+            }
             return;
         }
         let Some(command) = self
@@ -434,6 +673,19 @@ mod tests {
         }
     }
 
+    fn terminal_node(id: &str) -> NodeSummary {
+        let mut node = node(id, true);
+        node.capabilities.pty = true;
+        node
+    }
+
+    fn terminal_page() -> Computers {
+        let mut page = Computers::new(true, None);
+        page.nodes_loaded(vec![terminal_node("zephyr")]);
+        page.argv = "bash -l".into();
+        page
+    }
+
     fn record(id: &str, status: CommandStatus) -> CommandRecord {
         CommandRecord {
             id: id.into(),
@@ -575,6 +827,153 @@ mod tests {
         assert_eq!(page.prompts.len(), 1);
         page.prompts[0].answer = "   ".into();
         assert!(page.take_answer().is_some());
+    }
+
+    #[test]
+    fn terminal_request_carries_geometry_and_no_timeout() {
+        let mut page = terminal_page();
+        let request = page.build_terminal_request().expect("terminal request");
+        assert_eq!(
+            request.pty,
+            Some(PtySpec {
+                cols: TERMINAL_COLS,
+                rows: TERMINAL_ROWS
+            })
+        );
+        assert_eq!(request.timeout_ms, 0);
+        assert!(request.secret.is_none());
+        assert_eq!(request.argv, vec!["bash", "-l"]);
+    }
+
+    #[test]
+    fn terminal_is_refused_without_the_capability_or_with_a_secret() {
+        let mut page = Computers::new(true, None);
+        page.nodes_loaded(vec![node("nexus", true)]);
+        page.argv = "bash".into();
+        assert!(
+            page.build_terminal_request()
+                .unwrap_err()
+                .contains("does not offer a terminal")
+        );
+
+        let mut page = terminal_page();
+        page.secret_env = "PGPASSWORD".into();
+        assert!(
+            page.build_terminal_request()
+                .unwrap_err()
+                .contains("already interactive")
+        );
+
+        let mut page = terminal_page();
+        page.nodes_loaded(vec![{
+            let mut offline = terminal_node("zephyr");
+            offline.online = false;
+            offline
+        }]);
+        assert!(
+            page.build_terminal_request()
+                .unwrap_err()
+                .contains("offline")
+        );
+    }
+
+    #[test]
+    fn terminal_screen_rewrites_lines_and_drops_escapes() {
+        let mut terminal = Terminal {
+            command_id: "cmd-1".into(),
+            node_name: "zephyr".into(),
+            title: "bash".into(),
+            status: CommandStatus::Running,
+            exit_code: None,
+            message: None,
+            output: String::new(),
+            truncated: false,
+            focused: true,
+            col: 0,
+            esc: Esc::Ground,
+        };
+        // Colour codes are dropped, CRLF stays one newline, a bare CR rewrites
+        // the current line and a tab expands to the next tab stop.
+        terminal.feed(b"\x1b[32mzephyr\x1b[0m:~$ ");
+        terminal.feed(b"echo hi\r\n");
+        terminal.feed(b"10%\r20%\n");
+        terminal.feed(b"a\tb\n");
+        assert_eq!(terminal.output, "zephyr:~$ echo hi\n20%\na       b\n");
+    }
+
+    #[test]
+    fn terminal_screen_handles_escapes_split_across_chunks() {
+        let mut terminal = Terminal {
+            command_id: "cmd-1".into(),
+            node_name: "zephyr".into(),
+            title: "bash".into(),
+            status: CommandStatus::Running,
+            exit_code: None,
+            message: None,
+            output: String::new(),
+            truncated: false,
+            focused: true,
+            col: 0,
+            esc: Esc::Ground,
+        };
+        terminal.feed(b"one\x1b[");
+        terminal.feed(b"31mtwo\x1b]0;title\x07three");
+        terminal.feed(b"\x1b]8;;http://x\x1b\\four");
+        assert_eq!(terminal.output, "onetwothreefour");
+    }
+
+    #[test]
+    fn terminal_stream_never_becomes_a_command_card() {
+        let mut page = terminal_page();
+        let request = page.build_terminal_request().expect("terminal request");
+        let id = request.id.clone();
+        page.terminal_started(&request);
+        assert_eq!(page.terminal_input_id(), Some(id.as_str()));
+
+        let mut running = record(&id, CommandStatus::Running);
+        running.argv = request.argv.clone();
+        page.command_state(running);
+        assert!(
+            page.commands.is_empty(),
+            "terminal records stay off the list"
+        );
+        assert_eq!(
+            page.terminal.as_ref().unwrap().status,
+            CommandStatus::Running
+        );
+
+        page.stream(&id, StreamChannel::Pty, b"$ uptime\r\nload 0.1\r\n");
+        assert_eq!(
+            page.terminal.as_ref().unwrap().output,
+            "$ uptime\nload 0.1\n"
+        );
+        page.stream(&id, StreamChannel::Stdout, b"ignored");
+        assert_eq!(
+            page.terminal.as_ref().unwrap().output,
+            "$ uptime\nload 0.1\n"
+        );
+
+        page.command_state(record(&id, CommandStatus::Succeeded));
+        let terminal = page.terminal.as_ref().expect("terminal panel");
+        assert!(!terminal.focused);
+        assert!(!terminal.is_running());
+        assert_eq!(terminal.exit_code, None);
+        assert_eq!(page.terminal_input_id(), None);
+        assert!(page.commands.is_empty());
+        page.close_terminal();
+        assert!(page.terminal.is_none());
+    }
+
+    #[test]
+    fn detaching_a_terminal_keeps_the_session_alive() {
+        let mut page = terminal_page();
+        let request = page.build_terminal_request().expect("terminal request");
+        page.terminal_started(&request);
+        page.focus_terminal(false);
+        assert_eq!(page.terminal_input_id(), None);
+        assert!(page.terminal.as_ref().unwrap().is_running());
+        page.focus_terminal(true);
+        assert!(page.terminal_input_id().is_some());
     }
 
     #[test]

@@ -18,7 +18,7 @@ spec:
       valuesObject:
         image:
           repository: registry.registry.svc.cluster.local:5000/hermes/hub
-          digest: sha256:9c5bd4fe75d5f4dfb1bcafa099dd801b7c6087d8355ceee89416b9c412c88304
+          digest: sha256:528eb492d55e221efac551fa6efe558406721ee712e9305c1023c06ed687f5e7
           pullPolicy: IfNotPresent
   destination:
     server: https://kubernetes.default.svc

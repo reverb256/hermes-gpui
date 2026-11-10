@@ -803,6 +803,7 @@ mod tests {
             env: BTreeMap::new(),
             timeout_ms: 30_000,
             secret: None,
+            pty: None,
         }
     }
 

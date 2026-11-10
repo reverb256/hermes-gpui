@@ -11,8 +11,12 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::Response;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
-use hermes_protocol::{DeviceToHub, Frame, HubToDevice, MAX_FRAME_BYTES};
+use hermes_protocol::{
+    DeviceToHub, Frame, HubToDevice, MAX_FRAME_BYTES, MAX_PTY_INPUT_BYTES, PtySpec,
+};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
@@ -244,6 +248,66 @@ fn handle_device_message(
                 "command.cancel_requested",
                 json!({ "device_id": principal.id, "command_id": command_id }),
             );
+            Ok(())
+        }
+        DeviceToHub::TerminalInput {
+            command_id,
+            data_b64,
+        } => {
+            let data = STANDARD
+                .decode(&data_b64)
+                .map_err(|_| ApiError::bad_request("terminal input is not valid base64"))?;
+            if data.is_empty() {
+                return Ok(());
+            }
+            if data.len() > MAX_PTY_INPUT_BYTES {
+                return Err(ApiError::bad_request(format!(
+                    "terminal input must be 1..={MAX_PTY_INPUT_BYTES} bytes"
+                )));
+            }
+            // The bytes are forwarded untouched: they are never persisted,
+            // logged or audited, because a terminal may hold a typed secret.
+            let record = state
+                .db
+                .command(&command_id)?
+                .ok_or_else(|| ApiError::not_found("command not found"))?;
+            if record.status.is_terminal() {
+                return Err(ApiError::conflict("command already finished"));
+            }
+            if !state.send_node(
+                &record.node_id,
+                hermes_protocol::HubToNode::TerminalInput {
+                    command_id,
+                    data_b64,
+                },
+            ) {
+                return Err(ApiError::conflict("node is offline"));
+            }
+            Ok(())
+        }
+        DeviceToHub::TerminalResize {
+            command_id,
+            cols,
+            rows,
+        } => {
+            PtySpec { cols, rows }.validate()?;
+            let record = state
+                .db
+                .command(&command_id)?
+                .ok_or_else(|| ApiError::not_found("command not found"))?;
+            if record.status.is_terminal() {
+                return Err(ApiError::conflict("command already finished"));
+            }
+            if !state.send_node(
+                &record.node_id,
+                hermes_protocol::HubToNode::TerminalResize {
+                    command_id,
+                    cols,
+                    rows,
+                },
+            ) {
+                return Err(ApiError::conflict("node is offline"));
+            }
             Ok(())
         }
         DeviceToHub::PromptAnswer { answer } => {
