@@ -294,7 +294,8 @@ capture audio itself.
 
 Not yet wired: file browser, voice mode, multi-host switching, full Markdown
 formatting, general artifact previews, and advanced Kanban management. The
-composer handles printable keys, paste, backspace and enter; there is no IME
-composition or text selection yet. An isolated Hermes 0.20.3 host was used to
+composer uses GPUI's native multiline editor for cursor navigation, selection,
+undo and IME input; accessibility and platform behavior still need end-to-end
+validation. An isolated Hermes 0.20.3 host was used to
 verify the gateway probe and Kanban HTTP contracts; provider OAuth and the other
 new integrations have not yet been verified end to end.

@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, FocusHandle, Focusable, KeyDownEvent, Render, ScrollHandle, SharedString, Window, div,
-    px, rgb, rgba,
+    Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render, ScrollHandle, SharedString,
+    Subscription, Window, div, px, rgb, rgba,
 };
+use gpui_ce_elements::editable_text::{EditableTextState, StringStorage, TextChanged, text_area};
 use hermes_api::{ActiveProfile, HostConfig, Profile, SkillHubPreview};
 use hermes_rpc::ConnectionState;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -93,6 +94,8 @@ pub struct HermesApp {
     session_id: Option<String>,
     lines: Vec<Line>,
     composer: String,
+    composer_input: Entity<EditableTextState>,
+    _composer_subscription: Subscription,
     palette: Palette,
     mention: Mention,
     cards: Vec<Card>,
@@ -148,6 +151,13 @@ impl HermesApp {
     ) -> Self {
         let (backend, events) = Backend::spawn(host.clone());
         let tray = tray::spawn();
+        let composer_input = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
+        let composer_subscription =
+            cx.subscribe(&composer_input, |this, input, _: &TextChanged, cx| {
+                this.composer = input.read(cx).as_str().to_string();
+                this.refresh_mention();
+                cx.notify();
+            });
 
         let mut app = Self {
             host,
@@ -158,6 +168,8 @@ impl HermesApp {
             session_id: None,
             lines: Vec::new(),
             composer: String::new(),
+            composer_input,
+            _composer_subscription: composer_subscription,
             palette: Palette::default(),
             mention: Mention::default(),
             cards: Vec::new(),
@@ -725,7 +737,7 @@ impl HermesApp {
 
     // ---- keyboard -------------------------------------------------------
 
-    fn on_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Settings is modal: it owns the keyboard while it is up, so chat
         // shortcuts cannot fire behind it.
         if self.settings.open {
@@ -793,6 +805,56 @@ impl HermesApp {
             return;
         }
         let keystroke = &event.keystroke;
+        if self.composer_input.focus_handle(cx).is_focused(window) && !self.palette.open {
+            let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
+            let app_shortcut = primary
+                && matches!(
+                    keystroke.key.as_str(),
+                    "k" | "n"
+                        | "r"
+                        | "o"
+                        | ","
+                        | "comma"
+                        | "1"
+                        | "2"
+                        | "3"
+                        | "4"
+                        | "5"
+                        | "6"
+                        | "7"
+                        | "8"
+                        | "9"
+                )
+                || primary
+                    && keystroke.modifiers.shift
+                    && matches!(keystroke.key.as_str(), "v" | "m" | "a" | "s" | "u" | "x");
+            let mention_key = self.mention.open
+                && matches!(
+                    keystroke.key.as_str(),
+                    "up" | "down" | "tab" | "enter" | "escape"
+                );
+            if !app_shortcut
+                && !mention_key
+                && keystroke.key != "escape"
+                && !(keystroke.key == "enter" && !keystroke.modifiers.shift && !primary)
+            {
+                return;
+            }
+            if keystroke.key == "enter" && !keystroke.modifiers.shift && !primary {
+                let composing = self.composer_input.update(cx, |input, cx| {
+                    gpui::EntityInputHandler::marked_text_range(input, window, cx).is_some()
+                });
+                if composing {
+                    return;
+                }
+            }
+            if (keystroke.key == "enter" && !keystroke.modifiers.shift && !primary)
+                || mention_key
+                || app_shortcut
+            {
+                cx.stop_propagation();
+            }
+        }
         let focus = if self.palette.open {
             Focus::Palette
         } else if self.mention.open {
@@ -976,6 +1038,8 @@ impl HermesApp {
                 self.composer.push(' ');
             }
         }
+        self.composer_input
+            .update(cx, |input, cx| input.emplace(&self.composer, cx));
         self.mention = Mention::default();
         cx.notify();
     }
@@ -997,6 +1061,8 @@ impl HermesApp {
             return;
         }
         self.composer.clear();
+        self.composer_input
+            .update(cx, |input, cx| input.emplace("", cx));
         self.mention = Mention::default();
         self.lines.push(Line::new(Role::User, prompt.clone()));
         self.lines.push(Line::new(Role::Assistant, String::new()));
@@ -6422,6 +6488,8 @@ impl HermesApp {
 
     fn use_suggestion(&mut self, text: &str, cx: &mut Context<Self>) {
         self.composer = text.to_string();
+        self.composer_input
+            .update(cx, |input, cx| input.emplace(text, cx));
         cx.notify();
     }
 
@@ -8951,24 +9019,18 @@ impl HermesApp {
             )
         };
 
-        let mut input = div().flex().flex_col().gap_1().flex_1().min_w_0();
-        if empty {
-            input = input.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(text_dim()))
-                    .child(SharedString::from(placeholder)),
-            );
-        } else {
-            for part in self.composer.split('\n') {
-                input = input.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(text()))
-                        .child(SharedString::from(part.to_string())),
-                );
-            }
-        }
+        let input = div().flex_1().min_w_0().child(
+            text_area("composer-input")
+                .role(gpui::Role::TextInput)
+                .aria_label("Message composer")
+                .aria_value(SharedString::from(self.composer.clone()))
+                .accepts_input(self.viewing_history.is_none())
+                .state(self.composer_input.downgrade())
+                .placeholder(placeholder)
+                .w_full()
+                .text_sm()
+                .text_color(rgb(text())),
+        );
 
         div()
             .flex()
@@ -9932,9 +9994,19 @@ impl HermesApp {
 
 impl Render for HermesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.focused = self.focus.is_focused(window);
+        let modal = self.settings.open
+            || self.sessions.open
+            || self.rail_search
+            || self.inspector.focus.is_some()
+            || self.palette.open;
+        let target = if modal {
+            self.focus.clone()
+        } else {
+            self.composer_input.focus_handle(cx)
+        };
+        self.focused = target.is_focused(window);
         if !self.focused {
-            window.focus(&self.focus, cx);
+            window.focus(&target, cx);
         }
 
         let palette = if self.palette.open {
@@ -9955,10 +10027,13 @@ impl Render for HermesApp {
             .flex()
             .flex_col()
             .size_full()
+            .track_focus(&self.focus)
             .bg(rgb(bg()))
             .text_color(rgb(text()))
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _window, cx| this.on_key(event, cx)),
+            .capture_key_down(
+                cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.on_key(event, window, cx)
+                }),
             )
             .child(self.header(cx))
             // Rail, conversation and inspector share one full-height row; the

@@ -14,7 +14,8 @@ All notable changes to this project are documented here. The format follows
 - MoA preset editor, cron job controls and provider OAuth accounts page.
 - MCP OAuth browser hand-off and Kanban board selection, task title editing,
   confirmed deletion, status transitions and triage task creation.
-- Basic streamed Markdown block rendering and composer clipboard paste.
+- Basic streamed Markdown block rendering and a GPUI multiline composer with
+  selection, editing shortcuts, IME support and an accessible label.
 - Readable derived Omarchy theme hints and explicit offline-action errors.
 - Larger settings navigation and refreshed session cards using theme tokens.
 - Skills-hub browser: source-wide search, SKILL.md and manifest preview, the

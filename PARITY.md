@@ -31,7 +31,7 @@ product work beyond this GPUI repository.
 | Editable drafts and review before external send | Missing; needs host-supported draft/approval lifecycle. |
 | Message copy, selection, editing, retry and fork | Missing; verify host semantics before implementing. |
 | Search within transcripts, navigation and large histories | Missing; measure virtualization and loading on real large sessions. |
-| Composer text selection, cursor navigation, undo/redo, IME | Missing; replace manual key handling with accessible real text input. |
+| Composer text selection, cursor navigation, undo/redo, IME | Partial: GPUI editable-text primitive, labeled text input and native selection/IME handling; end-to-end keyboard, assistive technology and platform validation remain. |
 | Keyboard shortcuts and command palette | Partial; audit actual behavior and reachability against both products. |
 | Mentions | Partial: profile mention UI; groups, routines, apps and completion semantics missing. |
 | Accessibility | Missing audit: keyboard focus, screen readers, labels, contrast, scaling and reduced motion. |

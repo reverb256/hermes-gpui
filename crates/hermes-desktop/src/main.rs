@@ -20,6 +20,7 @@ mod vault;
 mod voice;
 
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui_ce_elements::editable_text::actions::{DEFAULT_INPUT_CONTEXT, default_bindings};
 use hermes_api::HostConfig;
 
 fn main() {
@@ -64,6 +65,7 @@ fn main() {
     };
 
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT)));
         let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

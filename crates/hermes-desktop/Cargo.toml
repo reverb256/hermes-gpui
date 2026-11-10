@@ -27,3 +27,4 @@ tokio = { workspace = true, features = ["fs", "process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 pulldown-cmark = { version = "0.13.6", default-features = false }
+gpui_ce_elements = "=0.3.0"
