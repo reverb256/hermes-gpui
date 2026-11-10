@@ -44,7 +44,7 @@ weeks and lands first because it is useful without the hub.
 | --- | --- |
 | Client (`hermes-gpui`) | In progress — chat, sessions, profiles, skills, MCP, cron, memory, Kanban details/comments/attachments, transcript find, Omarchy theme/notifications/bar widget, building PKGBUILD |
 | Host agent (`hermes-agent`) | Mature single-user agent; needs token auth for remote access, pagination, typed events, screen/input, sync, artifacts and voice |
-| Personal hub (`hermes-hub`) | In progress — pairing, host registry, command routing, audit and secret-prompt broker built; Tailscale/ArgoCD deployment and client picker pending |
+| Personal hub (`hermes-hub`) | In progress — deployed to k3s through ArgoCD and reachable over Tailscale; pairing, host registry, command routing, audit and node picker built; file, screen, browser and GPU executors pending |
 
 ## Target shape
 
@@ -167,7 +167,7 @@ reconnect or expiry invalidates the challenge.
 
 | ID | Workstream | Phase | Status |
 | --- | --- | --- | --- |
-| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | In progress — hub, chart and enrolment exist; not deployed |
+| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | In progress — hub runs in k3s through ArgoCD, chart and pairing exist, all four nodes are enrolled; a per-host command through the client is the remaining Phase 0 check |
 | B | Node agents, capability registry, remote execution and screen/input relay | 0–2 | In progress — outbound agent, shell execution and streams; screen/input pending |
 | C | Connectors, vault and credentials | 3 | Not started |
 | D | Sync, continuity and notifications | 4 | Not started |
@@ -186,7 +186,7 @@ Anything marked **Blocked** stays out of the UI rather than shipping a stub.
 | S1 | `--version` / `--help` CLI | none | Not started |
 | S1 | Command palette coverage and complete key map | none | Not started |
 | S1 | Markdown link activation with scheme allowlist | none | Not started |
-| S1 | Correct stale parity/roadmap claims | none | In progress (this update) |
+| S1 | Correct stale parity/roadmap claims | none | Done — hub deployment, client node picker and terminal surfaces now match what the client ships |
 | S2 | Transcript find | none | Done — `Ctrl+F`, highlighting, match cycling |
 | S2 | Older-turn pagination, virtualization, text selection | host pagination; none for virtualization | In progress — search done; pagination, virtualization and selection remain |
 | S2 | Edit/retry/fork, replies, reactions, drafts | host persistence and gateway lifecycle | Blocked |
