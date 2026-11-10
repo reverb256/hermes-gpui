@@ -925,7 +925,10 @@ mod tests {
         // Layout bounds are the padded box: 8 px each side is not text, so the
         // same panel measures 884×464 of content — two fewer columns, one fewer row.
         assert_eq!(geometry_for_bounds(900.0, 480.0), (122, 30));
-        assert_eq!(geometry_for_bounds(900.0, 480.0), geometry_for(884.0, 464.0));
+        assert_eq!(
+            geometry_for_bounds(900.0, 480.0),
+            geometry_for(884.0, 464.0)
+        );
         // An unlaid-out element keeps the defaults rather than reporting 1×1.
         assert_eq!(geometry_for(0.0, 0.0), (TERMINAL_COLS, TERMINAL_ROWS));
         assert_eq!(geometry_for(f32::NAN, 10.0), (TERMINAL_COLS, TERMINAL_ROWS));
