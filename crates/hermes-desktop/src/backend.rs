@@ -262,6 +262,11 @@ pub enum BackendEvent {
         created: bool,
     },
     KanbanBoardSaveFailed(String),
+    KanbanBoardRemoved {
+        slug: String,
+        hard: bool,
+    },
+    KanbanBoardRemoveFailed(String),
     KanbanDetail {
         board: String,
         id: String,
@@ -483,6 +488,10 @@ pub enum Command {
         slug: String,
         name: String,
     },
+    RemoveKanbanBoard {
+        slug: String,
+        hard: bool,
+    },
     LoadKanban {
         board: Option<String>,
     },
@@ -663,6 +672,7 @@ fn offline_event(command: Command) -> BackendEvent {
         Command::CreateKanbanBoard { .. } | Command::RenameKanbanBoard { .. } => {
             BackendEvent::KanbanBoardSaveFailed(message)
         }
+        Command::RemoveKanbanBoard { .. } => BackendEvent::KanbanBoardRemoveFailed(message),
         Command::LoadKanbanBoards
         | Command::LoadKanban { .. }
         | Command::CreateKanbanTask { .. }
@@ -1063,6 +1073,21 @@ async fn worker(
                                     }
                                 }
                                 Err(err) => { let _ = events.send(BackendEvent::KanbanBoardSaveFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::RemoveKanbanBoard { slug, hard } => {
+                            match rest.delete_kanban_board(&slug, hard).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::KanbanBoardRemoved { slug, hard });
+                                    match rest.kanban_boards().await {
+                                        Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
+                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                }
+                                Err(err) => {
+                                    let message = err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::KanbanBoardRemoveFailed(message));
+                                }
                             }
                         }
                         Command::LoadKanbanBoards => match rest.kanban_boards().await {
@@ -2394,6 +2419,13 @@ mod tests {
 
     #[test]
     fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::RemoveKanbanBoard {
+                slug: "work".into(),
+                hard: false
+            }),
+            BackendEvent::KanbanBoardRemoveFailed(_)
+        ));
         assert!(matches!(
             offline_event(Command::UpdateKanbanDetail {
                 board: "work".into(),

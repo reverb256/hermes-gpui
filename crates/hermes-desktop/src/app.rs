@@ -128,6 +128,8 @@ pub struct HermesApp {
     kanban_board_draft: Option<String>,
     kanban_board_renaming: Option<String>,
     kanban_board_saving: bool,
+    /// Board removal awaiting a second click: `(slug, hard_delete)`.
+    kanban_board_remove: Option<(String, bool)>,
     kanban_detail_target: Option<(String, String)>,
     kanban_detail: Option<hermes_api::KanbanTaskDetail>,
     kanban_comment_draft: Option<String>,
@@ -214,6 +216,7 @@ impl HermesApp {
             kanban_board_draft: None,
             kanban_board_renaming: None,
             kanban_board_saving: false,
+            kanban_board_remove: None,
             kanban_detail_target: None,
             kanban_detail: None,
             kanban_comment_draft: None,
@@ -527,6 +530,27 @@ impl HermesApp {
             }
             BackendEvent::KanbanBoardSaveFailed(message) => {
                 self.kanban_board_saving = false;
+                self.kanban_status = Some(message);
+            }
+            BackendEvent::KanbanBoardRemoved { slug, hard } => {
+                self.kanban_board_remove = None;
+                self.kanban_detail_target = None;
+                self.kanban_detail = None;
+                self.kanban_body_draft = None;
+                self.kanban_assignee_draft = None;
+                self.kanban_priority_draft = None;
+                if self.kanban_selected.as_deref() == Some(slug.as_str()) {
+                    self.kanban_selected = None;
+                    self.kanban = None;
+                }
+                self.kanban_status = Some(if hard {
+                    format!("Board {slug} deleted.")
+                } else {
+                    format!("Board {slug} archived.")
+                });
+            }
+            BackendEvent::KanbanBoardRemoveFailed(message) => {
+                self.kanban_board_remove = None;
                 self.kanban_status = Some(message);
             }
             BackendEvent::KanbanDetail { board, id, detail } => {
@@ -2739,6 +2763,7 @@ impl HermesApp {
                                 this.kanban_detail_target = None;
                                 this.kanban_detail = None;
                                 this.kanban_attachment_delete = None;
+                                this.kanban_board_remove = None;
                                 this.kanban_body_draft = None;
                                 this.kanban_assignee_draft = None;
                                 this.kanban_priority_draft = None;
@@ -2758,6 +2783,120 @@ impl HermesApp {
                 );
             }
             list = list.child(choices);
+        }
+        if let Some(selected) = &self.kanban_selected {
+            let archive_pending =
+                self.kanban_board_remove.as_ref() == Some(&(selected.clone(), false));
+            let delete_pending =
+                self.kanban_board_remove.as_ref() == Some(&(selected.clone(), true));
+            let archive_slug = selected.clone();
+            let delete_slug = selected.clone();
+            let archive_label = if archive_pending {
+                "Confirm archive"
+            } else {
+                "Archive board"
+            };
+            let delete_label = if delete_pending {
+                "Confirm delete"
+            } else {
+                "Delete board"
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("kanban-board-archive")
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.kanban_board_saving
+                                    || this.kanban_detail_saving
+                                    || this.kanban_attachment_busy
+                                    || this.kanban_comment_saving
+                                {
+                                    return;
+                                }
+                                if this.kanban_board_remove.as_ref()
+                                    == Some(&(archive_slug.clone(), false))
+                                {
+                                    this.kanban_board_remove = None;
+                                    this.kanban_status = Some("Archiving board…".into());
+                                    this.backend.send(Command::RemoveKanbanBoard {
+                                        slug: archive_slug.clone(),
+                                        hard: false,
+                                    });
+                                } else {
+                                    this.kanban_board_remove =
+                                        Some((archive_slug.clone(), false));
+                                    this.kanban_status = Some(
+                                        "Archive this board? Click again to confirm; its tasks stay on disk."
+                                            .into(),
+                                    );
+                                }
+                                cx.notify();
+                            }))
+                            .child(archive_label),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-board-delete")
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(danger()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.kanban_board_saving
+                                    || this.kanban_detail_saving
+                                    || this.kanban_attachment_busy
+                                    || this.kanban_comment_saving
+                                {
+                                    return;
+                                }
+                                if this.kanban_board_remove.as_ref()
+                                    == Some(&(delete_slug.clone(), true))
+                                {
+                                    this.kanban_board_remove = None;
+                                    this.kanban_status = Some("Deleting board…".into());
+                                    this.backend.send(Command::RemoveKanbanBoard {
+                                        slug: delete_slug.clone(),
+                                        hard: true,
+                                    });
+                                } else {
+                                    this.kanban_board_remove = Some((delete_slug.clone(), true));
+                                    this.kanban_status = Some(
+                                        "Delete this board and its tasks permanently? Click again to confirm."
+                                            .into(),
+                                    );
+                                }
+                                cx.notify();
+                            }))
+                            .child(delete_label),
+                    )
+                    .when(self.kanban_board_remove.is_some(), |this| {
+                        this.child(
+                            div()
+                                .id("kanban-board-remove-cancel")
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(text_muted()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.kanban_board_remove = None;
+                                    this.kanban_status = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        )
+                    }),
+            );
         }
         if let Some(board) = &self.kanban {
             for column in &board.columns {

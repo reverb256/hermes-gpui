@@ -95,7 +95,7 @@ product work beyond this GPUI repository.
 | Routine ownership, shared access and approvals | Missing; backend permissions and audit needed. |
 | Kanban current board and basic status transitions | Partial: `/api/plugins/kanban/board` and task PATCH; optional plugin required; transitions are host-validated. |
 | Kanban create/edit/delete tasks, comments and attachments | Partial: title-only triage creation, title/description/assignee/priority editing, confirmed deletion, comments and attachments (upload/save/remove); priority, model overrides and other task fields remain. |
-| Board selection, creation, settings, archive and deletion | Partial: local selection, creation and display-name editing; other settings, archive and deletion remain. |
+| Board selection, creation, settings, archive and deletion | Partial: local selection, creation, display-name editing, confirmed archive and confirmed hard delete; description/icon/colour and workdir settings remain. |
 | Drag/drop, filters, search, bulk actions and live updates | Missing; plugin supports events; define conflict/error behavior. |
 | Assignees, dependencies, scheduling, review and workers | Missing beyond simple next-status action; respect transition constraints. |
 | Task detail, diagnostics, runs, logs and recovery | Partial: description, assignee, summary, result, comments and attachments; diagnostics, runs, logs and recovery remain. Verified against an isolated Hermes 0.20.3 host for scoped detail/comment/attachment routes. |

@@ -1619,6 +1619,24 @@ impl RestClient {
         serde_json::from_value(value).map_err(|source| ApiError::Decode { path, source })
     }
 
+    /// Archive (default) or hard-delete a board. The host also prunes its own
+    /// current-board pointer, so the caller only has to fix client selection.
+    pub async fn delete_kanban_board(&self, slug: &str, hard: bool) -> Result<Value, ApiError> {
+        let path = format!(
+            "/api/plugins/kanban/boards/{}?delete={hard}",
+            percent_encode(slug)
+        );
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
     /// Read a board from the optional Kanban plugin.
     pub async fn kanban_board(&self, board: Option<&str>) -> Result<KanbanBoard, ApiError> {
         self.get(&kanban_scoped_path("/api/plugins/kanban/board", board))
@@ -3037,6 +3055,12 @@ mod tests {
             .unwrap();
         let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
         assert!(detail.attachments.is_empty());
+        // Archiving is the plugin's default removal path and must not touch
+        // the host's active board.
+        client.delete_kanban_board(&slug, false).await.unwrap();
+        let boards = client.kanban_boards().await.unwrap();
+        assert!(!boards.boards.iter().any(|board| board.slug == slug));
+
         // The selected board is client-local: nothing leaked into the host's
         // active board.
         let active = client.kanban_board(None).await.unwrap();

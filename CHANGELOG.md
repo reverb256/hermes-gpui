@@ -14,7 +14,8 @@ All notable changes to this project are documented here. The format follows
 - MoA preset editor, cron job controls and provider OAuth accounts page.
 - MCP OAuth browser hand-off and Kanban board selection, creation and renaming, task title editing,
   confirmed deletion, status transitions, triage task creation, task details, comments
-  and attachments (upload, save and remove), with description, assignee and priority editing; session history pages beyond the first 50 rows and replies can be copied to the clipboard.
+  and attachments (upload, save and remove), with description, assignee and priority editing,
+  plus confirmed board archive and deletion; session history pages beyond the first 50 rows and replies can be copied to the clipboard.
 - Streamed Markdown block and inline styling and a GPUI multiline composer with
   selection, editing shortcuts, IME support and an accessible label.
 - Readable derived Omarchy theme hints and explicit offline-action errors.
