@@ -7759,6 +7759,33 @@ impl HermesApp {
                             MarkdownBlock::ListItem(value) => (value, false, false, false, true),
                             MarkdownBlock::Image(_) => unreachable!(),
                         };
+                        let prefix = if item { "• " } else { "" };
+                        let highlights = value
+                            .spans
+                            .into_iter()
+                            .map(|span| {
+                                let style = gpui::HighlightStyle {
+                                    font_weight: span.bold.then_some(gpui::FontWeight::BOLD),
+                                    font_style: span.italic.then_some(gpui::FontStyle::Italic),
+                                    background_color: span
+                                        .code
+                                        .then(|| gpui::HighlightStyle::from(rgb(bg_elev())).color)
+                                        .flatten(),
+                                    color: span
+                                        .link
+                                        .then(|| gpui::HighlightStyle::from(rgb(accent())).color)
+                                        .flatten(),
+                                    ..Default::default()
+                                };
+                                (
+                                    (span.range.start + prefix.len())
+                                        ..(span.range.end + prefix.len()),
+                                    style,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let styled = gpui::StyledText::new(format!("{prefix}{}", value.text))
+                            .with_highlights(highlights);
                         body = body.child(
                             div()
                                 .text_sm()
@@ -7774,11 +7801,7 @@ impl HermesApp {
                                         .rounded_md()
                                 })
                                 .when(quote, |v| v.pl_3().border_l_2().border_color(rgb(accent())))
-                                .child(SharedString::from(if item {
-                                    format!("• {value}")
-                                } else {
-                                    value
-                                })),
+                                .child(styled),
                         );
                     }
                 }

@@ -54,14 +54,39 @@ pub fn host_image_path(line: &str) -> Option<&str> {
         .then_some(path)
 }
 
+/// Inline ranges are UTF-8 byte offsets suitable for GPUI's StyledText.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MarkdownText {
+    pub text: String,
+    pub spans: Vec<MarkdownSpan>,
+}
+
+impl From<&str> for MarkdownText {
+    fn from(value: &str) -> Self {
+        Self {
+            text: value.to_string(),
+            spans: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MarkdownSpan {
+    pub range: std::ops::Range<usize>,
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+    pub link: bool,
+}
+
 /// Renderable Markdown blocks. Links remain text; remote content is never fetched.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MarkdownBlock {
-    Paragraph(String),
-    Heading(String),
-    Code(String),
-    Quote(String),
-    ListItem(String),
+    Paragraph(MarkdownText),
+    Heading(MarkdownText),
+    Code(MarkdownText),
+    Quote(MarkdownText),
+    ListItem(MarkdownText),
     Image(String),
 }
 
@@ -75,8 +100,8 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
         Quote,
         Item,
     }
-    fn finish(blocks: &mut Vec<MarkdownBlock>, text: &mut String, kind: Kind) {
-        if text.is_empty() {
+    fn finish(blocks: &mut Vec<MarkdownBlock>, text: &mut MarkdownText, kind: Kind) {
+        if text.text.is_empty() {
             return;
         }
         let content = std::mem::take(text);
@@ -89,7 +114,10 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
         });
     }
     let mut blocks = Vec::new();
-    let mut text = String::new();
+    let mut text = MarkdownText::default();
+    let mut bold = 0usize;
+    let mut italic = 0usize;
+    let mut link = 0usize;
     let mut kind = Kind::Paragraph;
     let mut quote = false;
     let mut item = false;
@@ -119,6 +147,12 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
                     Kind::Paragraph
                 };
             }
+            Event::Start(Tag::Strong) => bold += 1,
+            Event::End(TagEnd::Strong) => bold = bold.saturating_sub(1),
+            Event::Start(Tag::Emphasis) => italic += 1,
+            Event::End(TagEnd::Emphasis) => italic = italic.saturating_sub(1),
+            Event::Start(Tag::Link { .. }) => link += 1,
+            Event::End(TagEnd::Link) => link = link.saturating_sub(1),
             Event::Start(Tag::Image { dest_url, .. }) => {
                 image = Some(dest_url.to_string());
             }
@@ -138,13 +172,31 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
                 finish(&mut blocks, &mut text, Kind::Item);
                 item = false;
             }
-            Event::Text(value) | Event::Code(value) => text.push_str(&value),
-            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            event @ (Event::Text(_) | Event::Code(_)) => {
+                let (value, code) = match event {
+                    Event::Text(value) => (value, false),
+                    Event::Code(value) => (value, true),
+                    _ => unreachable!(),
+                };
+                let start = text.text.len();
+                text.text.push_str(&value);
+                let end = text.text.len();
+                if start < end && (bold > 0 || italic > 0 || link > 0 || code) {
+                    text.spans.push(MarkdownSpan {
+                        range: start..end,
+                        bold: bold > 0,
+                        italic: italic > 0,
+                        code,
+                        link: link > 0,
+                    });
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => text.text.push('\n'),
             Event::Rule => {
                 finish(&mut blocks, &mut text, kind);
                 blocks.push(MarkdownBlock::Paragraph("────────".into()));
             }
-            Event::Html(value) | Event::InlineHtml(value) => text.push_str(&value),
+            Event::Html(value) | Event::InlineHtml(value) => text.text.push_str(&value),
             _ => {}
         }
     }
@@ -183,7 +235,16 @@ mod tests {
             markdown_blocks("# Heading\n\nHello **world**\n\n```rust\nlet x = 1;\n```"),
             vec![
                 MarkdownBlock::Heading("Heading".into()),
-                MarkdownBlock::Paragraph("Hello world".into()),
+                MarkdownBlock::Paragraph(MarkdownText {
+                    text: "Hello world".into(),
+                    spans: vec![MarkdownSpan {
+                        range: 6..11,
+                        bold: true,
+                        italic: false,
+                        code: false,
+                        link: false
+                    }]
+                }),
                 MarkdownBlock::Code("let x = 1;\n".into()),
             ]
         );
@@ -203,6 +264,40 @@ mod tests {
             !markdown_blocks("![remote](https://example.test/a.png)")
                 .iter()
                 .any(|block| matches!(block, MarkdownBlock::Image(_)))
+        );
+    }
+
+    #[test]
+    fn markdown_inline_spans_are_non_overlapping_utf8_offsets() {
+        let blocks = markdown_blocks("é **bold *both*** and `code` [link](https://example.test)");
+        let MarkdownBlock::Paragraph(text) = &blocks[0] else {
+            panic!("expected paragraph")
+        };
+        assert!(
+            text.spans
+                .iter()
+                .all(|span| text.text.is_char_boundary(span.range.start)
+                    && text.text.is_char_boundary(span.range.end))
+        );
+        assert!(
+            text.spans
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start)
+        );
+        assert!(
+            text.spans
+                .iter()
+                .any(|span| span.bold && span.italic && &text.text[span.range.clone()] == "both")
+        );
+        assert!(
+            text.spans
+                .iter()
+                .any(|span| span.code && &text.text[span.range.clone()] == "code")
+        );
+        assert!(
+            text.spans
+                .iter()
+                .any(|span| span.link && &text.text[span.range.clone()] == "link")
         );
     }
 

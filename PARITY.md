@@ -23,7 +23,7 @@ product work beyond this GPUI repository.
 | Send another instruction while a turn is active | Missing; verify host steer/queue semantics and surface them safely. |
 | Approval and clarification cards | Partial; audit every gateway request type, choices, expiration, multiple concurrent requests and reconnect replay. |
 | Secret, password and sudo prompts | Unknown; audit gateway prompt types and safe masking. |
-| Markdown, code blocks, syntax highlighting, copy | Partial: CommonMark block parsing, headings, lists, quotes and code blocks; inline styles, links, syntax highlighting and copy remain. |
+| Markdown, code blocks, syntax highlighting, copy | Partial: CommonMark blocks and inline bold, italic, code and link styling; link activation, syntax highlighting and copy remain. |
 | Links and safe external navigation | Partial; audit schemes, confirmation and remote content handling. |
 | Image, file and other attachments | Partial: file picker/upload; audit multi-file, paste, previews, size limits and failures. |
 | Inline images | Partial: explicit load for standalone host-local PNG/JPEG/WebP references; no general media or arbitrary remote fetching. |
