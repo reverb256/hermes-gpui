@@ -1,6 +1,6 @@
 # 0001. Three-layer architecture: client, host agent, platform
 
-- **Status:** Accepted
+- **Status:** Accepted for layers 1–2; layer 3 updated by ADR-0007 for the single-user build
 - **Date:** 2026-11-10
 - **Deciders:** client and platform maintainers
 
@@ -23,8 +23,9 @@ Keep three layers with explicit contracts:
    control plane.
 2. **Host agent** — `hermes-agent`, runs per user (or per sandbox) and stays
    usable standalone with no control plane.
-3. **Platform** — `hermes-control` plus a sandbox fleet, owning identity,
-   sharing, policy, audit, sync, metering and distribution.
+3. **Platform** — `hermes-hub` for the personal build (one owner, outbound node
+   agents, audit and sync), with a sandbox fleet as later work. The original
+   multi-tenant `hermes-control` design is withdrawn; see ADR-0007.
 
 The client feature-detects: a plain host still works; control-plane features
 appear when the host/control plane advertises them.

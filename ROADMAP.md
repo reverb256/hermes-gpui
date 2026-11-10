@@ -44,7 +44,7 @@ weeks and lands first because it is useful without the hub.
 | --- | --- |
 | Client (`hermes-gpui`) | In progress — chat, sessions, profiles, skills, MCP, cron, memory, Kanban details/comments/attachments, transcript find, Omarchy theme/notifications/bar widget, building PKGBUILD |
 | Host agent (`hermes-agent`) | Mature single-user agent; needs token auth for remote access, pagination, typed events, screen/input, sync, artifacts and voice |
-| Personal hub (`hermes-control`) | Not started — single-owner OCI service for pairing, host registry, sync and push |
+| Personal hub (`hermes-hub`) | In progress — pairing, host registry, command routing, audit and secret-prompt broker built; Tailscale/ArgoCD deployment and client picker pending |
 
 ## Target shape
 
@@ -58,8 +58,8 @@ GPUI client ──Tailscale/WSS──► hermes-hub (k3s, OCI)
                                            screen, browser, GPU, host services
 ```
 
-The hub is single-tenant by construction: one owner row, no orgs, roles or
-tenancy columns. It does not reach into machines; every computer runs
+The hub is single-owner by construction: one admin credential, no orgs, roles
+or tenancy columns. It does not reach into machines; every computer runs
 `hermes-node`, which dials **out** to the hub over WSS/mTLS, registers its
 capabilities and executes commands locally under its own policy. This is the
 Grok Bot shape: the installed client is the agent on that computer, and the
