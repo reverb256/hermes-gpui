@@ -22,6 +22,8 @@ pub struct Sessions {
     pub error: Option<String>,
     pub rows: Vec<hermes_api::SessionSummary>,
     pub total: u64,
+    /// How many rows the next page should skip.
+    pub offset: u32,
     pub query: String,
     pub focus: bool,
     pub status: Option<String>,
@@ -32,10 +34,30 @@ pub struct Sessions {
 
 impl Sessions {
     pub fn loaded(&mut self, rows: Vec<hermes_api::SessionSummary>, total: u64) {
-        self.rows = rows;
         self.total = total;
+        self.offset = rows.len() as u32;
+        self.rows = rows;
         self.error = None;
         self.loaded = true;
+    }
+
+    /// Append a later page. A session created between two requests can shift
+    /// the window, so rows already held are skipped rather than duplicated.
+    pub fn append(&mut self, rows: Vec<hermes_api::SessionSummary>, total: u64) {
+        for row in rows {
+            if !self.rows.iter().any(|held| held.id == row.id) {
+                self.rows.push(row);
+            }
+        }
+        self.total = total;
+        self.offset = self.rows.len() as u32;
+        self.error = None;
+        self.loaded = true;
+    }
+
+    /// True when the host reports more rows than the rail currently holds.
+    pub fn has_more(&self) -> bool {
+        self.loaded && self.error.is_none() && (self.rows.len() as u64) < self.total
     }
 
     pub fn failed(&mut self, message: String) {
@@ -292,6 +314,21 @@ mod tests {
         assert_eq!(lines[2].text, "hello");
         assert!(lines[3].text.starts_with("⚙ shell:"));
         assert_eq!(lines[4].text, "part");
+    }
+
+    #[test]
+    fn appending_pages_dedupes_and_tracks_the_next_offset() {
+        let mut sessions = Sessions::default();
+        sessions.loaded(vec![row("a", "", 2, 100.0), row("b", "", 2, 90.0)], 5);
+        assert_eq!(sessions.offset, 2);
+        assert!(sessions.has_more());
+        sessions.append(vec![row("b", "", 2, 90.0), row("c", "", 2, 80.0)], 5);
+        assert_eq!(sessions.rows.len(), 3);
+        assert_eq!(sessions.offset, 3);
+        assert!(sessions.rows.iter().any(|held| held.id == "id-c"));
+        sessions.append(vec![row("d", "", 2, 70.0), row("e", "", 2, 60.0)], 5);
+        assert_eq!(sessions.rows.len(), 5);
+        assert!(!sessions.has_more());
     }
 
     #[test]

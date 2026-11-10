@@ -207,7 +207,7 @@ host-validated status transitions, title-only triage task creation and editing,
 and two-click task deletion. Boards can be created and their display names edited
 without changing the host's active board. Task details show descriptions, summaries,
 results, comments and attachments; comments can be added and attachments
-uploaded, saved and removed, and a task's description and assignee can be edited.
+uploaded, saved and removed, and a task's description, assignee and priority can be edited.
 Other board settings, archive and drag-and-drop are not yet implemented.
 
 **Memory** lists discovered providers, opens a schema-driven **Configure** form

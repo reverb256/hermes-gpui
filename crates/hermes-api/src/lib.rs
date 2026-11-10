@@ -1043,6 +1043,8 @@ pub struct KanbanTask {
     pub title: String,
     pub status: String,
     pub assignee: Option<String>,
+    #[serde(default)]
+    pub priority: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1084,6 +1086,8 @@ pub struct KanbanDetailedTask {
     pub assignee: Option<String>,
     pub latest_summary: Option<String>,
     pub result: Option<String>,
+    #[serde(default)]
+    pub priority: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2004,10 +2008,11 @@ impl RestClient {
     }
 
     /// `GET /api/sessions` — newest conversations, excluding archived rows.
-    pub async fn sessions(&self, limit: u32) -> Result<SessionPage, ApiError> {
+    /// `offset` pages past the first window instead of stopping at the cap.
+    pub async fn sessions(&self, limit: u32, offset: u32) -> Result<SessionPage, ApiError> {
         let limit = limit.clamp(1, 200);
         self.get(&format!(
-            "/api/sessions?limit={limit}&offset=0&min_messages=1&archived=exclude&order=recent"
+            "/api/sessions?limit={limit}&offset={offset}&min_messages=1&archived=exclude&order=recent"
         ))
         .await
     }
@@ -2989,6 +2994,13 @@ mod tests {
         let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
         assert_eq!(detail.task.body.as_deref(), Some("Live description"));
         assert_eq!(detail.task.assignee.as_deref(), Some("ops"));
+
+        client
+            .update_kanban_task(&id, serde_json::json!({"priority": 3}), Some(&slug))
+            .await
+            .unwrap();
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert_eq!(detail.task.priority, 3);
 
         client
             .comment_kanban_task(&id, "Live comment", Some(&slug))

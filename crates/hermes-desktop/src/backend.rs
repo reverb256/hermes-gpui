@@ -214,7 +214,11 @@ pub enum BackendEvent {
     },
     OAuthSaved(String),
     OAuthFailed(String),
-    Sessions(Vec<SessionSummary>, u64),
+    Sessions {
+        rows: Vec<SessionSummary>,
+        total: u64,
+        offset: u32,
+    },
     SessionsFailed(String),
     SessionMessages {
         id: String,
@@ -439,7 +443,9 @@ pub enum Command {
     SetReasoning {
         level: String,
     },
-    LoadSessions,
+    LoadSessions {
+        offset: u32,
+    },
     ExportSession {
         id: String,
         path: PathBuf,
@@ -637,7 +643,7 @@ fn mime_for(filename: &str) -> Option<&'static str> {
 fn offline_event(command: Command) -> BackendEvent {
     let message = "Gateway offline. Reconnect and try again.".to_string();
     match command {
-        Command::LoadSessions => BackendEvent::SessionsFailed(message),
+        Command::LoadSessions { .. } => BackendEvent::SessionsFailed(message),
         Command::LoadMcp => BackendEvent::McpFailed(message),
         Command::LoadMcpCatalog => BackendEvent::McpCatalogFailed(message),
         Command::LoadKanbanTask { board, id } => {
@@ -1451,10 +1457,13 @@ async fn worker(
                                 }
                             }
                         }
-                        Command::LoadSessions => match rest.sessions(50).await {
+                        Command::LoadSessions { offset } => match rest.sessions(50, offset).await {
                             Ok(page) => {
-                                let _ = events
-                                    .send(BackendEvent::Sessions(page.sessions, page.total));
+                                let _ = events.send(BackendEvent::Sessions {
+                                    rows: page.sessions,
+                                    total: page.total,
+                                    offset,
+                                });
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
@@ -1538,9 +1547,13 @@ async fn worker(
                             match rest.update_session(&id, patch).await {
                                 Ok(_) => {
                                     let _ = events.send(BackendEvent::SessionUpdated(id.clone()));
-                                    if let Ok(page) = rest.sessions(50).await {
+                                    if let Ok(page) = rest.sessions(50, 0).await {
                                         let _ = events
-                                            .send(BackendEvent::Sessions(page.sessions, page.total));
+                                            .send(BackendEvent::Sessions {
+                                                rows: page.sessions,
+                                                total: page.total,
+                                                offset: 0,
+                                            });
                                     }
                                 }
                                 Err(err) => {
@@ -1556,9 +1569,13 @@ async fn worker(
                             match rest.delete_session(&id).await {
                                 Ok(_) => {
                                     let _ = events.send(BackendEvent::SessionDeleted(id));
-                                    if let Ok(page) = rest.sessions(50).await {
+                                    if let Ok(page) = rest.sessions(50, 0).await {
                                         let _ = events
-                                            .send(BackendEvent::Sessions(page.sessions, page.total));
+                                            .send(BackendEvent::Sessions {
+                                                rows: page.sessions,
+                                                total: page.total,
+                                                offset: 0,
+                                            });
                                     }
                                 }
                                 Err(err) => {
@@ -2442,7 +2459,7 @@ mod tests {
             BackendEvent::KanbanFailed(_)
         ));
         assert!(matches!(
-            offline_event(Command::LoadSessions),
+            offline_event(Command::LoadSessions { offset: 0 }),
             BackendEvent::SessionsFailed(_)
         ));
         assert!(matches!(

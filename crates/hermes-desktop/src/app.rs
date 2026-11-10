@@ -136,6 +136,7 @@ pub struct HermesApp {
     kanban_attachment_busy: bool,
     kanban_body_draft: Option<String>,
     kanban_assignee_draft: Option<String>,
+    kanban_priority_draft: Option<String>,
     kanban_detail_saving: bool,
     memory: Memory,
     moa: Moa,
@@ -221,6 +222,7 @@ impl HermesApp {
             kanban_attachment_busy: false,
             kanban_body_draft: None,
             kanban_assignee_draft: None,
+            kanban_priority_draft: None,
             kanban_detail_saving: false,
             memory: Memory::default(),
             moa: Moa::default(),
@@ -543,6 +545,7 @@ impl HermesApp {
                 self.kanban_detail_saving = false;
                 self.kanban_body_draft = None;
                 self.kanban_assignee_draft = None;
+                self.kanban_priority_draft = None;
                 if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
                     self.kanban_detail = Some(detail);
                     self.kanban_status = Some("Task updated.".into());
@@ -726,7 +729,17 @@ impl HermesApp {
             }
             BackendEvent::HubInstalled { identifier } => self.skills.hub_installed(&identifier),
             BackendEvent::HubFailed(message) => self.skills.hub_failed(message),
-            BackendEvent::Sessions(rows, total) => self.sessions.loaded(rows, total),
+            BackendEvent::Sessions {
+                rows,
+                total,
+                offset,
+            } => {
+                if offset == 0 {
+                    self.sessions.loaded(rows, total);
+                } else {
+                    self.sessions.append(rows, total);
+                }
+            }
             BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
             BackendEvent::SessionUpdated(_id) => {
                 self.sessions.status = Some("session updated".into());
@@ -1626,6 +1639,34 @@ impl HermesApp {
     }
 
     fn route_kanban_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.kanban_priority_draft.is_some() {
+            if self.kanban_detail_saving {
+                return true;
+            }
+            let key = &event.keystroke;
+            match key.key.as_str() {
+                "escape" => {
+                    self.kanban_priority_draft = None;
+                    cx.notify();
+                    return true;
+                }
+                "enter" => self.save_kanban_priority(cx),
+                "backspace" => {
+                    self.kanban_priority_draft.as_mut().unwrap().pop();
+                }
+                _ => {
+                    if let Some(text) = key.key_char.as_deref()
+                        && let Some(draft) = self.kanban_priority_draft.as_mut()
+                        && text.chars().all(|c| c.is_ascii_digit())
+                        && draft.len() < 4
+                    {
+                        draft.push_str(text);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
         if self.kanban_body_draft.is_some() {
             if self.kanban_detail_saving {
                 return true;
@@ -1817,6 +1858,31 @@ impl HermesApp {
             board,
             id,
             patch: serde_json::json!({ "assignee": assignee }),
+        });
+        cx.notify();
+    }
+
+    fn save_kanban_priority(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_detail_saving {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        let Some(draft) = self.kanban_priority_draft.as_deref() else {
+            return;
+        };
+        let Ok(priority) = draft.trim().parse::<i64>() else {
+            self.kanban_status = Some("Priority must be a whole number.".into());
+            cx.notify();
+            return;
+        };
+        self.kanban_detail_saving = true;
+        self.kanban_status = Some("Saving priority…".into());
+        self.backend.send(Command::UpdateKanbanDetail {
+            board,
+            id,
+            patch: serde_json::json!({ "priority": priority }),
         });
         cx.notify();
     }
@@ -2041,6 +2107,12 @@ impl HermesApp {
                     );
                 }
             }
+            panel = panel.child(self.section_label("PRIORITY")).child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(text()))
+                    .child(SharedString::from(task.priority.to_string())),
+            );
             panel = panel.child(
                 div()
                     .flex()
@@ -2085,6 +2157,27 @@ impl HermesApp {
                                 }
                             }))
                             .child("Edit assignee"),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-edit-priority")
+                            .text_sm()
+                            .text_color(rgb(accent()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                    let current = this
+                                        .kanban_detail
+                                        .as_ref()
+                                        .map(|detail| detail.task.priority.to_string())
+                                        .unwrap_or_default();
+                                    this.kanban_body_draft = None;
+                                    this.kanban_assignee_draft = None;
+                                    this.kanban_priority_draft = Some(current);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Edit priority"),
                     ),
             );
             if let Some(draft) = &self.kanban_body_draft {
@@ -2192,6 +2285,62 @@ impl HermesApp {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if !this.kanban_detail_saving {
                                             this.kanban_assignee_draft = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child("Cancel"),
+                            ),
+                    );
+            }
+            if let Some(draft) = &self.kanban_priority_draft {
+                panel = panel
+                    .child(self.section_label("PRIORITY"))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!("{draft}▌"))),
+                    )
+                    .child(self.note("Digits only · Enter saves · Escape cancels"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("kanban-priority-save")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(accent()))
+                                    .text_sm()
+                                    .text_color(rgb(bg()))
+                                    .cursor_pointer()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.save_kanban_priority(cx)),
+                                    )
+                                    .child(if self.kanban_detail_saving {
+                                        "Saving…"
+                                    } else {
+                                        "Save priority"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("kanban-priority-cancel")
+                                    .px_2()
+                                    .py_1()
+                                    .text_sm()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if !this.kanban_detail_saving {
+                                            this.kanban_priority_draft = None;
                                             cx.notify();
                                         }
                                     }))
@@ -2430,6 +2579,7 @@ impl HermesApp {
                             this.kanban_attachment_delete = None;
                             this.kanban_body_draft = None;
                             this.kanban_assignee_draft = None;
+                            this.kanban_priority_draft = None;
                             cx.notify();
                         }
                     }))
@@ -2591,6 +2741,7 @@ impl HermesApp {
                                 this.kanban_attachment_delete = None;
                                 this.kanban_body_draft = None;
                                 this.kanban_assignee_draft = None;
+                                this.kanban_priority_draft = None;
                                 this.kanban_comment_draft = None;
                                 this.kanban = None;
                                 this.kanban_draft = None;
@@ -7777,7 +7928,7 @@ impl HermesApp {
             self.sessions.open = true;
             self.sessions.focus = true;
             if !self.sessions.loaded {
-                self.backend.send(Command::LoadSessions);
+                self.backend.send(Command::LoadSessions { offset: 0 });
             }
         }
         cx.notify();
@@ -7790,7 +7941,27 @@ impl HermesApp {
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         self.sessions.loaded = false;
         self.sessions.error = None;
-        self.backend.send(Command::LoadSessions);
+        self.backend.send(Command::LoadSessions { offset: 0 });
+        cx.notify();
+    }
+
+    fn copy_reply(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.inspector.status = Some("copied reply".into());
+        cx.notify();
+    }
+
+    fn load_more_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.sessions.has_more() {
+            return;
+        }
+        let offset = self.sessions.rows.len() as u32;
+        self.sessions.error = None;
+        self.sessions.status = Some("loading more…".into());
+        self.backend.send(Command::LoadSessions { offset });
         cx.notify();
     }
 
@@ -8255,6 +8426,10 @@ impl HermesApp {
             .child(list)
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .px_4()
                     .py_2()
                     .border_t_1()
@@ -8265,7 +8440,24 @@ impl HermesApp {
                         "{} of {} sessions",
                         self.sessions.rows.len(),
                         self.sessions.total
-                    ))),
+                    )))
+                    .when(self.sessions.has_more(), |this| {
+                        this.child(
+                            div()
+                                .id("sessions-load-more")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(accent()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(surface_hi())))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.load_more_sessions(cx)
+                                }))
+                                .child("Load more"),
+                        )
+                    }),
             )
     }
 
@@ -8703,6 +8895,11 @@ impl HermesApp {
         if streaming {
             text.push('▍');
         }
+        let mut copy_hash: u64 = 1469598103934665603;
+        for byte in text.as_bytes() {
+            copy_hash ^= *byte as u64;
+            copy_hash = copy_hash.wrapping_mul(1099511628211);
+        }
 
         match line.role {
             Role::User => div()
@@ -8732,6 +8929,8 @@ impl HermesApp {
                     .current_profile()
                     .map(|profile| profile.label().to_string())
                     .unwrap_or_else(|| self.profile_name());
+                let copy_text = text.clone();
+                let copy_id = SharedString::from(format!("copy-{copy_hash:x}"));
                 let mut body = div().flex().flex_col().gap_1();
                 for (index, block) in crate::transcript::markdown_blocks(&text)
                     .into_iter()
@@ -8859,6 +9058,21 @@ impl HermesApp {
                                     .text_xs()
                                     .text_color(rgb(text_muted()))
                                     .child(SharedString::from(format!("Messaged {bot_name}"))),
+                            )
+                            .child(
+                                div()
+                                    .id(copy_id)
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(accent()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(surface_hi())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.copy_reply(copy_text.clone(), cx)
+                                    }))
+                                    .child("Copy"),
                             ),
                     )
                     .child(

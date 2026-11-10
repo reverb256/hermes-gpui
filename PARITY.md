@@ -29,7 +29,7 @@ product work beyond this GPUI repository.
 | Inline images | Partial: explicit load for standalone host-local PNG/JPEG/WebP references; no general media or arbitrary remote fetching. |
 | Reply to a specific message and reactions | Missing; requires a compatible persistence and gateway contract. |
 | Editable drafts and review before external send | Missing; needs host-supported draft/approval lifecycle. |
-| Message copy, selection, editing, retry and fork | Missing; verify host semantics before implementing. |
+| Message copy, selection, editing, retry and fork | Partial: copy a reply to the clipboard; selection, editing, retry and fork remain. |
 | Search within transcripts, navigation and large histories | Missing; measure virtualization and loading on real large sessions. |
 | Composer text selection, cursor navigation, undo/redo, IME | Partial: GPUI editable-text primitive, labeled text input and native selection/IME handling; end-to-end keyboard, assistive technology and platform validation remain. |
 | Keyboard shortcuts and command palette | Partial; audit actual behavior and reachability against both products. |
@@ -47,7 +47,7 @@ product work beyond this GPUI repository.
 | Projects, create/edit/delete and project settings | Missing; inspect first-class project routes and permissions. |
 | Workspace chooser, working directory and Git worktrees | Missing; includes branch/worktree selection and validation. |
 | Multiple simultaneous session tiles and layout | Missing; Hermes Desktop multi-session/workspace behavior needs audit. |
-| Session history pagination, filtering and sort | Partial; currently loads at most 50 sessions. |
+| Session history pagination, filtering and sort | Partial: pages of 50 with explicit "Load more"; server-side filtering, sort control and virtualized rendering remain. |
 | Continue across devices | Backend-dependent; session storage exists, but sync/conflict and cross-client behavior unverified. |
 | Import/export formats, share links and retention | Partial: JSON export only; import, sharing, retention controls absent. |
 
@@ -94,7 +94,7 @@ product work beyond this GPUI repository.
 | Event-triggered routines and webhook triggers | Missing; requires host event integration and access controls. |
 | Routine ownership, shared access and approvals | Missing; backend permissions and audit needed. |
 | Kanban current board and basic status transitions | Partial: `/api/plugins/kanban/board` and task PATCH; optional plugin required; transitions are host-validated. |
-| Kanban create/edit/delete tasks, comments and attachments | Partial: title-only triage creation, title/description/assignee editing, confirmed deletion, comments and attachments (upload/save/remove); priority, model overrides and other task fields remain. |
+| Kanban create/edit/delete tasks, comments and attachments | Partial: title-only triage creation, title/description/assignee/priority editing, confirmed deletion, comments and attachments (upload/save/remove); priority, model overrides and other task fields remain. |
 | Board selection, creation, settings, archive and deletion | Partial: local selection, creation and display-name editing; other settings, archive and deletion remain. |
 | Drag/drop, filters, search, bulk actions and live updates | Missing; plugin supports events; define conflict/error behavior. |
 | Assignees, dependencies, scheduling, review and workers | Missing beyond simple next-status action; respect transition constraints. |
