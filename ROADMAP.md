@@ -84,10 +84,10 @@ Details and commands in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 | --- | --- |
 | Theme following (`colors.toml`, semantic tokens, 2 s refresh) | Implemented; `shell.toml` fonts and event-driven `theme-set` hook remain |
 | Single instance, `--toggle`, tray show/quit | Implemented |
-| `omarchy-notification-send` on turn completion with click-to-focus | Not started |
-| `omarchy-shell` bar widget (state, approvals, last reply panel) | Not started |
+| `omarchy-notification-send` on turn completion with click-to-focus, `--replace-id` collapsing and `--action` approval buttons | Not started |
+| `omarchy-shell` bar widget (state, approvals, last reply panel); evaluate joining `omarchy.agents` first | Not started |
 | `omarchy-launch-or-focus` binding documented and tested | Not started |
-| Screenshot attachment via `omarchy capture` | Not started |
+| Screenshot attachment via `omarchy capture`; OCR prompt via `omarchy capture text` | Not started |
 | Superwhisper-aware composer affordance | Not started (dictation itself is Superwhisper's) |
 
 ## Host-agent extensions (`hermes-agent`)

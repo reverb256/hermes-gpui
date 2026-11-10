@@ -27,8 +27,10 @@ plugins inside that process. Hyprland configuration is Lua under
 ### 1. Launch and focus: use Omarchy's helper, not a custom socket
 
 Omarchy ships `omarchy-launch-or-focus` (and `-or-focus-tui`,
-`-or-focus-webapp`), which launches once and focuses the existing window after
-that — the idiomatic Hyprland binding.
+`-or-focus-webapp`), which matches the window class **or title**
+case-insensitively, focuses the first match with `hyprctl`, and otherwise runs
+the command through `uwsm-app --`. That makes it the idiomatic Hyprland binding
+and the right companion to our own `--toggle`.
 
 ```lua
 -- ~/.config/hypr/bindings.lua  (Omarchy 4.x Lua config)
@@ -44,22 +46,37 @@ window rules can target the window.
 ### 2. Notifications: `omarchy-notification-send`, never `notify-send`
 
 The shell claims `org.freedesktop.Notifications`; `omarchy-notification-send`
-respects DND, stacks cards, supports action buttons (4.5+) and takes an argv
-click command (4.0.1+). This is the correct channel for “turn finished”,
-“approval needed” and routine results.
+respects DND, stacks cards, supports action buttons and takes an argv click
+command. This is the correct channel for “turn finished”, “approval needed” and
+routine results. Its full surface (read from `/usr/share/omarchy/bin/`):
+
+| Flag | Meaning |
+| --- | --- |
+| `--app-name` | sender name, default `omarchy-action`; set `Hermes` |
+| `-u/--urgency` | `low` (default), `normal`, `critical` |
+| `-g/--glyph`, `-i/--icon`, `--image` | glyph, icon name, or image path/URI |
+| `-t/--expire-time` | milliseconds; `-1` leaves it to the shell |
+| `-r/--replace-id` | numeric id to replace — use it so repeated events collapse |
+| `-p/--print-id` | print the assigned id, to pass back to `--replace-id` |
+| `--transient` | do not persist in the notification center |
+| `--exec <program> [args...]` | click command, argv words (no shell string) |
+| `--action <label> <program> [words...]` | repeatable action button |
+| `--with <args...>` | arguments appended to every action |
 
 ```bash
-omarchy-notification-send \
-  --app-name "Hermes" -u normal \
-  "Turn finished" "ops · 3 tools · 12 s" \
-  --exec hermes-desktop --toggle
+# first event: capture the id
+ID=$(omarchy-notification-send -p --app-name Hermes -u normal \
+  "Turn finished" "ops · 3 tools · 12 s" --exec hermes-desktop --toggle)
+# later events: collapse into the same card
+omarchy-notification-send -r "$ID" --app-name Hermes -u normal \
+  "Approval needed" "kanban t_5f2882b5" --exec hermes-desktop --toggle
 ```
 
 Next step for the client: emit a notification when a turn completes while the
-window is hidden, and route the click through `--toggle`. Clicking should also
-work when the app is already focused (`omarchy-hyprland-focus-app` fallback).
-Respect `Super + Comma` (act on newest card) by keeping one card per event type
-and collapsing repeats.
+window is hidden, route the click through `--toggle`, and give approvals two
+`--action` buttons (Open, Allow) that map to argv commands. `Super + Comma`
+acts on the newest card, so keeping one card per event type with `--replace-id`
+is better than stacking duplicates.
 
 ### 3. Bar widget: an `omarchy-shell` plugin, not a tray icon
 
@@ -68,6 +85,14 @@ with a `manifest.json` (`id`, `kinds: ["bar-widget"]`, `entryPoints.barWidget`,
 optional `barWidget.defaultSection`) loaded by `omarchy-shell`. Placement is
 managed with `omarchy bar move <id> --section left|center|right` and enabling
 with `omarchy plugin enable <id>`.
+
+The default bar already ships an `omarchy.agents` widget, which is the natural
+neighbour for agent work — check whether contributing a row to it is cheaper than
+a second widget before adding one. Plugin tooling: `omarchy plugin list` (ids,
+enabled state, first/third-party), `add` (git, lands disabled), `clone` (built-in
+to `~/.config/omarchy/plugins/`), `validate <dir>` against the manifest schema,
+`update`, `remove`. Remove or validate before enabling; plugins are unsandboxed
+Quickshell code.
 
 Planned widget: connection state (green/amber/red), streaming indicator, pending
 approval count; left click toggles the window, right click opens a panel with the
@@ -84,23 +109,36 @@ disabled and are unsandboxed; document that warning).
 
 ### 4. Theme changes: prefer the `theme-set` hook over polling
 
-Omarchy hooks install per event into `~/.config/omarchy/hooks/<event>.d/` with
-`omarchy hook install theme-set <script>`. A hook can signal the running app
-(e.g. `kill -USR1`, or a socket message) instead of polling.
+Omarchy hooks run from `~/.config/omarchy/hooks/<name>` and
+`~/.config/omarchy/hooks/<name>.d/`; `omarchy hook install <type> <file>` puts a
+script in the `.d` directory. `omarchy-theme-set` itself keeps
+`~/.local/state/omarchy/current/theme.generation` (a cheap change marker),
+`theme.name`, `shell.toml`, and a log at `~/.local/state/omarchy/theme-set.log`,
+and takes a lock at `$XDG_RUNTIME_DIR/omarchy-theme-set.lock` while switching.
+A `theme-set` hook can signal the running app (e.g. `kill -USR1`, or a socket
+message) instead of polling.
 
 Keep polling as the fallback for other desktops, but on Omarchy the hook is
 exact: it fires after every `omarchy theme set`, including theme installs that
-change fonts. Also read `shell.toml` (`font_family`, bar size) and the
-`theme.name` file for display, not just `colors.toml`. Bracket the theme
-directory when generating CSS/colour strings, as Omarchy's own templates do.
+change fonts. Poll `theme.generation` rather than the whole file: it changes
+once per applied theme. Read `shell.toml` for `[bar]` `size-horizontal`,
+`size-vertical`, `scale-with-font` and the `[font]` scale rather than assuming
+26 px, and `theme.name` for display. Bracket the theme directory when generating
+CSS/colour strings, as Omarchy's own templates do.
 
 ### 5. Screenshots and capture: reuse `omarchy capture`
 
-`omarchy capture screenshot` and `omarchy screenrecord` are the desktop's capture
-path (region/full screen, saving to the pictures directory). Instead of building
-a capture pipeline, add “Attach screenshot” that invokes the same command and
-feeds the resulting path into the existing attachment upload. This is the
-cheapest path to visual bug reports and to attaching UI context to a prompt.
+`omarchy capture screenshot`, `capture screenrecording`, `capture text` (OCR of a
+region) and `capture qr` are the desktop's capture path. Instead of building a
+capture pipeline:
+
+- “Attach screenshot” invokes `omarchy capture screenshot` and feeds the resulting
+  path into the existing attachment upload.
+- “Explain this screen” runs `omarchy capture text` and puts the OCR result in
+  the composer for review.
+
+This is the cheapest path to visual bug reports and to attaching UI context to a
+prompt, and it stays consistent with the desktop's own shortcuts.
 
 ### 6. Dictation: Superwhisper is the default, so don't compete
 
@@ -144,9 +182,20 @@ The Omarchy menu is configurable through
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` (hot-reloads); a `.desktop`
 entry makes the app discoverable without editing that file.
 
-### 9. Diagnostics
+### 9. Reminders and other surfaces worth reusing
 
-`omarchy debug --no-sudo --print` gathers system state without prompting.
+- `omarchy reminder <minutes> [message]` writes a desktop reminder; a routine
+  result could offer “remind me in 15” instead of inventing a scheduler UI.
+- `omarchy menu input` / `omarchy menu select` give the desktop's own prompt
+  widgets to shell scripts; useful for a small helper CLI if the app ever needs
+  one.
+- `omarchy commands --json` is the machine-readable command catalogue; use it in
+  scripts instead of hardcoding command availability.
+
+### 10. Diagnostics
+
+`omarchy debug --no-sudo --print` gathers system state without prompting; also
+`omarchy version` and `omarchy commands --json`.
 Pair it with `RUST_LOG=debug hermes-desktop` and `journalctl --user` when
 reporting a desktop-level issue. Never include tokens or cookies.
 
