@@ -121,7 +121,7 @@ product work beyond this GPUI repository.
 | Image/audio/video/document/code previews and downloads | Partial: host-local image preview and JSON export only. |
 | Canvas/interactive artifact rendering and share links | Missing; isolate untrusted content and define host support. |
 | Remote file browser, upload, download and workspace operations | Planned Phase 1 through `hermes-node` with explicit roots, traversal checks and per-node policy. |
-| Embedded terminal, output, resize and multiple terminals | Partial: one live terminal per client over a `hermes-node` PTY, with keystrokes, resize frames and hangup cancellation; no multi-tab sessions, scrollback search or cursor addressing. |
+| Embedded terminal, output, resize and multiple terminals | Partial: one live terminal per client over a `hermes-node` PTY, with keystrokes, a measured grid reported as resize frames and hangup cancellation; no multi-tab sessions, scrollback search or cursor addressing. |
 | Embedded browser and live computer screen | Missing; needs host-supported display/session transport and isolation. |
 | Watch/take over computer use and demonstrate workflows | Missing; needs remote control arbitration, permissions and audit. |
 | Persistent personal computer, browser sessions and files | Planned as Phase 1: one OCI `hermes-computer` container with saved volumes; a Grok-style per-user fleet is out of scope. |

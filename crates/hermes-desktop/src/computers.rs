@@ -21,9 +21,22 @@ use zeroize::Zeroize;
 
 /// Remote commands are bounded so a stuck process cannot hold the node forever.
 pub const COMMAND_TIMEOUT_MS: u64 = 120_000;
-/// The terminal panel's geometry; a terminal has no wall-clock timeout.
+/// The geometry a terminal opens with, before the panel has been measured. A
+/// terminal has no wall-clock timeout.
 pub const TERMINAL_COLS: u16 = 120;
 pub const TERMINAL_ROWS: u16 = 32;
+/// One cell of the `text_xs` monospace output area. The panel converts its
+/// measured pixel bounds with these to report a real grid to the node; the
+/// exact glyph advance is font-dependent, so the result is advisory (a
+/// full-screen program reflows to it) and clamped to what the protocol allows.
+pub const TERMINAL_CELL_WIDTH: f32 = 7.2;
+pub const TERMINAL_CELL_HEIGHT: f32 = 15.0;
+/// Clamp reported geometry to the range `PtySpec::validate` accepts, keeping a
+/// panel that is collapsed or absurdly large from proposing a rejected grid.
+pub const TERMINAL_MIN_COLS: u16 = 20;
+pub const TERMINAL_MAX_COLS: u16 = 500;
+pub const TERMINAL_MIN_ROWS: u16 = 5;
+pub const TERMINAL_MAX_ROWS: u16 = 300;
 /// Keep the sheet responsive even when a command prints for a long time.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 /// A terminal scrolls, so it keeps more than one command's worth of output.
@@ -88,6 +101,22 @@ enum Esc {
     OscEscape,
 }
 
+/// Convert a measured output area in pixels to terminal columns and rows.
+///
+/// A zero, negative or non-finite measurement (an element that has not been
+/// laid out yet) keeps the default geometry instead of reporting a 1×1 grid.
+pub fn geometry_for(width_px: f32, height_px: f32) -> (u16, u16) {
+    if !width_px.is_finite() || !height_px.is_finite() || width_px < 1.0 || height_px < 1.0 {
+        return (TERMINAL_COLS, TERMINAL_ROWS);
+    }
+    let cols = (width_px / TERMINAL_CELL_WIDTH).floor();
+    let rows = (height_px / TERMINAL_CELL_HEIGHT).floor();
+    (
+        cols.clamp(TERMINAL_MIN_COLS as f32, TERMINAL_MAX_COLS as f32) as u16,
+        rows.clamp(TERMINAL_MIN_ROWS as f32, TERMINAL_MAX_ROWS as f32) as u16,
+    )
+}
+
 /// A live (or finished) terminal on a computer.
 ///
 /// The transcript is a plain text screen: escape sequences are dropped, `\r`
@@ -103,6 +132,9 @@ pub struct Terminal {
     pub message: Option<String>,
     pub output: String,
     pub truncated: bool,
+    /// The grid reported to the node; updated as the panel is resized.
+    pub cols: u16,
+    pub rows: u16,
     /// Keyboard input goes to this terminal while true.
     pub focused: bool,
     /// Cursor column in the current line, so `\r` rewrites instead of wiping.
@@ -204,6 +236,8 @@ pub struct Computers {
     pub prompts: Vec<PromptCard>,
     /// The terminal panel, if a terminal was opened in this session.
     pub terminal: Option<Terminal>,
+    /// The most recent grid measured from the panel's pixel size.
+    terminal_geometry: (u16, u16),
     /// Every terminal command id seen, so their records stay out of the
     /// ordinary command list and their output stays out of storage.
     terminal_ids: Vec<String>,
@@ -219,6 +253,7 @@ impl Computers {
             } else {
                 None
             },
+            terminal_geometry: (TERMINAL_COLS, TERMINAL_ROWS),
             ..Self::default()
         };
         if page.problem.is_none() && !configured {
@@ -359,7 +394,8 @@ impl Computers {
     }
 
     /// Build the request that opens a terminal. A terminal is interactive, so
-    /// it carries no secret spec, no timeout and fixed geometry.
+    /// it carries no secret spec and no timeout. Its geometry is the last one
+    /// the panel measured, falling back to `TERMINAL_COLS`×`TERMINAL_ROWS`.
     pub fn build_terminal_request(&mut self) -> Result<CommandRequest, String> {
         let node = self
             .selected_node()
@@ -380,6 +416,7 @@ impl Computers {
             return Err("Enter a program and its arguments.".into());
         }
         let cwd = self.cwd.trim();
+        let (cols, rows) = self.terminal_geometry;
         let request = CommandRequest {
             id: format!("cmd-{}", Uuid::new_v4()),
             idempotency_key: format!("idem-{}", Uuid::new_v4()),
@@ -388,10 +425,7 @@ impl Computers {
             env: Default::default(),
             timeout_ms: 0,
             secret: None,
-            pty: Some(PtySpec {
-                cols: TERMINAL_COLS,
-                rows: TERMINAL_ROWS,
-            }),
+            pty: Some(PtySpec { cols, rows }),
         };
         request.validate().map_err(|err| err.to_string())?;
         Ok(request)
@@ -415,10 +449,33 @@ impl Computers {
             message: None,
             output: String::new(),
             truncated: false,
+            cols: request.pty.map(|pty| pty.cols).unwrap_or(TERMINAL_COLS),
+            rows: request.pty.map(|pty| pty.rows).unwrap_or(TERMINAL_ROWS),
             focused: true,
             col: 0,
             esc: Esc::Ground,
         });
+    }
+
+    /// Convert the panel's measured pixel size into a grid, clamped to the
+    /// protocol's bounds, and remember it for the next terminal.
+    pub fn measured(&mut self, width_px: f32, height_px: f32) {
+        self.terminal_geometry = geometry_for(width_px, height_px);
+    }
+
+    /// The resize frame to send for the live terminal, if the measured grid
+    /// differs from the one the node already has. Returns `None` for an
+    /// unmeasured panel, a finished session or an unchanged size, which keeps
+    /// a repainting panel from flooding the hub.
+    pub fn resize_terminal(&mut self) -> Option<(String, u16, u16)> {
+        let (cols, rows) = self.terminal_geometry;
+        let terminal = self.terminal.as_mut()?;
+        if !terminal.is_running() || (terminal.cols, terminal.rows) == (cols, rows) {
+            return None;
+        }
+        terminal.cols = cols;
+        terminal.rows = rows;
+        Some((terminal.command_id.clone(), cols, rows))
     }
 
     /// The command id that should receive keystrokes, if any.
@@ -846,6 +903,64 @@ mod tests {
     }
 
     #[test]
+    fn measured_geometry_is_clamped_and_used_for_the_next_terminal() {
+        // 900×480 px at the panel's cell size is 125 columns and 32 rows.
+        assert_eq!(geometry_for(900.0, 480.0), (125, 32));
+        // An unlaid-out element keeps the defaults rather than reporting 1×1.
+        assert_eq!(geometry_for(0.0, 0.0), (TERMINAL_COLS, TERMINAL_ROWS));
+        assert_eq!(geometry_for(f32::NAN, 10.0), (TERMINAL_COLS, TERMINAL_ROWS));
+        // Tiny and enormous panels stay inside the protocol's bounds.
+        assert_eq!(
+            geometry_for(4.0, 4.0),
+            (TERMINAL_MIN_COLS, TERMINAL_MIN_ROWS)
+        );
+        assert_eq!(
+            geometry_for(90_000.0, 90_000.0),
+            (TERMINAL_MAX_COLS, TERMINAL_MAX_ROWS)
+        );
+        // The clamp stays inside what `PtySpec::validate` accepts.
+        const { assert!(TERMINAL_MAX_COLS <= 500 && TERMINAL_MAX_ROWS <= 300) };
+
+        let mut page = terminal_page();
+        page.measured(900.0, 480.0);
+        let request = page.build_terminal_request().expect("terminal request");
+        assert_eq!(
+            request.pty,
+            Some(PtySpec {
+                cols: 125,
+                rows: 32
+            })
+        );
+        page.terminal_started(&request);
+        let terminal = page.terminal.as_ref().expect("terminal panel");
+        assert_eq!((terminal.cols, terminal.rows), (125, 32));
+    }
+
+    #[test]
+    fn resizing_reports_one_frame_per_change_and_never_after_exit() {
+        let mut page = terminal_page();
+        let request = page.build_terminal_request().expect("terminal request");
+        let id = request.id.clone();
+        page.terminal_started(&request);
+
+        // The opening geometry is already on the node, so nothing is sent.
+        page.measured(TERMINAL_COLS as f32 * TERMINAL_CELL_WIDTH, 480.0);
+        assert_eq!(page.resize_terminal(), None);
+
+        page.measured(900.0, 480.0);
+        assert_eq!(page.resize_terminal(), Some((id.clone(), 125, 32)));
+        // The same size again does not repeat the frame.
+        page.measured(900.0, 480.0);
+        assert_eq!(page.resize_terminal(), None);
+
+        page.command_state(record(&id, CommandStatus::Cancelled));
+        page.measured(1440.0, 720.0);
+        assert_eq!(page.resize_terminal(), None);
+        let terminal = page.terminal.as_ref().expect("terminal panel");
+        assert_eq!((terminal.cols, terminal.rows), (125, 32));
+    }
+
+    #[test]
     fn terminal_is_refused_without_the_capability_or_with_a_secret() {
         let mut page = Computers::new(true, None);
         page.nodes_loaded(vec![node("nexus", true)]);
@@ -888,6 +1003,8 @@ mod tests {
             message: None,
             output: String::new(),
             truncated: false,
+            cols: TERMINAL_COLS,
+            rows: TERMINAL_ROWS,
             focused: true,
             col: 0,
             esc: Esc::Ground,
@@ -912,6 +1029,8 @@ mod tests {
             message: None,
             output: String::new(),
             truncated: false,
+            cols: TERMINAL_COLS,
+            rows: TERMINAL_ROWS,
             focused: true,
             col: 0,
             esc: Esc::Ground,

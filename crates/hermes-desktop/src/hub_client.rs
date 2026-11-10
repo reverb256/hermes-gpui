@@ -175,6 +175,12 @@ pub enum HubCommand {
         command_id: String,
         data: Vec<u8>,
     },
+    /// A measured terminal grid for a live session.
+    TerminalResize {
+        command_id: String,
+        cols: u16,
+        rows: u16,
+    },
     Answer {
         answer: PromptAnswer,
     },
@@ -196,6 +202,16 @@ impl fmt::Debug for HubCommand {
                 .debug_struct("TerminalInput")
                 .field("command_id", command_id)
                 .field("bytes", &data.len())
+                .finish(),
+            Self::TerminalResize {
+                command_id,
+                cols,
+                rows,
+            } => f
+                .debug_struct("TerminalResize")
+                .field("command_id", command_id)
+                .field("cols", cols)
+                .field("rows", rows)
                 .finish(),
             Self::Answer { answer } => f.debug_struct("Answer").field("answer", answer).finish(),
         }
@@ -391,6 +407,15 @@ impl HubCommand {
                 command_id,
                 data_b64: BASE64.encode(data),
             }),
+            Self::TerminalResize {
+                command_id,
+                cols,
+                rows,
+            } => Some(DeviceToHub::TerminalResize {
+                command_id,
+                cols,
+                rows,
+            }),
             Self::Answer { answer } => Some(DeviceToHub::PromptAnswer { answer }),
         }
     }
@@ -468,6 +493,27 @@ mod tests {
                 assert_eq!(BASE64.decode(data_b64).expect("base64"), b"secret\r");
             }
             other => panic!("expected terminal input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_resize_is_encoded_as_a_resize_frame() {
+        let command = HubCommand::TerminalResize {
+            command_id: "cmd-1".into(),
+            cols: 132,
+            rows: 41,
+        };
+        assert!(format!("{command:?}").contains("132"));
+        match command.into_message() {
+            Some(DeviceToHub::TerminalResize {
+                command_id,
+                cols,
+                rows,
+            }) => {
+                assert_eq!(command_id, "cmd-1");
+                assert_eq!((cols, rows), (132, 41));
+            }
+            other => panic!("expected terminal resize, got {other:?}"),
         }
     }
 

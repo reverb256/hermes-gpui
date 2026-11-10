@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Terminals report their real size: the client measures the output area in
+  prepaint, opens the session on that grid and sends a `TerminalResize` frame
+  when it changes (clamped to the protocol's bounds, deduplicated, and never
+  after the session ends).
 - Terminals: a `pty` command runs on a pseudo-terminal on the node, with
   bidirectional input, resize, hangup-based cancellation and no wall-clock
   timeout. The hub relays terminal bytes without storing them, and the client
