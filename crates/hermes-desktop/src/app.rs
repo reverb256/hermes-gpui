@@ -132,6 +132,8 @@ pub struct HermesApp {
     kanban_detail: Option<hermes_api::KanbanTaskDetail>,
     kanban_comment_draft: Option<String>,
     kanban_comment_saving: bool,
+    kanban_attachment_delete: Option<i64>,
+    kanban_attachment_busy: bool,
     memory: Memory,
     moa: Moa,
     automations: Automations,
@@ -212,6 +214,8 @@ impl HermesApp {
             kanban_detail: None,
             kanban_comment_draft: None,
             kanban_comment_saving: false,
+            kanban_attachment_delete: None,
+            kanban_attachment_busy: false,
             memory: Memory::default(),
             moa: Moa::default(),
             automations: Automations::default(),
@@ -538,6 +542,53 @@ impl HermesApp {
             }
             BackendEvent::KanbanCommentFailed { board, id, message } => {
                 self.kanban_comment_saving = false;
+                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban_status = Some(message);
+                }
+            }
+            BackendEvent::KanbanAttachmentUploaded { board, id } => {
+                self.kanban_attachment_busy = false;
+                if self.kanban_detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
+                    self.kanban_status = Some("Attachment uploaded; refreshing…".into());
+                    self.backend.send(Command::LoadKanbanTask { board, id });
+                }
+            }
+            BackendEvent::KanbanAttachmentDeleted { board, id } => {
+                self.kanban_attachment_busy = false;
+                self.kanban_attachment_delete = None;
+                if self.kanban_detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
+                    self.kanban_status = Some("Attachment removed; refreshing…".into());
+                    self.backend.send(Command::LoadKanbanTask { board, id });
+                }
+            }
+            BackendEvent::KanbanAttachmentDownloaded { filename, bytes } => {
+                self.kanban_attachment_busy = false;
+                cx.spawn(async move |this, cx| {
+                    let picked = rfd::AsyncFileDialog::new()
+                        .set_file_name(&filename)
+                        .save_file()
+                        .await;
+                    let message = match picked {
+                        Some(file) => {
+                            let path = file.path().to_path_buf();
+                            match tokio::fs::write(&path, bytes).await {
+                                Ok(()) => format!("Saved {}", path.display()),
+                                Err(err) => format!("Save failed: {err}"),
+                            }
+                        }
+                        None => "Attachment save cancelled.".to_string(),
+                    };
+                    this.update(cx, |this, cx| {
+                        this.kanban_status = Some(message);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            BackendEvent::KanbanAttachmentFailed { board, id, message } => {
+                self.kanban_attachment_busy = false;
+                self.kanban_attachment_delete = None;
                 if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
                     self.kanban_status = Some(message);
                 }
@@ -1658,6 +1709,90 @@ impl HermesApp {
         true
     }
 
+    fn kanban_size_label(bytes: u64) -> String {
+        if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{bytes} B")
+        }
+    }
+
+    fn attach_kanban_file(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_attachment_busy {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        let backend = self.backend.clone();
+        self.kanban_attachment_busy = true;
+        self.kanban_status = Some("Choose a file to attach…".into());
+        cx.spawn(async move |this, cx| {
+            let picked = rfd::AsyncFileDialog::new().pick_file().await;
+            match picked {
+                Some(file) => {
+                    backend.send(Command::UploadKanbanAttachment {
+                        board,
+                        id,
+                        path: file.path().to_path_buf(),
+                    });
+                    this.update(cx, |this, cx| {
+                        this.kanban_status = Some("Uploading attachment…".into());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                None => {
+                    this.update(cx, |this, cx| {
+                        this.kanban_attachment_busy = false;
+                        this.kanban_status = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn save_kanban_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
+        if self.kanban_attachment_busy {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        self.kanban_attachment_busy = true;
+        self.kanban_status = Some("Fetching attachment…".into());
+        self.backend.send(Command::DownloadKanbanAttachment {
+            board,
+            id,
+            attachment_id,
+        });
+        cx.notify();
+    }
+
+    fn delete_kanban_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
+        if self.kanban_attachment_busy {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        self.kanban_attachment_busy = true;
+        self.kanban_attachment_delete = None;
+        self.kanban_status = Some("Removing attachment…".into());
+        self.backend.send(Command::DeleteKanbanAttachment {
+            board,
+            id,
+            attachment_id,
+        });
+        cx.notify();
+    }
+
     fn submit_kanban_comment(&mut self, cx: &mut Context<Self>) {
         if self.kanban_comment_saving {
             return;
@@ -1794,6 +1929,131 @@ impl HermesApp {
                     );
                 }
             }
+            panel = panel
+                .child(self.section_label(&format!("ATTACHMENTS · {}", detail.attachments.len())));
+            if detail.attachments.is_empty() {
+                panel = panel.child(self.note("No attachments."));
+            }
+            for attachment in &detail.attachments {
+                let attachment_id = attachment.id;
+                let removing = self.kanban_attachment_delete == Some(attachment_id);
+                let mut row = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(text()))
+                                    .child(SharedString::from(attachment.filename.clone())),
+                            )
+                            .child(div().text_xs().text_color(rgb(text_muted())).child(
+                                SharedString::from(format!(
+                                    "{} · {}",
+                                    Self::kanban_size_label(attachment.size),
+                                    attachment
+                                        .uploaded_by
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".into())
+                                )),
+                            )),
+                    );
+                if removing {
+                    row = row
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "kanban-attachment-remove-{attachment_id}"
+                                )))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(danger()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.delete_kanban_attachment(attachment_id, cx)
+                                }))
+                                .child("Confirm remove"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "kanban-attachment-cancel-{attachment_id}"
+                                )))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(text_muted()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.kanban_attachment_delete = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        );
+                } else {
+                    row = row
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "kanban-attachment-save-{attachment_id}"
+                                )))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(accent()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.save_kanban_attachment(attachment_id, cx)
+                                }))
+                                .child("Save"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "kanban-attachment-delete-{attachment_id}"
+                                )))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(danger()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.kanban_attachment_busy {
+                                        this.kanban_attachment_delete = Some(attachment_id);
+                                        cx.notify();
+                                    }
+                                }))
+                                .child("Remove"),
+                        );
+                }
+                panel = panel.child(row);
+            }
+            panel = panel.child(
+                div()
+                    .id("kanban-attach-file")
+                    .text_sm()
+                    .text_color(rgb(accent()))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.attach_kanban_file(cx)))
+                    .child(if self.kanban_attachment_busy {
+                        "Attaching…"
+                    } else {
+                        "Attach file"
+                    }),
+            );
             panel = panel.child(self.section_label("COMMENTS"));
             if detail.comments.is_empty() {
                 panel = panel.child(self.note("No comments yet."));
@@ -1890,10 +2150,11 @@ impl HermesApp {
                     .text_color(rgb(text_muted()))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.kanban_comment_saving {
+                        if !this.kanban_comment_saving && !this.kanban_attachment_busy {
                             this.kanban_detail_target = None;
                             this.kanban_detail = None;
                             this.kanban_comment_draft = None;
+                            this.kanban_attachment_delete = None;
                             cx.notify();
                         }
                     }))
@@ -2044,10 +2305,12 @@ impl HermesApp {
                                 && this.kanban_board_draft.is_none()
                                 && !this.kanban_comment_saving
                                 && this.kanban_comment_draft.is_none()
+                                && !this.kanban_attachment_busy
                             {
                                 this.kanban_selected = Some(slug.clone());
                                 this.kanban_detail_target = None;
                                 this.kanban_detail = None;
+                                this.kanban_attachment_delete = None;
                                 this.kanban_comment_draft = None;
                                 this.kanban = None;
                                 this.kanban_draft = None;
@@ -2161,6 +2424,7 @@ impl HermesApp {
                                     this.kanban_detail_target =
                                         Some((board.clone(), detail_id.clone()));
                                     this.kanban_detail = None;
+                                    this.kanban_attachment_delete = None;
                                     this.kanban_status = Some("Loading task details…".into());
                                     this.backend.send(Command::LoadKanbanTask {
                                         board,

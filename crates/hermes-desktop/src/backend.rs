@@ -277,6 +277,23 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
+    KanbanAttachmentUploaded {
+        board: String,
+        id: String,
+    },
+    KanbanAttachmentDeleted {
+        board: String,
+        id: String,
+    },
+    KanbanAttachmentDownloaded {
+        filename: String,
+        bytes: Vec<u8>,
+    },
+    KanbanAttachmentFailed {
+        board: String,
+        id: String,
+        message: String,
+    },
     KanbanFailed(String),
     McpToggled {
         name: String,
@@ -467,6 +484,21 @@ pub enum Command {
         id: String,
         body: String,
     },
+    UploadKanbanAttachment {
+        board: String,
+        id: String,
+        path: std::path::PathBuf,
+    },
+    DownloadKanbanAttachment {
+        board: String,
+        id: String,
+        attachment_id: i64,
+    },
+    DeleteKanbanAttachment {
+        board: String,
+        id: String,
+        attachment_id: i64,
+    },
     CreateKanbanTask {
         title: String,
         board: Option<String>,
@@ -573,6 +605,25 @@ impl Backend {
 
 /// Do not queue a click made while disconnected: replaying a mutation after
 /// reconnect could unexpectedly modify credentials, jobs or board state.
+/// Best-effort content type for an upload. The host stores whatever it is
+/// given, and its download route echoes it back, so keep it conservative.
+fn mime_for(filename: &str) -> Option<&'static str> {
+    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "md" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => return None,
+    })
+}
+
 fn offline_event(command: Command) -> BackendEvent {
     let message = "Gateway offline. Reconnect and try again.".to_string();
     match command {
@@ -584,6 +635,11 @@ fn offline_event(command: Command) -> BackendEvent {
         }
         Command::CommentKanbanTask { board, id, .. } => {
             BackendEvent::KanbanCommentFailed { board, id, message }
+        }
+        Command::UploadKanbanAttachment { board, id, .. }
+        | Command::DownloadKanbanAttachment { board, id, .. }
+        | Command::DeleteKanbanAttachment { board, id, .. } => {
+            BackendEvent::KanbanAttachmentFailed { board, id, message }
         }
         Command::CreateKanbanBoard { .. } | Command::RenameKanbanBoard { .. } => {
             BackendEvent::KanbanBoardSaveFailed(message)
@@ -1008,6 +1064,47 @@ async fn worker(
                             match rest.comment_kanban_task(&id, &body, Some(&board)).await {
                                 Ok(_) => { let _ = events.send(BackendEvent::KanbanCommentSaved { board, id }); }
                                 Err(err) => { let _ = events.send(BackendEvent::KanbanCommentFailed { board, id, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
+                            }
+                        }
+                        Command::UploadKanbanAttachment { board, id, path } => {
+                            let filename = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("attachment")
+                                .to_string();
+                            let failed = |message: String| {
+                                BackendEvent::KanbanAttachmentFailed { board: board.clone(), id: id.clone(), message }
+                            };
+                            match tokio::fs::read(&path).await {
+                                Ok(bytes) => {
+                                    let mime = mime_for(&filename);
+                                    match rest.upload_kanban_attachment(&id, &filename, mime, &bytes, Some(&board)).await {
+                                        Ok(_) => { let _ = events.send(BackendEvent::KanbanAttachmentUploaded { board, id }); }
+                                        Err(err) => { let _ = events.send(failed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                }
+                                Err(err) => { let _ = events.send(failed(format!("read {}: {err}", path.display()))); }
+                            }
+                        }
+                        Command::DownloadKanbanAttachment { board, id, attachment_id } => {
+                            match rest.download_kanban_attachment(attachment_id, Some(&board)).await {
+                                Ok(file) => {
+                                    let filename = file.filename.unwrap_or_else(|| format!("attachment-{attachment_id}"));
+                                    let _ = events.send(BackendEvent::KanbanAttachmentDownloaded { filename, bytes: file.bytes });
+                                }
+                                Err(err) => {
+                                    let message = err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::KanbanAttachmentFailed { board, id, message });
+                                }
+                            }
+                        }
+                        Command::DeleteKanbanAttachment { board, id, attachment_id } => {
+                            match rest.delete_kanban_attachment(attachment_id, Some(&board)).await {
+                                Ok(_) => { let _ = events.send(BackendEvent::KanbanAttachmentDeleted { board, id }); }
+                                Err(err) => {
+                                    let message = err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::KanbanAttachmentFailed { board, id, message });
+                                }
                             }
                         }
                         Command::CreateKanbanTask { title, board } => {
@@ -2252,6 +2349,30 @@ mod tests {
 
     #[test]
     fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::UploadKanbanAttachment {
+                board: "work".into(),
+                id: "task".into(),
+                path: std::path::PathBuf::from("/tmp/note.txt")
+            }),
+            BackendEvent::KanbanAttachmentFailed { .. }
+        ));
+        assert!(matches!(
+            offline_event(Command::DownloadKanbanAttachment {
+                board: "work".into(),
+                id: "task".into(),
+                attachment_id: 3
+            }),
+            BackendEvent::KanbanAttachmentFailed { .. }
+        ));
+        assert!(matches!(
+            offline_event(Command::DeleteKanbanAttachment {
+                board: "work".into(),
+                id: "task".into(),
+                attachment_id: 3
+            }),
+            BackendEvent::KanbanAttachmentFailed { .. }
+        ));
         assert!(matches!(
             offline_event(Command::LoadKanbanTask {
                 board: "work".into(),

@@ -13,7 +13,8 @@ All notable changes to this project are documented here. The format follows
 - Single-instance `--toggle` IPC, tray show action and a Hyprland binding example.
 - MoA preset editor, cron job controls and provider OAuth accounts page.
 - MCP OAuth browser hand-off and Kanban board selection, creation and renaming, task title editing,
-  confirmed deletion, status transitions, triage task creation, task details and comments.
+  confirmed deletion, status transitions, triage task creation, task details, comments
+  and attachments (upload, save and remove).
 - Streamed Markdown block and inline styling and a GPUI multiline composer with
   selection, editing shortcuts, IME support and an accessible label.
 - Readable derived Omarchy theme hints and explicit offline-action errors.

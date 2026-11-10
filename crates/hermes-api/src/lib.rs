@@ -947,6 +947,84 @@ fn kanban_scoped_path(path: &str, board: Option<&str>) -> String {
     }
 }
 
+/// Build the `multipart/form-data` body the plugin's upload route expects.
+///
+/// The boundary grows until it cannot occur in the payload, so a file that
+/// contains the marker cannot end the body early. Returns the header value.
+fn multipart_attachment(
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> (String, Vec<u8>) {
+    let mut boundary = String::from("----hermesgpui");
+    while bytes
+        .windows(boundary.len())
+        .any(|window| window == boundary.as_bytes())
+    {
+        boundary.push('x');
+    }
+    let name = filename.replace(['"', '\r', '\n'], "_");
+    let mut body = Vec::with_capacity(bytes.len() + 256);
+    // The host defaults the author to "dashboard"; name the client so the
+    // drawer shows where a file came from.
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"uploaded_by\"\r\n\r\nhermes-gpui\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
+        )
+        .as_bytes(),
+    );
+    if let Some(content_type) = content_type {
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// Pull a filename out of a `Content-Disposition` header, preferring the
+/// RFC 5987 `filename*` form the host uses for non-ASCII names.
+fn disposition_filename(header: &str) -> Option<String> {
+    let mut plain = None;
+    for part in header.split(';').skip(1) {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("filename*=") {
+            let encoded = rest.rsplit("''").next().unwrap_or(rest);
+            return Some(percent_decode(encoded));
+        }
+        if let Some(rest) = part.strip_prefix("filename=") {
+            plain = Some(rest.trim_matches('"').to_string());
+        }
+    }
+    plain
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(hex) = bytes.get(index + 1..index + 3)
+            && let Ok(text) = std::str::from_utf8(hex)
+            && let Ok(byte) = u8::from_str_radix(text, 16)
+        {
+            out.push(byte);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// A board returned by the optional Hermes Kanban plugin.
 #[derive(Debug, Clone, Deserialize)]
 pub struct KanbanBoard {
@@ -972,6 +1050,29 @@ pub struct KanbanTaskDetail {
     pub task: KanbanDetailedTask,
     #[serde(default)]
     pub comments: Vec<KanbanComment>,
+    #[serde(default)]
+    pub attachments: Vec<KanbanAttachment>,
+}
+
+/// One file stored by the plugin under the board's attachments root.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanAttachment {
+    pub id: i64,
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub uploaded_by: Option<String>,
+}
+
+/// Bytes streamed back by `GET /attachments/{id}`.
+#[derive(Debug, Clone)]
+pub struct KanbanAttachmentFile {
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1547,6 +1648,108 @@ impl RestClient {
         let response = self
             .authed(reqwest::Method::POST, &path)
             .json(&serde_json::json!({"body": body}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// Upload one file to a task. The plugin caps the size and sanitises the
+    /// name; both failures come back as `ApiError::Status` with the reason.
+    pub async fn upload_kanban_attachment(
+        &self,
+        id: &str,
+        filename: &str,
+        content_type: Option<&str>,
+        bytes: &[u8],
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path(
+            &format!(
+                "/api/plugins/kanban/tasks/{}/attachments",
+                percent_encode(id)
+            ),
+            board,
+        );
+        let (content_type_header, body) = multipart_attachment(filename, content_type, bytes);
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .header(reqwest::header::CONTENT_TYPE, content_type_header)
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// Download an attachment's bytes and the host's suggested filename.
+    pub async fn download_kanban_attachment(
+        &self,
+        attachment_id: i64,
+        board: Option<&str>,
+    ) -> Result<KanbanAttachmentFile, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/attachments/{attachment_id}"),
+            board,
+        );
+        let response = self
+            .authed(reqwest::Method::GET, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+        let filename = response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(disposition_filename);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                path,
+                body: String::from_utf8_lossy(&bytes).chars().take(400).collect(),
+            });
+        }
+        Ok(KanbanAttachmentFile {
+            filename,
+            content_type,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// Remove an attachment record and its stored blob.
+    pub async fn delete_kanban_attachment(
+        &self,
+        attachment_id: i64,
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/attachments/{attachment_id}"),
+            board,
+        );
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
             .send()
             .await
             .map_err(|source| ApiError::Transport {
@@ -2636,6 +2839,190 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("authorization: bearer test-token")
         }));
+    }
+
+    #[tokio::test]
+    async fn kanban_attachments_upload_download_and_delete() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies: [(&str, &str, &str); 3] = [
+                (
+                    "application/json",
+                    "",
+                    r#"{"attachment":{"id":7,"filename":"note.txt","content_type":"text/plain","size":5,"uploaded_by":"hermes-gpui"}}"#,
+                ),
+                (
+                    "text/plain; charset=utf-8",
+                    "Content-Disposition: attachment; filename=\"note.txt\"\r\n",
+                    "hello",
+                ),
+                ("application/json", "", r#"{"ok":true,"id":7}"#),
+            ];
+            let mut requests = Vec::new();
+            for (content_type, extra_headers, reply) in replies {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    data.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|n| n.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&data).into_owned());
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let host = HostConfig {
+            base_url: format!("http://{address}"),
+            token: Some("test-token".into()),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+        let uploaded = client
+            .upload_kanban_attachment(
+                "t/1",
+                "note.txt",
+                Some("text/plain"),
+                b"hello",
+                Some("work & ops"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded["attachment"]["id"], 7);
+        let file = client
+            .download_kanban_attachment(7, Some("work & ops"))
+            .await
+            .unwrap();
+        assert_eq!(file.bytes, b"hello");
+        assert_eq!(file.filename.as_deref(), Some("note.txt"));
+        assert_eq!(file.content_type.as_deref(), Some("text/plain"));
+        client
+            .delete_kanban_attachment(7, Some("work & ops"))
+            .await
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with(
+            "POST /api/plugins/kanban/tasks/t%2F1/attachments?board=work%20%26%20ops "
+        ));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("content-type: multipart/form-data; boundary=----hermesgpui\r\n")
+        );
+        assert!(requests[0].contains("name=\"uploaded_by\"\r\n\r\nhermes-gpui\r\n"));
+        assert!(requests[0].contains("name=\"file\"; filename=\"note.txt\"\r\n"));
+        assert!(requests[0].contains("Content-Type: text/plain\r\n"));
+        assert!(requests[0].ends_with("\r\nhello\r\n------hermesgpui--\r\n"));
+        assert!(
+            requests[1]
+                .starts_with("GET /api/plugins/kanban/attachments/7?board=work%20%26%20ops ")
+        );
+        assert!(
+            requests[2]
+                .starts_with("DELETE /api/plugins/kanban/attachments/7?board=work%20%26%20ops ")
+        );
+    }
+
+    /// Exercises the real plugin routes end to end. Point it at a *disposable*
+    /// host: it creates a board, a task, a comment and an attachment.
+    /// `HERMES_GPUI_LIVE_HOST=http://127.0.0.1:PORT HERMES_GPUI_LIVE_TOKEN=... \
+    ///  cargo test -p hermes-api -- --ignored live_kanban`
+    #[tokio::test]
+    #[ignore = "requires a disposable Hermes host via HERMES_GPUI_LIVE_HOST/TOKEN"]
+    async fn live_kanban_task_detail_comments_and_attachments() {
+        let Ok(base) = std::env::var("HERMES_GPUI_LIVE_HOST") else {
+            return;
+        };
+        let host = HostConfig {
+            base_url: base,
+            token: std::env::var("HERMES_GPUI_LIVE_TOKEN").ok(),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+        let slug = format!("gpui-live-{}", std::process::id());
+        client.create_kanban_board(&slug).await.unwrap();
+        let created = client
+            .create_kanban_task("Live verification", Some(&slug))
+            .await
+            .unwrap();
+        let id = created["task"]["id"].as_str().unwrap().to_string();
+
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert_eq!(detail.task.status, "triage");
+        assert!(detail.comments.is_empty());
+        assert!(detail.attachments.is_empty());
+
+        client
+            .comment_kanban_task(&id, "Live comment", Some(&slug))
+            .await
+            .unwrap();
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert_eq!(detail.comments.last().unwrap().body, "Live comment");
+
+        let uploaded = client
+            .upload_kanban_attachment(
+                &id,
+                "live-note.txt",
+                Some("text/plain"),
+                b"live bytes",
+                Some(&slug),
+            )
+            .await
+            .unwrap();
+        let attachment_id = uploaded["attachment"]["id"].as_i64().unwrap();
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert_eq!(detail.attachments.len(), 1);
+        assert_eq!(detail.attachments[0].size, 10);
+
+        let file = client
+            .download_kanban_attachment(attachment_id, Some(&slug))
+            .await
+            .unwrap();
+        assert_eq!(file.bytes, b"live bytes");
+        assert_eq!(file.filename.as_deref(), Some("live-note.txt"));
+
+        client
+            .delete_kanban_attachment(attachment_id, Some(&slug))
+            .await
+            .unwrap();
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert!(detail.attachments.is_empty());
+        // The selected board is client-local: nothing leaked into the host's
+        // active board.
+        let active = client.kanban_board(None).await.unwrap();
+        assert!(
+            !active
+                .columns
+                .iter()
+                .flat_map(|column| &column.tasks)
+                .any(|task| task.id == id)
+        );
     }
 
     #[test]
