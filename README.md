@@ -345,7 +345,11 @@ theme that follows the live desktop palette.
 cycles them with Enter / Shift+Enter. Dictation remains Superwhisper's job
 (`Alt+Space`), since the client does not capture audio itself.
 
-Not yet wired: file browser, voice mode, PTY/file/screen/browser/GPU node
+Working through the personal hub: a node roster with presence, argv-only remote
+commands with streamed output, a PTY terminal per computer (keys, resize and
+hangup) and masked one-time credential cards. All four computers run the agent.
+
+Not yet wired: file browser, voice mode, file/screen/browser/GPU node
 executors, full Markdown formatting, general artifact previews, and advanced
 Kanban management. The
 composer uses GPUI's native multiline editor for cursor navigation, selection,
