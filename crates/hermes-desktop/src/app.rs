@@ -1778,6 +1778,29 @@ impl HermesApp {
         cx.notify();
     }
 
+    /// Report the panel's measured output area to the node as a terminal grid.
+    ///
+    /// Called from prepaint with the real pixel bounds, so the remote terminal
+    /// reflows to the panel instead of keeping its opening size. `Computers`
+    /// deduplicates, so a repainting panel sends nothing until the size changes.
+    /// No `cx.notify()`: the grid is not drawn, and notifying here would make
+    /// the prepaint listener schedule the frame it is already in.
+    fn report_terminal_geometry(&mut self, width_px: f32, height_px: f32) {
+        self.computers.measured(width_px, height_px);
+        let Some((command_id, cols, rows)) = self.computers.resize_terminal() else {
+            return;
+        };
+        if !self.backend.hub_send(HubCommand::TerminalResize {
+            command_id: command_id.clone(),
+            cols,
+            rows,
+        }) {
+            tracing::debug!(command_id, "hub offline; terminal resize not sent");
+            return;
+        }
+        tracing::debug!(command_id, cols, rows, "terminal resized");
+    }
+
     /// Keys for the focused terminal. Ctrl+Shift+D detaches the keyboard and
     /// Ctrl+Shift+X stops the session; everything else is forwarded verbatim.
     fn route_terminal_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
@@ -7119,6 +7142,7 @@ impl HermesApp {
         terminal: &computers::Terminal,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let measurer = cx.entity().downgrade();
         let (status_label, status_color) = command_status_label(terminal.status);
         let running = terminal.is_running();
         let focused = terminal.focused;
@@ -7135,9 +7159,10 @@ impl HermesApp {
         } else {
             terminal.output.clone()
         };
+        let grid = format!("{}×{}", terminal.cols, terminal.rows);
         let hint = if focused {
             format!(
-                "keys go to {} · Ctrl+Shift+D detach · Ctrl+Shift+X stop",
+                "keys go to {} · {grid} · Ctrl+Shift+D detach · Ctrl+Shift+X stop",
                 terminal.node_name
             )
         } else if running {
@@ -7184,18 +7209,35 @@ impl HermesApp {
                     ),
             )
             .child(
+                // A wrapper with exactly one child, so the prepainted bound is
+                // unambiguously the output area and not a sibling's.
                 div()
-                    .id("terminal-output")
-                    .max_h(px(280.))
-                    .min_h(px(96.))
-                    .overflow_y_scroll()
-                    .rounded_md()
-                    .bg(rgb(surface()))
-                    .p_2()
-                    .font_family("monospace")
-                    .text_xs()
-                    .text_color(rgb(text_muted()))
-                    .child(SharedString::from(output)),
+                    .flex()
+                    .flex_col()
+                    .on_children_prepainted(move |bounds, _window, cx| {
+                        let Some(bounds) = bounds.first() else {
+                            return;
+                        };
+                        let (width, height) =
+                            (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                        measurer
+                            .update(cx, |this, _cx| this.report_terminal_geometry(width, height))
+                            .ok();
+                    })
+                    .child(
+                        div()
+                            .id("terminal-output")
+                            .max_h(px(280.))
+                            .min_h(px(96.))
+                            .overflow_y_scroll()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .p_2()
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .child(SharedString::from(output)),
+                    ),
             )
             .child(
                 div()

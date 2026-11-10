@@ -237,6 +237,14 @@ as bytes, and the remote terminal echoes them back. `Ctrl+Shift+D` detaches the
 keyboard (the session keeps running; click the panel to type again) and
 `Ctrl+Shift+X` stops the session, which hangs up the process group.
 
+The panel measures its own output area in prepaint and converts the pixel
+bounds to a grid (about 7.2 × 15 px per cell at `text_xs`), clamped to 20–500
+columns and 5–300 rows. The opening request carries the last measured grid, and
+the client sends a `TerminalResize` frame whenever the measured grid changes,
+so a resized window or a closed sheet reflows the remote program. The
+conversion is approximate — the exact glyph advance depends on the font — but
+it never repeats an unchanged frame and never resizes a finished session.
+
 A terminal has no timeout, so `timeout_ms` must be zero with a `pty` spec. The
 hub relays terminal bytes and stores none of them: they are absent from
 `command_events`, the audit log and the transcript. Terminal records also stay
