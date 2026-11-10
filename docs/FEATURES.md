@@ -120,6 +120,21 @@ Not implemented: drag-and-drop, filters/search, bulk actions, live board events,
 dispatch, model overrides, runs/diagnostics views, board description/icon/colour
 and workdir settings.
 
+## Computers (personal hub)
+
+The client talks to `hermes-hub` over the device WebSocket. This is separate
+from the gateway connection, so a hub outage does not interrupt chat.
+
+| Capability | Behaviour | Wire surface |
+| --- | --- | --- |
+| Roster and presence | Enrolled nodes, online count, automatic selection of an online node, live presence updates | `GET /api/v1/nodes`; `/v1/device` `NodeList` / `NodePresence` |
+| Remote command | Quote-aware argv parsing, no shell; optional cwd; 120 s timeout; streamed stdout/stderr; cancel; 256 KiB client output cap; last 20 commands kept locally | `SubmitCommand`, `CancelCommand`, `CommandState`, `CommandStream` |
+| Secret prompt | Optional env var and purpose ask the remote node for a one-time value; top-most masked card, Enter to provide, Escape to cancel; nothing stored in settings or the transcript | `PromptRequest` / `PromptAnswer` / `PromptClosed` |
+| Offline behaviour | Reconnects with backoff; requests are not replayed or queued for later | device socket |
+
+Only the shell executor exists today. PTY, file transfer, screen capture,
+browser and GPU executors, and SSH credentials are later node capabilities.
+
 ## Desktop integration
 
 | Capability | Behaviour |
@@ -128,8 +143,9 @@ and workdir settings.
 | Tray | Show Hermes, Quit; window close hides to tray so turns keep streaming |
 | Theme | Follows Omarchy `colors.toml`, re-read at most every 2 s, semantic token layer, contrast/scale invariants unit-tested |
 | Voice | External `voice-models` TTS; dictation stays with Superwhisper (`Alt+Space`) |
-| QA hooks | `--probe`, `HERMES_DEMO`, `HERMES_OPEN_INSPECTOR`, `HERMES_INSPECTOR_TAB`, `HERMES_OPEN_SETTINGS` |
+| QA hooks | `--probe`, `HERMES_DEMO`, `HERMES_OPEN_INSPECTOR`, `HERMES_INSPECTOR_TAB`, `HERMES_OPEN_SETTINGS` (including `computers`) |
 
 See [`OPERATIONS.md`](OPERATIONS.md) for every environment variable and
 [`../PARITY.md`](../PARITY.md) for what is still missing (notifications, voice
-capture, terminal, computer view, artifacts, multi-host).
+capture, a terminal surface, node executors beyond shell, artifacts and SSH
+credentials).

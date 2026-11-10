@@ -45,6 +45,7 @@ pub enum Action {
     ToggleMcp,
     ToggleSessions,
     ToggleUsage,
+    ToggleComputers,
     Find,
     Dismiss,
     PaletteUp,
@@ -99,6 +100,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "a" if chord.shift => Action::ToggleAssignments,
                     "s" if chord.shift => Action::ToggleSessions,
                     "u" if chord.shift => Action::ToggleUsage,
+                    "h" if chord.shift => Action::ToggleComputers,
                     digit => match digit.parse::<usize>() {
                         Ok(index) if (1..=9).contains(&index) => Action::SwitchProfile(index),
                         _ => Action::Nothing,
@@ -172,6 +174,17 @@ mod tests {
                 Focus::Composer
             ),
             Action::ToggleVault
+        );
+        assert_eq!(
+            resolve(
+                Chord {
+                    primary: true,
+                    shift: true,
+                    ..chord("h", None)
+                },
+                Focus::Composer
+            ),
+            Action::ToggleComputers
         );
         assert_eq!(
             resolve(

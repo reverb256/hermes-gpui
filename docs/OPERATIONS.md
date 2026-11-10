@@ -31,7 +31,11 @@ The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
 | `HERMES_GPUI_SOCKET` | `$XDG_RUNTIME_DIR/hermes-gpui-$USER.sock` | single-instance IPC path |
 | `HERMES_OPEN_INSPECTOR` | unset | open the bot inspector at launch (`1`) |
 | `HERMES_INSPECTOR_TAB` | `look` | `look`, `connectors`, `secrets` |
-| `HERMES_OPEN_SETTINGS` | unset | open the sheet: `vault`, `model`, `assignments`, `skills`, `mcp`, `sessions`, `usage` |
+| `HERMES_HUB_URL` | unset | personal hub base URL; all three hub device variables must be set together |
+| `HERMES_HUB_DEVICE_ID` | unset | device id returned by enrollment |
+| `HERMES_HUB_DEVICE_TOKEN` | unset | device token; sent as a bearer header and never displayed |
+| `HERMES_HUB_DEVICE_NAME` | `Hermes GPUI` | display name for this client device |
+| `HERMES_OPEN_SETTINGS` | unset | open the sheet: `vault`, `model`, `assignments`, `skills`, `mcp`, `sessions`, `computers`, `usage` |
 | `HERMES_DEMO` | unset | seed a short local transcript for screenshots |
 | `RUST_LOG` | `hermes_desktop=info,hermes_api=info,hermes_rpc=info` | tracing filter |
 | `HERMES_GPUI_LIVE_HOST` / `_TOKEN` | unset | only for `--ignored` live tests; never production |
@@ -112,6 +116,26 @@ curl -fsS -X POST http://127.0.0.1:8080/api/v1/enroll \
 commands. The same flow with `"kind":"device"` issues a client token; revoke it
 with `DELETE /api/v1/devices/{id}`. `GET /api/v1/audit` is the personal audit;
 it never contains a prompt value.
+
+### Desktop client
+
+Enroll this client once with a device code, then start the GPUI app with the
+returned id and token together:
+
+```bash
+HERMES_HUB_URL=https://hermes \
+HERMES_HUB_DEVICE_ID=device-… \
+HERMES_HUB_DEVICE_TOKEN=… \
+  ./target/release/hermes-desktop
+```
+
+`Ctrl+Shift+H` (or the **Computers** header button) shows the node roster,
+presence, an argv-only command form, streamed output and one-time credential
+cards. The client sends the token only in the WebSocket `Authorization` header;
+it reconnects with backoff and dequeues no offline commands. If only some hub
+variables are set, the Computers page reports the configuration error instead
+of silently falling back to gateway-only mode. The token header is never written
+to logs, transcripts or the audit log.
 
 ### Kubernetes / ArgoCD
 

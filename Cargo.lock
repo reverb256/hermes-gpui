@@ -2799,11 +2799,13 @@ name = "hermes-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures-util",
  "gpui-ce",
  "gpui_ce_elements",
  "gpui_ce_platform",
  "hermes-api",
+ "hermes-protocol",
  "hermes-rpc",
  "ksni",
  "pulldown-cmark",
@@ -2811,8 +2813,11 @@ dependencies = [
  "rfd",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

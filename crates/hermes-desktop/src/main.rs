@@ -1,6 +1,8 @@
 mod app;
 mod backend;
+mod computers;
 mod cron;
+mod hub_client;
 mod inspector;
 mod ipc;
 mod kanban;

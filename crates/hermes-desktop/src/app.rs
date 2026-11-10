@@ -14,13 +14,16 @@ use gpui::{
 };
 use gpui_ce_elements::editable_text::{EditableTextState, StringStorage, TextChanged, text_area};
 use hermes_api::{ActiveProfile, HostConfig, Profile, SkillHubPreview};
+use hermes_protocol::{CommandStatus, PromptAnswer, PromptDecision};
 use hermes_rpc::ConnectionState;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::backend::{
     ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command, Page,
 };
+use crate::computers::{self, Computers, Field as ComputersField, RemoteCommand};
 use crate::cron::{self, Automations};
+use crate::hub_client::HubCommand;
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::kanban::Kanban;
 use crate::keys::{self, Action, Chord, Focus};
@@ -126,6 +129,7 @@ pub struct HermesApp {
     moa: Moa,
     automations: Automations,
     accounts: Accounts,
+    computers: Computers,
     media: std::collections::HashMap<String, Result<Arc<gpui::Image>, String>>,
     ipc: Option<Arc<crate::ipc::Listener>>,
     /// Stored transcript on screen; sending is disabled until New chat.
@@ -151,6 +155,8 @@ impl HermesApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let (backend, events) = Backend::spawn(host.clone());
+        let hub_configured = backend.hub_configured();
+        let hub_problem = backend.hub_problem();
         let tray = tray::spawn();
         let composer_input = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
         let composer_subscription =
@@ -197,6 +203,7 @@ impl HermesApp {
             moa: Moa::default(),
             automations: Automations::default(),
             accounts: Accounts::default(),
+            computers: Computers::new(hub_configured, hub_problem),
             media: std::collections::HashMap::new(),
             ipc: listener.map(Arc::new),
             viewing_history: None,
@@ -247,6 +254,7 @@ impl HermesApp {
                 "sessions" => app.open_sessions(cx),
                 "skills" => app.open_skills(cx),
                 "mcp" => app.open_mcp(cx),
+                "computers" => app.open_computers(cx),
                 "usage" => app.open_usage(cx),
                 _ => app.open_vault(cx),
             }
@@ -888,6 +896,23 @@ impl HermesApp {
             BackendEvent::SpeakFailed(message) => {
                 self.voice_status = Some(format!("voice: {message}"));
             }
+            BackendEvent::HubConnection(connected) => self.computers.connection(connected),
+            BackendEvent::HubNodes(nodes) => self.computers.nodes_loaded(nodes),
+            BackendEvent::HubNode(node) => self.computers.node_presence(node),
+            BackendEvent::HubCommand(command) => self.computers.command_state(command),
+            BackendEvent::HubStream {
+                command_id,
+                channel,
+                data,
+            } => self.computers.stream(&command_id, channel, &data),
+            BackendEvent::HubPrompt(prompt) => {
+                if !self.window_active {
+                    crate::omarchy::notify_approval("Hermes needs a credential");
+                }
+                self.computers.push_prompt(prompt);
+            }
+            BackendEvent::HubPromptClosed(prompt_id) => self.computers.prompt_closed(&prompt_id),
+            BackendEvent::HubProblem(message) => self.computers.problem(message),
         }
         self.sync_tray(cx);
         cx.notify();
@@ -896,6 +921,13 @@ impl HermesApp {
     // ---- keyboard -------------------------------------------------------
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A credential card is the most modal surface: its value must never
+        // leak into the composer, and Escape is the explicit cancel action.
+        if !self.computers.prompts.is_empty() {
+            cx.stop_propagation();
+            self.route_prompt_typing(event, cx);
+            return;
+        }
         // Settings is modal: it owns the keyboard while it is up, so chat
         // shortcuts cannot fire behind it.
         if self.settings.open {
@@ -917,6 +949,8 @@ impl HermesApp {
                     && self.route_cron_typing(event, cx))
                 || (self.settings.section == Section::Accounts
                     && self.route_oauth_typing(event, cx))
+                || (self.settings.section == Section::Computers
+                    && self.route_computers_typing(event, cx))
             {
                 return;
             }
@@ -996,7 +1030,10 @@ impl HermesApp {
                 )
                 || primary
                     && keystroke.modifiers.shift
-                    && matches!(keystroke.key.as_str(), "v" | "m" | "a" | "s" | "u" | "x");
+                    && matches!(
+                        keystroke.key.as_str(),
+                        "v" | "m" | "a" | "s" | "u" | "x" | "h"
+                    );
             let mention_key = self.mention.open
                 && matches!(
                     keystroke.key.as_str(),
@@ -1122,6 +1159,7 @@ impl HermesApp {
             Action::ToggleInspector => self.toggle_inspector(cx),
             Action::ToggleVault => self.toggle_vault(cx),
             Action::ToggleUsage => self.toggle_usage(cx),
+            Action::ToggleComputers => self.toggle_computers(cx),
             Action::Find => self.open_search(cx),
             Action::ToggleModels => self.toggle_models(cx),
             Action::ToggleAssignments => self.toggle_assignments(cx),
@@ -1533,6 +1571,7 @@ impl HermesApp {
         self.skills.hub_focus = false;
         self.mcp.focus = false;
         self.models.focus = false;
+        self.computers.focus = None;
         cx.notify();
     }
 
@@ -1550,6 +1589,182 @@ impl HermesApp {
         } else {
             self.open_usage(cx);
         }
+    }
+
+    fn open_computers(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Computers);
+        if self.computers.focus.is_none() {
+            self.computers.focus = Some(ComputersField::Argv);
+        }
+        if !self.computers.configured && self.computers.problem.is_none() {
+            self.computers.problem = Some(
+                "Set HERMES_HUB_URL, HERMES_HUB_DEVICE_ID and HERMES_HUB_DEVICE_TOKEN to use Computers."
+                    .into(),
+            );
+        }
+        cx.notify();
+    }
+
+    fn toggle_computers(&mut self, cx: &mut Context<Self>) {
+        if self.settings.open && self.settings.section == Section::Computers {
+            self.close_settings(cx);
+        } else {
+            self.open_computers(cx);
+        }
+    }
+
+    fn route_computers_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(field) = self.computers.focus else {
+            return false;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => self.computers.focus = None,
+            "tab" => self.computers.focus = Some(field.next()),
+            "enter" => {
+                if field == ComputersField::Purpose {
+                    self.submit_remote(cx);
+                } else {
+                    self.computers.focus = Some(field.next());
+                }
+            }
+            "backspace" => {
+                self.computers.text_mut(field).pop();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.computers.text_mut(field).push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn submit_remote(&mut self, cx: &mut Context<Self>) {
+        let node_id = match self.computers.selected.clone() {
+            Some(id) => id,
+            None => {
+                self.computers.status = Some("Select a computer first.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let node_name = self
+            .computers
+            .selected_node()
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| node_id.clone());
+        let request = match self.computers.build_request() {
+            Ok(request) => request,
+            Err(message) => {
+                self.computers.status = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let sent = self.backend.hub_send(HubCommand::Submit {
+            node_id,
+            command: request,
+        });
+        if sent {
+            self.computers.submitted(&node_name);
+        } else {
+            self.computers
+                .problem("Hub is not configured or disconnected; nothing was sent.".into());
+        }
+        cx.notify();
+    }
+
+    fn cancel_remote(&mut self, command_id: &str, cx: &mut Context<Self>) {
+        if self.backend.hub_send(HubCommand::Cancel {
+            command_id: command_id.to_string(),
+        }) {
+            self.computers.status = Some("cancel requested…".into());
+        } else {
+            self.computers
+                .problem("Hub is not configured or disconnected; nothing was sent.".into());
+        }
+        cx.notify();
+    }
+
+    /// Keyboard for the top-most credential card. The value never touches the
+    /// composer, and an empty answer cannot be submitted by accident.
+    fn route_prompt_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(card) = self.computers.prompt_front() else {
+            return;
+        };
+        if card.submitting {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "escape" => self.cancel_prompt(cx),
+            "enter" => self.answer_prompt(cx),
+            "backspace" => {
+                if let Some(card) = self.computers.prompts.first_mut() {
+                    card.answer.pop();
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref()
+                    && let Some(card) = self.computers.prompts.first_mut()
+                {
+                    card.answer.push_str(chars);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn answer_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some((prompt, value)) = self.computers.take_answer() else {
+            self.computers.status = Some("Enter a value or cancel the request.".into());
+            cx.notify();
+            return;
+        };
+        let answer = PromptAnswer {
+            prompt_id: prompt.id.clone(),
+            challenge: prompt.challenge.clone(),
+            decision: PromptDecision::Provide {
+                value,
+                remember: false,
+            },
+        };
+        if !self.backend.hub_send(HubCommand::Answer { answer }) {
+            self.computers
+                .problem("Hub is not configured or disconnected; nothing was sent.".into());
+        }
+        cx.notify();
+    }
+
+    fn cancel_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self
+            .computers
+            .prompt_front()
+            .map(|card| card.prompt.clone())
+        else {
+            return;
+        };
+        let answer = PromptAnswer {
+            prompt_id: prompt.id.clone(),
+            challenge: prompt.challenge.clone(),
+            decision: PromptDecision::Cancel,
+        };
+        if self.backend.hub_send(HubCommand::Answer { answer }) {
+            self.computers.mark_submitting(&prompt.id);
+        } else {
+            self.computers
+                .problem("Hub is not configured or disconnected; nothing was sent.".into());
+        }
+        cx.notify();
     }
 
     fn vault_field_mut(&mut self, field: vault::Field) -> Option<&mut String> {
@@ -6407,6 +6622,593 @@ impl HermesApp {
         .into_any_element()
     }
 
+    fn computers_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (state_label, state_color) = if self.computers.connected {
+            (
+                format!(
+                    "hub connected · {} of {} online",
+                    self.computers.online_count(),
+                    self.computers.nodes.len()
+                ),
+                user(),
+            )
+        } else if self.computers.configured {
+            ("hub connecting…".to_string(), warn())
+        } else {
+            ("hub not configured".to_string(), text_dim())
+        };
+
+        let mut body = div()
+            .id("computers-body")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Your computers"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(rgb(state_color)))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .child(SharedString::from(state_label)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child("Commands run on the selected computer through its outbound node agent; no inbound port is opened."),
+            );
+
+        if let Some(problem) = self.computers.problem.clone() {
+            body = body.child(self.note(&problem));
+            if !self.computers.configured {
+                return body.into_any_element();
+            }
+        }
+
+        body = body.child(self.section_label("COMPUTERS"));
+        if self.computers.nodes.is_empty() {
+            body = body.child(self.note(
+                "No node has connected yet. Install hermes-node and enroll it against the hub.",
+            ));
+        }
+        for node in &self.computers.nodes {
+            let id = node.id.clone();
+            let selected = self.computers.selected.as_deref() == Some(node.id.as_str());
+            let online = node.online;
+            let name = if node.name.trim().is_empty() {
+                node.hostname.clone()
+            } else {
+                node.name.clone()
+            };
+            let meta = format!(
+                "{} · {}/{} · node v{}",
+                node.hostname, node.os, node.arch, node.agent_version
+            );
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("computer-{}", node.id)))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(if selected { accent_soft() } else { bg() }))
+                    .border_1()
+                    .border_color(rgb(if selected { accent() } else { border() }))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface_hi())))
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.computers.select(&id);
+                        this.computers.focus = Some(ComputersField::Argv);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(rgb(if online {
+                                user()
+                            } else {
+                                text_dim()
+                            })))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(if online {
+                                                text()
+                                            } else {
+                                                text_muted()
+                                            }))
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_dim()))
+                                            .child(SharedString::from(meta)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(if online { user() } else { text_dim() }))
+                            .child(if online { "online" } else { "offline" }),
+                    ),
+            );
+        }
+
+        body = body.child(self.section_label("COMMAND"));
+        let selected = self
+            .computers
+            .selected_node()
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| "no computer selected".into());
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(text_muted()))
+                .child(SharedString::from(format!("Runs on {selected}"))),
+        );
+        body = body
+            .child(self.computers_field(
+                "PROGRAM AND ARGUMENTS",
+                &self.computers.argv,
+                "uptime",
+                self.computers.focus == Some(ComputersField::Argv),
+                ComputersField::Argv,
+                cx,
+            ))
+            .child(self.computers_field(
+                "WORKING DIRECTORY (OPTIONAL)",
+                &self.computers.cwd,
+                "/home/you",
+                self.computers.focus == Some(ComputersField::Cwd),
+                ComputersField::Cwd,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.computers_field(
+                                "SECRET ENV (OPTIONAL)",
+                                &self.computers.secret_env,
+                                "PGPASSWORD",
+                                self.computers.focus == Some(ComputersField::SecretEnv),
+                                ComputersField::SecretEnv,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.computers_field(
+                                "WHY IT IS NEEDED",
+                                &self.computers.secret_purpose,
+                                "database backup",
+                                self.computers.focus == Some(ComputersField::Purpose),
+                                ComputersField::Purpose,
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child("A secret variable asks this client for a one-time value; the value is injected into the child environment, never argv."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("computers-run")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(accent_hi())))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.submit_remote(cx)
+                            }))
+                            .child("Run on computer"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("Ctrl+Shift+H · timeout 120 s"),
+                    ),
+            );
+
+        if let Some(status) = self.computers.status.clone() {
+            body = body.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(surface()))
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .child(SharedString::from(status)),
+            );
+        }
+
+        body = body.child(self.section_label("OUTPUT"));
+        if self.computers.commands.is_empty() {
+            body = body.child(self.note("No commands yet in this session."));
+        }
+        for command in &self.computers.commands {
+            body = body.child(self.remote_command_card(command, cx));
+        }
+
+        body.into_any_element()
+    }
+
+    fn computers_field(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        focused: bool,
+        target: ComputersField,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut field = div()
+            .id(SharedString::from(format!("computers-field-{label}")))
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(bg()))
+            .border_1()
+            .text_xs()
+            .cursor_pointer()
+            .when(focused, |this| this.border_color(rgb(accent())))
+            .when(!focused, |this| this.border_color(rgb(border())))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.computers.focus = Some(target);
+                cx.notify();
+            }));
+        if value.is_empty() {
+            field = field.child(
+                div()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(placeholder.to_string())),
+            );
+        } else {
+            field = field.child(
+                div()
+                    .text_color(rgb(text()))
+                    .child(SharedString::from(value.to_string())),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.section_label(label))
+            .child(field)
+    }
+
+    fn remote_command_card(
+        &self,
+        command: &RemoteCommand,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (status_label, status_color) = match command.record.status {
+            CommandStatus::Succeeded => ("succeeded", user()),
+            CommandStatus::Failed => ("failed", danger()),
+            CommandStatus::Denied => ("denied", danger()),
+            CommandStatus::TimedOut => ("timed out", danger()),
+            CommandStatus::Cancelled => ("cancelled", text_dim()),
+            CommandStatus::Running => ("running", warn()),
+            CommandStatus::Queued => ("queued", warn()),
+        };
+        let id = command.record.id.clone();
+        let output = if command.output.is_empty() {
+            if command.is_running() {
+                "waiting for output…".to_string()
+            } else {
+                "no output".to_string()
+            }
+        } else {
+            command.output.clone()
+        };
+        let message = command.record.message.clone();
+        let exit = command
+            .record
+            .exit_code
+            .map(|code| format!(" · exit {code}"))
+            .unwrap_or_default();
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(rgb(surface()))
+            .border_1()
+            .border_color(rgb(border()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(command.summary())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(status_color))
+                            .child(SharedString::from(format!("{status_label}{exit}"))),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("output-{id}")))
+                    .max_h(px(140.))
+                    .overflow_y_scroll()
+                    .rounded_md()
+                    .bg(rgb(bg()))
+                    .p_2()
+                    .font_family("monospace")
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .child(SharedString::from(output)),
+            );
+        if command.truncated {
+            card =
+                card.child(div().text_xs().text_color(rgb(text_dim())).child(
+                    "Output capped in the client; the command kept running on the computer.",
+                ));
+        }
+        if let Some(message) = message {
+            card = card.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(status_color))
+                    .child(SharedString::from(message)),
+            );
+        }
+        if command.is_running() {
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("cancel-{id}")))
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(surface_hi()))
+                    .text_xs()
+                    .text_color(rgb(danger()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(danger_soft())))
+                    .on_click(
+                        cx.listener(move |this, _event, _window, cx| this.cancel_remote(&id, cx)),
+                    )
+                    .child("Cancel"),
+            );
+        }
+        card.into_any_element()
+    }
+
+    fn secret_prompt_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(card) = self.computers.prompt_front() else {
+            return div().into_any_element();
+        };
+        let prompt = &card.prompt;
+        let masked = if card.answer.is_empty() {
+            "Type the value…".to_string()
+        } else {
+            "••••••••••••".to_string()
+        };
+        let expired = computers::seconds_left(prompt.expires_at_ms) == 0;
+        let submitting = card.submitting;
+        let count = self.computers.prompts.len();
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(scrim()))
+            .child(
+                div()
+                    .w(px(460.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_5()
+                    .rounded_xl()
+                    .bg(rgb(surface()))
+                    .border_1()
+                    .border_color(rgb(warn()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(rgb(warn_soft()))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(warn()))
+                                    .child("CREDENTIAL REQUEST"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(text_dim()))
+                                    .child(if count > 1 {
+                                        SharedString::from(format!("1 of {count} pending"))
+                                    } else {
+                                        SharedString::from("one-time")
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(SharedString::from(prompt.env_var.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .child(SharedString::from(prompt.purpose.clone())),
+                    )
+                    .child(self.stat("scope", prompt.scope.clone()))
+                    .child(self.stat("requested by", prompt.requester.clone()))
+                    .child(self.stat(
+                        "expires",
+                        if expired {
+                            "already expired".to_string()
+                        } else {
+                            format!("in {} s", computers::seconds_left(prompt.expires_at_ms))
+                        },
+                    ))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(bg()))
+                            .border_1()
+                            .border_color(rgb(if submitting { border() } else { accent() }))
+                            .font_family("monospace")
+                            .text_sm()
+                            .when(card.answer.is_empty(), |this| this.text_color(rgb(text_dim())))
+                            .when(!card.answer.is_empty(), |this| this.text_color(rgb(text())))
+                            .child(SharedString::from(masked)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_dim()))
+                            .child("The value is sent once to the requesting computer and injected into that command's environment. The client does not write it to disk, logs or the transcript."),
+                    )
+                    .when(submitting, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(warn()))
+                                .child("Waiting for the computer to confirm…"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("secret-provide")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(if submitting { surface_hi() } else { accent() }))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(if submitting { text_dim() } else { bg() }))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.answer_prompt(cx)
+                                    }))
+                                    .child("Provide"),
+                            )
+                            .child(
+                                div()
+                                    .id("secret-cancel")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(surface_hi()))
+                                    .text_xs()
+                                    .text_color(rgb(danger()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(danger_soft())))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.cancel_prompt(cx)
+                                    }))
+                                    .child("Cancel"),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(text_dim()))
+                                    .child("Enter to provide · Esc to cancel"),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn settings_sheet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let section = self.settings.section;
         let body = match section {
@@ -6420,6 +7222,7 @@ impl HermesApp {
             Section::Skills => self.skills_body(cx),
             Section::Mcp => self.mcp_body(cx),
             Section::Memory => self.memory_body(cx),
+            Section::Computers => self.computers_body(cx),
             Section::Usage => self.usage_body(cx),
         };
 
@@ -6480,6 +7283,7 @@ impl HermesApp {
                                     Section::Skills => this.open_skills(cx),
                                     Section::Mcp => this.open_mcp(cx),
                                     Section::Memory => this.open_memory(cx),
+                                    Section::Computers => this.open_computers(cx),
                                     Section::Vault => this.open_vault(cx),
                                 },
                             ))
@@ -6887,6 +7691,13 @@ impl HermesApp {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .when(self.computers.configured, |this| {
+                        this.child(SharedString::from(format!(
+                            "hub {}/{}",
+                            self.computers.online_count(),
+                            self.computers.nodes.len()
+                        )))
+                    })
                     .child(SharedString::from(model))
                     .child(SharedString::from(format!("v{version}"))),
             )
@@ -6999,6 +7810,40 @@ impl HermesApp {
                 )
             })
             .child(div().flex_1())
+            .when(self.computers.configured, |this| {
+                this.child(
+                    div()
+                        .id("computers-toggle")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(
+                            self.settings.open && self.settings.section == Section::Computers,
+                            |this| this.bg(rgb(accent_soft())).text_color(rgb(accent())),
+                        )
+                        .when(
+                            !(self.settings.open && self.settings.section == Section::Computers),
+                            |this| {
+                                this.text_color(rgb(text_muted()))
+                                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
+                            },
+                        )
+                        .on_click(
+                            cx.listener(|this, _event, _window, cx| this.toggle_computers(cx)),
+                        )
+                        .child("▣")
+                        .child(SharedString::from(format!(
+                            "Computers {}/{}",
+                            self.computers.online_count(),
+                            self.computers.nodes.len()
+                        ))),
+                )
+            })
             .child(
                 div()
                     .id("inspector-toggle")
@@ -10616,6 +11461,9 @@ impl Render for HermesApp {
             .when_some(palette, |this, palette| this.child(palette))
             .when(self.settings.open, |this| {
                 this.child(self.settings_overlay(cx))
+            })
+            .when(!self.computers.prompts.is_empty(), |this| {
+                this.child(self.secret_prompt_overlay(cx))
             })
     }
 }

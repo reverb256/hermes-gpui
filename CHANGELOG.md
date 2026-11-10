@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Computers: the GPUI client now connects to `hermes-hub` over `/v1/device`, with a
+  node roster and presence, argv-only remote command execution, streamed output,
+  cancel, reconnect/backoff, and top-most masked one-time credential cards
+  (`Ctrl+Shift+H` or **Computers** in the header).
 - `Ctrl+F` transcript find bar: case-insensitive search over loaded lines with
   match highlighting, Enter/Shift+Enter cycling and scroll-to-match.
 - Session resume with a read-only fallback, project filtering and JSON export.

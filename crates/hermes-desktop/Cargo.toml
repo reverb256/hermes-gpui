@@ -13,9 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 hermes-api.workspace = true
+hermes-protocol.workspace = true
 hermes-rpc.workspace = true
 
 anyhow.workspace = true
+base64 = "0.22"
 futures-util.workspace = true
 gpui = { package = "gpui-ce", version = "=0.3.0" }
 gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0", features = ["font-kit", "wayland", "x11"] }
@@ -24,7 +26,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "process"] }
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 pulldown-cmark = { version = "0.13.6", default-features = false }
 gpui_ce_elements = "=0.3.0"
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"

@@ -11,9 +11,12 @@ use hermes_api::{
     RestClient, SessionSummary, Skill, SkillHubPreview, SkillHubResult, SkillHubScan,
     UsageAnalytics, gateway,
 };
+use hermes_protocol::{CommandRecord, NodeSummary, SecretPrompt, StreamChannel};
 use hermes_rpc::ConnectionState;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+
+use crate::hub_client::{HubCommand, HubConfig, HubLink};
 
 /// `prompt.submit` is fire-and-forget; the backend answers only after the turn
 /// settles, and a long tool chain may take minutes (official client: 30 min).
@@ -364,6 +367,19 @@ pub enum BackendEvent {
     },
     /// A line for the inspector's status strip, not the transcript.
     InspectorStatus(String),
+    /// The `/v1/device` socket to the personal hub.
+    HubConnection(bool),
+    HubNodes(Vec<NodeSummary>),
+    HubNode(NodeSummary),
+    HubCommand(CommandRecord),
+    HubStream {
+        command_id: String,
+        channel: StreamChannel,
+        data: Vec<u8>,
+    },
+    HubPrompt(SecretPrompt),
+    HubPromptClosed(String),
+    HubProblem(String),
 }
 
 #[derive(Debug)]
@@ -616,6 +632,8 @@ pub enum Command {
 #[derive(Clone)]
 pub struct Backend {
     commands: mpsc::UnboundedSender<Command>,
+    hub: Option<HubLink>,
+    hub_problem: Option<String>,
     _runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
@@ -633,11 +651,25 @@ impl Backend {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        let (hub, hub_problem) = match HubConfig::from_env() {
+            Ok(Some(config)) => (
+                Some(HubLink::spawn(config, event_tx.clone(), runtime.handle())),
+                None,
+            ),
+            Ok(None) => (None, None),
+            Err(problem) => {
+                let _ = event_tx.send(BackendEvent::HubProblem(problem.clone()));
+                (None, Some(problem))
+            }
+        };
+
         runtime.spawn(worker(host, cmd_rx, event_tx));
 
         (
             Self {
                 commands: cmd_tx,
+                hub,
+                hub_problem,
                 _runtime: runtime,
             },
             event_rx,
@@ -646,6 +678,20 @@ impl Backend {
 
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    pub fn hub_configured(&self) -> bool {
+        self.hub.is_some()
+    }
+
+    pub fn hub_problem(&self) -> Option<String> {
+        self.hub_problem.clone()
+    }
+
+    /// Send a request to the hub connection. False means the client was not
+    /// configured or the worker has stopped.
+    pub fn hub_send(&self, command: HubCommand) -> bool {
+        self.hub.as_ref().is_some_and(|hub| hub.send(command))
     }
 }
 

@@ -59,12 +59,19 @@ cargo run -p hermes-hub    # http://127.0.0.1:8080
 HERMES_HUB_URL=http://127.0.0.1:8080 \
 HERMES_NODE_ID=node-… HERMES_NODE_TOKEN=… \
 cargo run -p hermes-node
+
+# on the client, with a token from a "device" enrollment
+HERMES_HUB_URL=http://127.0.0.1:8080 \
+HERMES_HUB_DEVICE_ID=device-… HERMES_HUB_DEVICE_TOKEN=… \
+cargo run -p hermes-desktop
 ```
 
 The hub deploys from `charts/hermes-hub` through the ArgoCD Application in
 `deploy/argocd/hermes-hub.yaml`, behind a Tailscale Ingress. Compose is in
-`deploy/compose`. The GPUI client does not yet consume the device socket, so the
-hub is exercised today by the REST/WS API and the end-to-end tests.
+`deploy/compose`. The GPUI client connects to `/v1/device`: `Ctrl+Shift+H` or the
+**Computers** header button lists enrolled nodes, runs argv-only commands and
+shows one-time credential cards. `HERMES_OPEN_SETTINGS=computers` opens the sheet
+at launch for QA.
 
 ## Running
 
@@ -338,10 +345,9 @@ theme that follows the live desktop palette.
 cycles them with Enter / Shift+Enter. Dictation remains Superwhisper's job
 (`Alt+Space`), since the client does not capture audio itself.
 
-Not yet wired: file browser, voice mode, multi-host switching (the hub roster
-and node picker are not in the client yet), secret-prompt cards in the GPUI UI,
-full Markdown formatting, general artifact previews, and advanced Kanban
-management. The
+Not yet wired: file browser, voice mode, PTY/file/screen/browser/GPU node
+executors, full Markdown formatting, general artifact previews, and advanced
+Kanban management. The
 composer uses GPUI's native multiline editor for cursor navigation, selection,
 undo and IME input; accessibility and platform behavior still need end-to-end
 validation. An isolated Hermes 0.20.3 host was used to

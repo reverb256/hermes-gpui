@@ -164,7 +164,7 @@ product work beyond this GPUI repository.
 | Dedicated Omarchy bar widget and status | Implemented in `packaging/omarchy-shell-hermes` reading `status --json`; live bar insertion, click behavior and multi-monitor layout remain unverified. |
 | Launch at login, package/install/update/uninstall | Partial: PKGBUILD builds and installs the binary, `.desktop` entry and bar widget; signed packages, auto-update, uninstall and launch-at-login remain. |
 | Desktop notifications, sound, focus and privacy | Partial: Omarchy notifications on turn completion and approvals, click-to-focus, `--replace-id` collapsing and a reminder action; sound, in-notification approve, per-bot preferences and disabled states remain. |
-| Multi-host selection, SSH/remotes and credentials | Partial: hub node registry, presence, revoke and Tailscale ingress are implemented; the GPUI picker and SSH credentials remain. |
+| Multi-host selection, SSH/remotes and credentials | Partial: hub node registry/presence/revoke, Tailscale ingress, the GPUI node picker, argv-only remote commands, streamed output/cancel and one-time credential cards are implemented; PTY/file/screen/browser/GPU executors and SSH credentials remain. |
 | Appearance, font scaling, shortcuts and user preferences | Partial: theme sync only; settings persistence and key rebinding missing. |
 | Resizing and small-screen layout | Unknown; inspect responsive behavior and settings sheet overflow. |
 | Cross-platform builds and accessibility APIs | Unknown; no macOS/Windows parity claim from Linux testing. |
