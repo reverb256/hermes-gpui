@@ -30,6 +30,7 @@ pub enum Action {
     Send,
     Newline,
     Backspace,
+    Paste,
     Insert(String),
     Interrupt,
     NewChat,
@@ -91,6 +92,7 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
                     "o" => Action::Attach,
                     "," | "comma" => Action::ToggleInspector,
                     "v" if chord.shift => Action::ToggleVault,
+                    "v" => Action::Paste,
                     "m" if chord.shift => Action::ToggleModels,
                     "a" if chord.shift => Action::ToggleAssignments,
                     "s" if chord.shift => Action::ToggleSessions,
@@ -154,6 +156,7 @@ mod tests {
         assert_eq!(resolve(ctrl("k"), Focus::Composer), Action::OpenPalette);
         assert_eq!(resolve(ctrl("n"), Focus::Composer), Action::NewChat);
         assert_eq!(resolve(ctrl("r"), Focus::Composer), Action::Refresh);
+        assert_eq!(resolve(ctrl("v"), Focus::Composer), Action::Paste);
         assert_eq!(resolve(ctrl("o"), Focus::Composer), Action::Attach);
         assert_eq!(resolve(ctrl(","), Focus::Composer), Action::ToggleInspector);
         assert_eq!(

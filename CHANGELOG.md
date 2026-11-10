@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Session resume with a read-only fallback, project filtering and JSON export.
+- On-demand inline host-local PNG, JPEG and WebP image previews.
+- Single-instance `--toggle` IPC, tray show action and a Hyprland binding example.
+- MoA preset editor, cron job controls and provider OAuth accounts page.
+- MCP OAuth browser hand-off and Kanban board selection, task title editing,
+  confirmed deletion, status transitions and triage task creation.
+- Basic streamed Markdown block rendering and composer clipboard paste.
+- Readable derived Omarchy theme hints and explicit offline-action errors.
+- Larger settings navigation and refreshed session cards using theme tokens.
 - Skills-hub browser: source-wide search, SKILL.md and manifest preview, the
   installer's security verdict, and confirmed installs by identifier.
 - Voice playback: `▷ Speak` synthesizes the last assistant reply through the

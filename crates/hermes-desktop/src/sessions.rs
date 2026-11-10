@@ -26,6 +26,8 @@ pub struct Sessions {
     pub focus: bool,
     pub status: Option<String>,
     pub renaming: Option<RenameDraft>,
+    /// `cwd` prefix filter; `None` means every project.
+    pub project: Option<String>,
 }
 
 impl Sessions {
@@ -61,24 +63,54 @@ pub fn now_secs() -> f64 {
         .unwrap_or_default()
 }
 
-/// Rows matching the search box, in the order the backend returned them.
-pub fn filtered(
+/// Search plus a project (`cwd`) prefix. The host also accepts `cwd_prefix`;
+/// filtering the loaded page keeps project switching instant and avoids a
+/// round trip for every chip click.
+pub fn filtered_project(
     rows: &[hermes_api::SessionSummary],
     query: &str,
+    project: Option<&str>,
 ) -> Vec<hermes_api::SessionSummary> {
     let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
-        return rows.to_vec();
-    }
     rows.iter()
         .filter(|row| {
-            row.title.to_lowercase().contains(&needle)
+            project.is_none_or(|project| {
+                row.cwd == project
+                    || (!project.is_empty()
+                        && row
+                            .cwd
+                            .starts_with(&format!("{}/", project.trim_end_matches('/'))))
+            })
+        })
+        .filter(|row| {
+            needle.is_empty()
+                || row.title.to_lowercase().contains(&needle)
                 || row.preview.to_lowercase().contains(&needle)
                 || row.id.to_lowercase().contains(&needle)
                 || row.profile_name.to_lowercase().contains(&needle)
         })
         .cloned()
         .collect()
+}
+
+/// Distinct working directories in the loaded page, newest rows first.
+pub fn projects(rows: &[hermes_api::SessionSummary]) -> Vec<String> {
+    let mut projects = Vec::new();
+    for row in rows {
+        let cwd = row.cwd.trim();
+        if !cwd.is_empty() && !projects.iter().any(|candidate: &String| candidate == cwd) {
+            projects.push(cwd.to_string());
+        }
+    }
+    projects
+}
+
+pub fn project_label(cwd: &str) -> String {
+    std::path::Path::new(cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| cwd.to_string())
 }
 
 pub fn title(row: &hermes_api::SessionSummary) -> String {
@@ -202,6 +234,7 @@ mod tests {
             last_active: last,
             started_at: last - 10.0,
             tool_call_count: 2,
+            cwd: "/work/trading".into(),
             ..SessionSummary::default()
         }
     }
@@ -209,11 +242,24 @@ mod tests {
     #[test]
     fn filtering_matches_title_preview_and_id() {
         let rows = vec![row("Trading health", "restart gate", 5, 100.0)];
-        assert_eq!(filtered(&rows, "trading").len(), 1);
-        assert_eq!(filtered(&rows, "gate").len(), 1);
-        assert_eq!(filtered(&rows, "id-").len(), 1);
-        assert_eq!(filtered(&rows, "nope").len(), 0);
-        assert_eq!(filtered(&rows, "  ").len(), 1);
+        assert_eq!(filtered_project(&rows, "trading", None).len(), 1);
+        assert_eq!(filtered_project(&rows, "gate", None).len(), 1);
+        assert_eq!(filtered_project(&rows, "id-", None).len(), 1);
+        assert_eq!(filtered_project(&rows, "nope", None).len(), 0);
+        assert_eq!(filtered_project(&rows, "  ", None).len(), 1);
+    }
+
+    #[test]
+    fn projects_filter_by_cwd_and_keep_newest_order() {
+        let mut trading = row("trading", "", 5, 100.0);
+        let mut blog = row("blog", "", 3, 90.0);
+        blog.cwd = "/work/blog".into();
+        trading.cwd = "/work/trading".into();
+        let rows = vec![trading, blog];
+        assert_eq!(projects(&rows), vec!["/work/trading", "/work/blog"]);
+        assert_eq!(filtered_project(&rows, "", Some("/work/trading")).len(), 1);
+        assert_eq!(filtered_project(&rows, "", Some("/work")).len(), 2);
+        assert_eq!(project_label("/work/trading"), "trading");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! Interaction design mirrors Grok Bot's: no modal dialogs, everything reachable
 //! from the keyboard, and blocking questions show up as cards you answer.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
@@ -18,11 +19,14 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::backend::{
     ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command,
 };
+use crate::cron::{self, Automations};
 use crate::inspector::{self, Field, Inspector, Tab};
 use crate::keys::{self, Action, Chord, Focus};
 use crate::mcp::{self, Mcp};
 use crate::memory::{self, Memory};
+use crate::moa::{self, Moa};
 use crate::models::{self, Models};
+use crate::oauth::{self, Accounts};
 use crate::sessions::{self, Sessions};
 use crate::settings::{Section, Settings};
 use crate::skills::{self, Skills};
@@ -110,7 +114,20 @@ pub struct HermesApp {
     sessions: Sessions,
     skills: Skills,
     mcp: Mcp,
+    kanban: Option<hermes_api::KanbanBoard>,
+    kanban_boards: Vec<hermes_api::KanbanBoardInfo>,
+    kanban_selected: Option<String>,
+    kanban_editing: Option<String>,
+    kanban_delete: Option<String>,
+    kanban_status: Option<String>,
+    kanban_draft: Option<String>,
+    kanban_creating: bool,
     memory: Memory,
+    moa: Moa,
+    automations: Automations,
+    accounts: Accounts,
+    media: std::collections::HashMap<String, Result<Arc<gpui::Image>, String>>,
+    ipc: Option<Arc<crate::ipc::Listener>>,
     /// Stored transcript on screen; sending is disabled until New chat.
     viewing_history: Option<String>,
     rail_search: bool,
@@ -124,7 +141,11 @@ impl Focusable for HermesApp {
 }
 
 impl HermesApp {
-    pub fn new(host: HostConfig, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        host: HostConfig,
+        listener: Option<crate::ipc::Listener>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (backend, events) = Backend::spawn(host.clone());
         let tray = tray::spawn();
 
@@ -157,7 +178,20 @@ impl HermesApp {
             sessions: Sessions::default(),
             skills: Skills::default(),
             mcp: Mcp::default(),
+            kanban: None,
+            kanban_boards: Vec::new(),
+            kanban_selected: None,
+            kanban_editing: None,
+            kanban_delete: None,
+            kanban_status: None,
+            kanban_draft: None,
+            kanban_creating: false,
             memory: Memory::default(),
+            moa: Moa::default(),
+            automations: Automations::default(),
+            accounts: Accounts::default(),
+            media: std::collections::HashMap::new(),
+            ipc: listener.map(Arc::new),
             viewing_history: None,
             usage: Usage {
                 days: 30,
@@ -170,6 +204,8 @@ impl HermesApp {
         app.pump(events, cx);
         app.pump_tray(cx);
         app.pump_theme(cx);
+        app.pump_ipc(cx);
+        app.pump_oauth(cx);
         // QA hook: seed a short transcript so a screenshot can review the
         // bubble styles without driving the composer (Wayland has no text
         // injection here). Never used against a real turn.
@@ -235,6 +271,15 @@ impl HermesApp {
                     cx.update(|cx| cx.quit());
                     return;
                 }
+                if tray.take_show()
+                    && this
+                        .update_in(cx, |app, window, cx| {
+                            app.handle_ipc(crate::ipc::Request::Show, window, cx)
+                        })
+                        .is_err()
+                {
+                    return;
+                }
                 if this.update(cx, |app, cx| app.sync_tray(cx)).is_err() {
                     return;
                 }
@@ -261,6 +306,53 @@ impl HermesApp {
             }
         })
         .detach();
+    }
+
+    fn pump_ipc(&mut self, cx: &mut Context<Self>) {
+        let Some(listener) = self.ipc.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                for request in listener.poll() {
+                    if this
+                        .update_in(cx, |app, window, cx| app.handle_ipc(request, window, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_ipc(
+        &mut self,
+        request: crate::ipc::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            crate::ipc::Request::Toggle => {
+                if window.is_window_active() {
+                    window.set_visible(false);
+                } else {
+                    window.set_visible(true);
+                    window.activate();
+                    self.focus.focus(window, cx);
+                }
+            }
+            crate::ipc::Request::Show => {
+                window.set_visible(true);
+                window.activate();
+                self.focus.focus(window, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn sync_tray(&mut self, _cx: &mut Context<Self>) {
@@ -362,6 +454,77 @@ impl HermesApp {
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
             BackendEvent::Mcp(rows) => self.mcp.loaded(rows),
             BackendEvent::McpFailed(message) => self.mcp.failed(message),
+            BackendEvent::KanbanBoards(boards) => {
+                self.kanban_boards = boards.boards;
+                if self.kanban_selected.is_none() {
+                    self.kanban_selected = Some(boards.current);
+                    self.backend.send(Command::LoadKanban {
+                        board: self.kanban_selected.clone(),
+                    });
+                }
+            }
+            BackendEvent::Kanban { board, data } => {
+                if board == self.kanban_selected {
+                    self.kanban = Some(data);
+                    self.kanban_status = None;
+                }
+            }
+            BackendEvent::KanbanCreated => {
+                self.kanban_creating = false;
+                self.kanban_draft = None;
+                self.kanban_editing = None;
+            }
+            BackendEvent::KanbanFailed(message) => {
+                self.kanban_creating = false;
+                self.kanban_status = Some(message);
+            }
+            BackendEvent::McpOAuth(flow) => {
+                self.mcp.oauth_busy = false;
+                self.mcp.status = Some(match flow.status.as_str() {
+                    "approved" => format!("{} authorized", flow.server_name),
+                    "error" => format!(
+                        "{}: {}",
+                        flow.server_name,
+                        flow.error.as_deref().unwrap_or("authorization failed")
+                    ),
+                    _ => format!("{}: waiting for browser authorization", flow.server_name),
+                });
+                if self.mcp.oauth_opened.as_deref() != Some(flow.flow_id.as_str())
+                    && flow.status == "authorization_required"
+                    && let Some(url) = flow.authorization_url.as_deref()
+                {
+                    self.mcp.oauth_opened = Some(flow.flow_id.clone());
+                    match reqwest::Url::parse(url) {
+                        Ok(url) if matches!(url.scheme(), "http" | "https") => {
+                            self.open_external(url.as_str())
+                        }
+                        _ => self.mcp.status = Some("Invalid OAuth authorization URL".into()),
+                    }
+                }
+                if matches!(flow.status.as_str(), "approved" | "error") {
+                    self.mcp.oauth = None;
+                    self.mcp.oauth_opened = None;
+                } else {
+                    self.mcp.oauth = Some(flow);
+                }
+            }
+            BackendEvent::McpOAuthFailed(message) => {
+                self.mcp.oauth_busy = false;
+                self.mcp.status = Some(format!("MCP OAuth: {message}"));
+            }
+            BackendEvent::McpOAuthCancelled(id) => {
+                self.mcp.oauth_busy = false;
+                if self
+                    .mcp
+                    .oauth
+                    .as_ref()
+                    .is_some_and(|flow| flow.flow_id == id)
+                {
+                    self.mcp.oauth = None;
+                    self.mcp.oauth_opened = None;
+                    self.mcp.status = Some("MCP authorization cancelled".into());
+                }
+            }
             BackendEvent::McpToggled { name, enabled } => {
                 self.mcp.status = Some(format!(
                     "{name} {}",
@@ -443,6 +606,22 @@ impl HermesApp {
                 self.sessions.focus = false;
                 self.scroll.scroll_to_bottom();
             }
+            BackendEvent::SessionResumed {
+                stored_id,
+                session_id,
+                messages,
+            } => {
+                self.session_id = Some(session_id);
+                self.viewing_history = None;
+                self.lines = sessions::lines_from_messages(&messages);
+                self.cards.clear();
+                self.error = None;
+                self.busy = false;
+                self.sessions.open = false;
+                self.sessions.focus = false;
+                self.sessions.status = Some(format!("resumed {stored_id}"));
+                self.scroll.scroll_to_bottom();
+            }
             BackendEvent::SessionDeleted(id) => {
                 self.sessions.rows.retain(|row| row.id != id);
                 self.sessions.total = self.sessions.total.saturating_sub(1);
@@ -469,6 +648,31 @@ impl HermesApp {
             BackendEvent::ReasoningFailed(message) => {
                 self.models.status = Some(format!("reasoning: {message}"))
             }
+            BackendEvent::Moa(config) => self.moa.loaded(config),
+            BackendEvent::MoaSaved(config) => self.moa.saved(config),
+            BackendEvent::MoaFailed(message) => self.moa.failed(message),
+            BackendEvent::Cron(jobs, targets) => self.automations.loaded(jobs, targets),
+            BackendEvent::CronFailed(message) => self.automations.failed(message),
+            BackendEvent::CronSaved(message) => self.automations.status = Some(message),
+            BackendEvent::CronRuns { id, runs } => self.automations.runs_loaded(id, runs),
+            BackendEvent::OAuth(providers) => self.accounts.loaded(providers),
+            BackendEvent::OAuthStarted { provider, start } => {
+                self.accounts.begin(&provider, start.clone());
+                self.open_oauth_url(&start);
+            }
+            BackendEvent::OAuthPolled { provider, poll } => {
+                let succeeded =
+                    matches!(poll.status.as_str(), "approved" | "completed" | "success");
+                self.accounts.apply_poll(poll);
+                if succeeded && self.accounts.flow_done() {
+                    self.accounts.status = Some(format!("{provider} login finished"));
+                }
+            }
+            BackendEvent::OAuthSaved(message) => {
+                self.accounts.close_flow();
+                self.accounts.status = Some(message);
+            }
+            BackendEvent::OAuthFailed(message) => self.accounts.failed(message),
             BackendEvent::Avatar {
                 profile,
                 mime,
@@ -492,6 +696,21 @@ impl HermesApp {
                 self.lines
                     .push(Line::new(Role::System, format!("attached {name}")));
                 self.scroll.scroll_to_bottom();
+            }
+            BackendEvent::Media { path, mime, bytes } => {
+                let format = match mime.as_str() {
+                    "image/jpeg" => Some(gpui::ImageFormat::Jpeg),
+                    "image/webp" => Some(gpui::ImageFormat::Webp),
+                    "image/png" => Some(gpui::ImageFormat::Png),
+                    _ => None,
+                };
+                let image = format
+                    .map(|format| Arc::new(gpui::Image::from_bytes(format, bytes)))
+                    .ok_or_else(|| format!("Unsupported image type: {mime}"));
+                self.media.insert(path, image);
+            }
+            BackendEvent::MediaFailed { path, message } => {
+                self.media.insert(path, Err(message));
             }
             BackendEvent::Spoken => {
                 self.voice_status = Some("spoke last reply".into());
@@ -522,7 +741,12 @@ impl HermesApp {
                 || (self.settings.section == Section::Model && self.route_models_typing(event, cx))
                 || (self.settings.section == Section::Skills && self.route_skills_typing(event, cx))
                 || (self.settings.section == Section::Mcp && self.route_mcp_typing(event, cx))
+                || (self.settings.section == Section::Kanban && self.route_kanban_typing(event, cx))
                 || (self.settings.section == Section::Memory && self.route_memory_typing(event, cx))
+                || (self.settings.section == Section::Automations
+                    && self.route_cron_typing(event, cx))
+                || (self.settings.section == Section::Accounts
+                    && self.route_oauth_typing(event, cx))
             {
                 return;
             }
@@ -616,6 +840,12 @@ impl HermesApp {
                 }
             }
             Action::Newline => self.composer.push('\n'),
+            Action::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.composer.push_str(&text);
+                    self.refresh_mention();
+                }
+            }
             Action::Send => {
                 if self.palette.open {
                     self.accept_palette(cx);
@@ -1194,6 +1424,378 @@ impl HermesApp {
         true
     }
 
+    fn open_kanban(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Kanban);
+        self.kanban_status = Some("Loading board…".into());
+        self.backend.send(Command::LoadKanbanBoards);
+        if self.kanban_selected.is_some() {
+            self.backend.send(Command::LoadKanban {
+                board: self.kanban_selected.clone(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn route_kanban_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.kanban_creating && self.kanban_draft.is_some() {
+            return true;
+        }
+        let Some(draft) = self.kanban_draft.as_mut() else {
+            return false;
+        };
+        let key = &event.keystroke;
+        if key.modifiers.control || key.modifiers.platform {
+            if key.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    draft.push_str(&text.replace(['\n', '\r'], " "));
+                }
+                cx.notify();
+                return true;
+            }
+            return false;
+        }
+        match key.key.as_str() {
+            "enter" => self.create_kanban_task(cx),
+            "backspace" => {
+                draft.pop();
+            }
+            "space" => draft.push(' '),
+            _ => {
+                if let Some(text) = key.key_char.as_deref() {
+                    draft.push_str(text);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn create_kanban_task(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_creating {
+            return;
+        }
+        let Some(title) = self
+            .kanban_draft
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        else {
+            self.kanban_status = Some("Enter a task title first.".into());
+            cx.notify();
+            return;
+        };
+        self.kanban_creating = true;
+        if let Some(id) = &self.kanban_editing {
+            self.backend.send(Command::UpdateKanbanTask {
+                id: id.clone(),
+                patch: serde_json::json!({"title": title}),
+                board: self.kanban_selected.clone(),
+                editing: true,
+            });
+            self.kanban_status = Some("Updating task…".into());
+        } else {
+            self.backend.send(Command::CreateKanbanTask {
+                title: title.to_string(),
+                board: self.kanban_selected.clone(),
+            });
+            self.kanban_status = Some("Creating triage task…".into());
+        }
+        cx.notify();
+    }
+
+    fn kanban_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut list = div()
+            .id("kanban-board")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+        if let Some(status) = &self.kanban_status {
+            list = list.child(self.note(status));
+        }
+        if let Some(draft) = &self.kanban_draft {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(bg()))
+                            .border_1()
+                            .border_color(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!("{draft}▌"))),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-create-submit")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.create_kanban_task(cx)))
+                            .child(if self.kanban_editing.is_some() {
+                                "Save"
+                            } else {
+                                "Create"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-create-cancel")
+                            .px_2()
+                            .py_2()
+                            .text_sm()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_creating {
+                                    this.kanban_draft = None;
+                                    this.kanban_editing = None;
+                                }
+                                cx.notify();
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
+            if self.kanban_editing.is_none() {
+                list = list.child(
+                    self.note("New tasks start in triage; no worker is assigned or dispatched."),
+                );
+            }
+        }
+        if !self.kanban_boards.is_empty() {
+            let mut choices = div().flex().flex_wrap().gap_2();
+            for board in &self.kanban_boards {
+                let slug = board.slug.clone();
+                let selected = self.kanban_selected.as_ref() == Some(&slug);
+                choices = choices.child(
+                    div()
+                        .id(SharedString::from(format!("kanban-board-{slug}")))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(selected, |v| {
+                            v.bg(rgb(accent_soft())).text_color(rgb(accent()))
+                        })
+                        .when(!selected, |v| v.bg(rgb(surface())).text_color(rgb(text())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.kanban_creating {
+                                this.kanban_selected = Some(slug.clone());
+                                this.kanban = None;
+                                this.kanban_draft = None;
+                                this.kanban_editing = None;
+                                this.kanban_delete = None;
+                                this.kanban_status = Some("Loading board…".into());
+                                this.backend.send(Command::LoadKanban {
+                                    board: Some(slug.clone()),
+                                });
+                                cx.notify();
+                            }
+                        }))
+                        .child(SharedString::from(board.name.clone())),
+                );
+            }
+            list = list.child(choices);
+        }
+        if let Some(board) = &self.kanban {
+            for column in &board.columns {
+                let mut section =
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(self.section_label(&format!(
+                            "{} · {}",
+                            column.name.to_uppercase(),
+                            column.tasks.len()
+                        )));
+                for task in &column.tasks {
+                    let id = task.id.clone();
+                    let next = match task.status.as_str() {
+                        "triage" => Some("todo"),
+                        "todo" => Some("ready"),
+                        "ready" | "running" => Some("review"),
+                        "review" => Some("done"),
+                        "blocked" | "scheduled" => Some("ready"),
+                        _ => None,
+                    };
+                    let mut row = div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(bg_elev()))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(text()))
+                                        .child(SharedString::from(task.title.clone())),
+                                )
+                                .when_some(task.assignee.clone(), |this, assignee| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_muted()))
+                                            .child(SharedString::from(assignee)),
+                                    )
+                                }),
+                        );
+                    if let Some(next) = next {
+                        row = row.child(
+                            div()
+                                .id(SharedString::from(format!("kanban-move-{id}")))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(surface()))
+                                .text_xs()
+                                .text_color(rgb(accent()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.kanban_status = Some(format!("Moving task to {next}…"));
+                                    this.backend.send(Command::UpdateKanbanTask {
+                                        id: id.clone(),
+                                        patch: serde_json::json!({"status": next}),
+                                        board: this.kanban_selected.clone(),
+                                        editing: false,
+                                    });
+                                    cx.notify();
+                                }))
+                                .child(SharedString::from(format!("→ {next}"))),
+                        );
+                    }
+                    let edit_id = task.id.clone();
+                    let edit_title = task.title.clone();
+                    let delete_id = task.id.clone();
+                    let confirm_delete = self.kanban_delete.as_deref() == Some(task.id.as_str());
+                    row = row
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("kanban-edit-{}", task.id)))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(accent()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.kanban_creating {
+                                        this.kanban_editing = Some(edit_id.clone());
+                                        this.kanban_draft = Some(edit_title.clone());
+                                        this.kanban_delete = None;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child("Edit"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("kanban-delete-{}", task.id)))
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(rgb(danger()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.kanban_delete.as_deref() == Some(delete_id.as_str()) {
+                                        this.kanban_delete = None;
+                                        this.kanban_status = Some("Deleting task…".into());
+                                        this.backend.send(Command::DeleteKanbanTask {
+                                            id: delete_id.clone(),
+                                            board: this.kanban_selected.clone(),
+                                        });
+                                    } else {
+                                        this.kanban_delete = Some(delete_id.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(if confirm_delete {
+                                    "Confirm delete"
+                                } else {
+                                    "Delete"
+                                }),
+                        );
+                    section = section.child(row);
+                }
+                list = list.child(section);
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .px_5()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_xs().text_color(rgb(text_muted())).child(
+                        "Board selection is local · status changes use the host's validation",
+                    ))
+                    .child(
+                        div()
+                            .id("kanban-create")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(accent_soft()))
+                            .text_xs()
+                            .text_color(rgb(accent()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.kanban_draft.is_none() {
+                                    this.kanban_draft = Some(String::new());
+                                }
+                                cx.notify();
+                            }))
+                            .child("＋ Task"),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-refresh")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(bg_elev()))
+                            .text_xs()
+                            .text_color(rgb(text()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.open_kanban(cx)))
+                            .child("Refresh"),
+                    ),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
     fn open_mcp(&mut self, cx: &mut Context<Self>) {
         self.settings.show(Section::Mcp);
         self.load_mcp(cx);
@@ -1213,6 +1815,35 @@ impl HermesApp {
             self.load_mcp_catalog(cx);
         }
         cx.notify();
+    }
+
+    fn start_mcp_oauth(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.mcp.oauth_busy || self.mcp.oauth.is_some() {
+            self.mcp.status = Some("An MCP authorization is already in progress".into());
+        } else {
+            self.mcp.oauth_busy = true;
+            self.mcp.status = Some(format!("Starting authorization for {name}…"));
+            self.backend.send(Command::StartMcpOAuth {
+                name: name.into(),
+                // The MCP list and management endpoints currently use the host's
+                // default profile; authorize the same server that is displayed.
+                profile: None,
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_mcp_oauth(&mut self, cx: &mut Context<Self>) {
+        if !self.mcp.oauth_busy
+            && let Some(flow) = &self.mcp.oauth
+        {
+            self.mcp.oauth_busy = true;
+            self.backend.send(Command::CancelMcpOAuth {
+                id: flow.flow_id.clone(),
+            });
+            self.mcp.status = Some("Cancelling authorization…".into());
+            cx.notify();
+        }
     }
 
     fn load_mcp_catalog(&mut self, cx: &mut Context<Self>) {
@@ -1665,6 +2296,9 @@ impl HermesApp {
         for server in rows {
             let toggle_name = server.name.clone();
             let test_name = server.name.clone();
+            let auth_name = server.name.clone();
+            let can_auth =
+                mcp::transport(server) == "http" && mcp::auth(server).as_deref() != Some("header");
             let edit_name = server.name.clone();
             let delete_name = server.name.clone();
             let is_enabled = server.enabled;
@@ -1751,6 +2385,27 @@ impl HermesApp {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .when(can_auth, |this| {
+                                        this.child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "mcp-auth-{}",
+                                                    server.name
+                                                )))
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_md()
+                                                .bg(rgb(surface()))
+                                                .text_xs()
+                                                .text_color(rgb(accent()))
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(rgb(surface_hi())))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.start_mcp_oauth(&auth_name, cx)
+                                                }))
+                                                .child("Authorize"),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .id(SharedString::from(format!(
@@ -1876,6 +2531,35 @@ impl HermesApp {
             .flex_1()
             .min_h_0()
             .child(self.mcp_tabs(cx))
+            .when(self.mcp.oauth.is_some(), |this| {
+                this.child(
+                    div()
+                        .px_5()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(text_muted()))
+                                .child("MCP authorization in progress"),
+                        )
+                        .child(
+                            div()
+                                .id("mcp-oauth-cancel")
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(surface()))
+                                .text_xs()
+                                .text_color(rgb(text()))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_mcp_oauth(cx)))
+                                .child("Cancel"),
+                        ),
+                )
+            })
             .child(
                 div()
                     .px_5()
@@ -2691,6 +3375,12 @@ impl HermesApp {
     }
 
     fn select_model(&mut self, provider: &str, model: &str, cx: &mut Context<Self>) {
+        if self.moa.picking.is_some() {
+            self.moa.apply_pick(provider, model);
+            self.settings.show(Section::Moa);
+            cx.notify();
+            return;
+        }
         if let Some(task) = self.models.aux_target.clone() {
             self.models.status = Some(format!("assigning {}…", models::task_label(&task)));
             self.backend.send(Command::SetAuxModel {
@@ -2740,6 +3430,286 @@ impl HermesApp {
         true
     }
 
+    fn open_moa(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Moa);
+        if self.moa.draft.is_none() {
+            self.moa.loaded = false;
+            self.moa.error = None;
+            self.backend.send(Command::LoadMoa);
+        }
+        cx.notify();
+    }
+
+    fn reload_moa(&mut self, cx: &mut Context<Self>) {
+        self.moa.loaded = false;
+        self.moa.error = None;
+        self.moa.draft = None;
+        self.backend.send(Command::LoadMoa);
+        cx.notify();
+    }
+
+    fn save_moa(&mut self, cx: &mut Context<Self>) {
+        match self.moa.body() {
+            Ok(config) => {
+                self.moa.mark_saving();
+                self.backend.send(Command::SaveMoa(config));
+            }
+            Err(message) => self.moa.error = Some(message),
+        }
+        cx.notify();
+    }
+
+    fn pick_moa_model(&mut self, pick: moa::Pick, cx: &mut Context<Self>) {
+        self.moa.begin_pick(pick);
+        self.settings.show(Section::Model);
+        if self.models.options.is_none() {
+            self.models.loaded = false;
+            self.backend.send(Command::LoadModels);
+        }
+        cx.notify();
+    }
+
+    fn open_cron(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Automations);
+        self.load_cron(cx);
+    }
+
+    fn load_cron(&mut self, cx: &mut Context<Self>) {
+        self.automations.loaded = false;
+        self.automations.error = None;
+        self.backend.send(Command::LoadCron);
+        cx.notify();
+    }
+
+    fn begin_cron(&mut self, cx: &mut Context<Self>) {
+        self.automations.begin_create();
+        cx.notify();
+    }
+
+    fn cancel_cron(&mut self, cx: &mut Context<Self>) {
+        self.automations.cancel_create();
+        cx.notify();
+    }
+
+    fn save_cron(&mut self, cx: &mut Context<Self>) {
+        match self.automations.form.body() {
+            Ok(body) => {
+                self.automations.status = Some("creating job…".into());
+                self.automations.form.error = None;
+                self.backend.send(Command::CreateCron { body });
+                self.automations.creating = false;
+                self.automations.form = cron::Form::default();
+            }
+            Err(message) => self.automations.form.error = Some(message),
+        }
+        cx.notify();
+    }
+
+    fn cron_action(&mut self, id: &str, action: &str, cx: &mut Context<Self>) {
+        self.automations.status = Some(format!("{id}: {action}…"));
+        self.backend.send(Command::CronAction {
+            id: id.to_string(),
+            action: action.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn delete_cron(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.automations.confirm_delete(id) {
+            self.automations.status = Some(format!("deleting {id}…"));
+            self.backend
+                .send(Command::DeleteCron { id: id.to_string() });
+        }
+        cx.notify();
+    }
+
+    fn load_cron_runs(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.automations.runs_for.as_deref() == Some(id) {
+            self.automations.runs_for = None;
+            cx.notify();
+            return;
+        }
+        self.automations.runs_loaded = false;
+        self.automations.runs.clear();
+        self.backend
+            .send(Command::LoadCronRuns { id: id.to_string() });
+        cx.notify();
+    }
+
+    fn route_cron_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.automations.creating {
+            return false;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            return false;
+        }
+        let field = self.automations.form.focus.unwrap_or(cron::Field::Schedule);
+        match keystroke.key.as_str() {
+            "escape" => self.automations.cancel_create(),
+            "enter" => self.save_cron(cx),
+            "tab" => self.automations.form.focus = Some(field.next()),
+            "backspace" => {
+                self.automations.form.text_mut(field).pop();
+            }
+            "space" => self.automations.form.text_mut(field).push(' '),
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    self.automations.form.text_mut(field).push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn open_accounts(&mut self, cx: &mut Context<Self>) {
+        self.settings.show(Section::Accounts);
+        self.load_accounts(cx);
+    }
+
+    fn load_accounts(&mut self, cx: &mut Context<Self>) {
+        self.accounts.loaded = false;
+        self.accounts.error = None;
+        self.accounts.status = None;
+        self.backend.send(Command::LoadOAuth);
+        cx.notify();
+    }
+
+    fn start_oauth(&mut self, provider: &str, cx: &mut Context<Self>) {
+        self.accounts.busy = true;
+        self.accounts.status = Some(format!("starting {provider} login…"));
+        self.backend.send(Command::StartOAuth {
+            provider: provider.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn open_oauth_url(&self, start: &hermes_api::OAuthStart) {
+        let url = if !start.auth_url.is_empty() {
+            start.auth_url.as_str()
+        } else {
+            start.verification_url.as_str()
+        };
+        self.open_external(url);
+    }
+
+    fn open_external(&self, url: &str) {
+        if !url.is_empty() {
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        }
+    }
+
+    fn submit_oauth(&mut self, cx: &mut Context<Self>) {
+        let Some(oauth::Flow::Pkce {
+            provider,
+            session_id,
+            code,
+            ..
+        }) = self.accounts.flow.clone()
+        else {
+            return;
+        };
+        if code.trim().is_empty() {
+            self.accounts.status = Some("paste the authorization code first".into());
+            cx.notify();
+            return;
+        }
+        self.accounts.busy = true;
+        self.accounts.status = Some("submitting code…".into());
+        self.backend.send(Command::SubmitOAuth {
+            provider,
+            session_id,
+            code: code.trim().to_string(),
+        });
+        cx.notify();
+    }
+
+    fn disconnect_oauth(&mut self, provider: &str, cx: &mut Context<Self>) {
+        if self.accounts.confirm_disconnect(provider) {
+            self.accounts.busy = true;
+            self.accounts.status = Some(format!("disconnecting {provider}…"));
+            self.backend.send(Command::DisconnectOAuth {
+                provider: provider.to_string(),
+            });
+        }
+        cx.notify();
+    }
+
+    fn route_oauth_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(code) = self.accounts.code_mut() else {
+            return false;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform {
+            if keystroke.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    code.push_str(&text);
+                }
+                cx.notify();
+                return true;
+            }
+            return false;
+        }
+        match keystroke.key.as_str() {
+            "escape" => self.accounts.close_flow(),
+            "enter" => self.submit_oauth(cx),
+            "backspace" => {
+                code.pop();
+            }
+            "space" => code.push(' '),
+            _ => {
+                if let Some(chars) = keystroke.key_char.as_deref() {
+                    code.push_str(chars);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    fn pump_oauth(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                if this
+                    .update(cx, |app, cx| {
+                        if !app.mcp.oauth_busy
+                            && let Some(flow) = &app.mcp.oauth
+                        {
+                            app.mcp.oauth_busy = true;
+                            app.backend.send(Command::PollMcpOAuth {
+                                id: flow.flow_id.clone(),
+                            });
+                        }
+                        if app.accounts.busy {
+                            return;
+                        }
+                        let Some(oauth::Flow::Device {
+                            provider,
+                            session_id,
+                            terminal: false,
+                            ..
+                        }) = app.accounts.flow.clone()
+                        else {
+                            return;
+                        };
+                        app.accounts.busy = true;
+                        app.backend.send(Command::PollOAuth {
+                            provider,
+                            session_id,
+                        });
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn load_assignments(&mut self, cx: &mut Context<Self>) {
         self.settings.show(Section::Assignments);
         self.models.aux_loaded = false;
@@ -2778,6 +3748,1304 @@ impl HermesApp {
             level: level.to_string(),
         });
         cx.notify();
+    }
+
+    fn moa_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut body = div()
+            .id("moa-body")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+
+        if !self.moa.loaded && self.moa.draft.is_none() {
+            return body
+                .child(self.note("Loading MoA configuration…"))
+                .into_any_element();
+        }
+        if let Some(error) = self.moa.error.as_deref() {
+            body = body.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(surface()))
+                    .text_xs()
+                    .text_color(rgb(danger()))
+                    .child(SharedString::from(error.to_string())),
+            );
+        }
+        let Some(draft) = self.moa.draft.clone() else {
+            return body
+                .child(self.note("MoA configuration is unavailable."))
+                .into_any_element();
+        };
+        let preset_name = self.moa.preset.clone();
+        let Some(preset) = draft.presets.get(&preset_name).cloned() else {
+            return body
+                .child(self.note("This preset no longer exists; reload the page."))
+                .into_any_element();
+        };
+        let is_default = draft.default_preset == preset_name;
+        let is_active = draft.active_preset == preset_name;
+
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("moa-preset")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(bg_elev()))
+                                .text_sm()
+                                .text_color(rgb(text()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(surface_hi())))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.moa.cycle_preset();
+                                    cx.notify();
+                                }))
+                                .child(SharedString::from(format!("Preset: {preset_name}"))),
+                        )
+                        .when(is_default, |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(rgb(accent_soft()))
+                                    .text_xs()
+                                    .text_color(rgb(accent()))
+                                    .child("default"),
+                            )
+                        })
+                        .when(is_active, |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(rgb(accent_soft()))
+                                    .text_xs()
+                                    .text_color(rgb(accent()))
+                                    .child("active"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("moa-reload")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(text_muted()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(bg_elev())).text_color(rgb(text())))
+                                .on_click(
+                                    cx.listener(|this, _event, _window, cx| this.reload_moa(cx)),
+                                )
+                                .child("Reload"),
+                        )
+                        .child(
+                            div()
+                                .id("moa-save")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(accent()))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(bg()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(accent_hi())))
+                                .on_click(
+                                    cx.listener(|this, _event, _window, cx| this.save_moa(cx)),
+                                )
+                                .child(if self.moa.dirty {
+                                    "Save MoA *"
+                                } else {
+                                    "Save MoA"
+                                }),
+                        ),
+                ),
+        );
+
+        body = body.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(self.moa_chip(
+                    "moa-enabled",
+                    if preset.enabled {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    },
+                    preset.enabled,
+                    cx,
+                    |this| this.moa.toggle_enabled(),
+                ))
+                .child(self.moa_chip(
+                    "moa-default",
+                    if is_default {
+                        "Default preset"
+                    } else {
+                        "Make default"
+                    },
+                    is_default,
+                    cx,
+                    |this| this.moa.make_default(),
+                ))
+                .child(self.moa_chip(
+                    "moa-active",
+                    if is_active { "Deactivate" } else { "Activate" },
+                    is_active,
+                    cx,
+                    |this| this.moa.toggle_active(),
+                ))
+                .child(self.moa_chip(
+                    "moa-fanout",
+                    &format!("Fan-out: {}", preset.fanout),
+                    false,
+                    cx,
+                    |this| this.moa.cycle_fanout(),
+                ))
+                .child(self.moa_chip(
+                    "moa-policy",
+                    &format!("Degraded: {}", preset.degraded_reference_policy),
+                    false,
+                    cx,
+                    |this| this.moa.cycle_policy(),
+                )),
+        );
+
+        let references = preset.reference_models.clone();
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(self.section_label("REFERENCE MODELS"))
+                .child(
+                    div()
+                        .id("moa-add-reference")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(bg_elev()))
+                        .text_xs()
+                        .text_color(rgb(text()))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(surface_hi())))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.pick_moa_model(moa::Pick::NewReference, cx)
+                        }))
+                        .child("＋ Add reference"),
+                ),
+        );
+        for (index, slot) in references.iter().enumerate() {
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("moa-reference-{index}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(text()))
+                                    .child(SharedString::from(moa::slot_label(slot))),
+                            )
+                            .when(!slot.enabled, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_dim()))
+                                        .child("disabled"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("moa-reference-pick-{index}")))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.pick_moa_model(moa::Pick::Reference(index), cx)
+                                    }))
+                                    .child("change"),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("moa-reference-remove-{index}")))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_dim()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(danger())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.moa.remove_reference(index);
+                                        cx.notify();
+                                    }))
+                                    .child("remove"),
+                            ),
+                    ),
+            );
+        }
+
+        body = body
+            .child(self.section_label("AGGREGATOR"))
+            .child(
+                div()
+                    .id("moa-aggregator")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface_hi())))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.pick_moa_model(moa::Pick::Aggregator, cx)
+                    }))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(moa::slot_label(&preset.aggregator))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .child("change"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!(
+                                "Aggregator temperature: {}",
+                                preset
+                                    .aggregator_temperature
+                                    .map(|value| format!("{value:.1}"))
+                                    .unwrap_or_else(|| "provider default".into())
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.moa_mini("moa-temp-minus", "−", cx, |this| {
+                                this.moa.nudge_temperature(true, -0.1)
+                            }))
+                            .child(self.moa_mini("moa-temp-plus", "＋", cx, |this| {
+                                this.moa.nudge_temperature(true, 0.1)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!(
+                                "Reference temperature: {}",
+                                preset
+                                    .reference_temperature
+                                    .map(|value| format!("{value:.1}"))
+                                    .unwrap_or_else(|| "provider default".into())
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.moa_mini("moa-ref-temp-minus", "−", cx, |this| {
+                                this.moa.nudge_temperature(false, -0.1)
+                            }))
+                            .child(self.moa_mini("moa-ref-temp-plus", "＋", cx, |this| {
+                                this.moa.nudge_temperature(false, 0.1)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!(
+                                "Answer max tokens: {}",
+                                preset.max_tokens
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.moa_mini("moa-tokens-minus", "−", cx, |this| {
+                                this.moa.nudge_max_tokens(-512)
+                            }))
+                            .child(self.moa_mini("moa-tokens-plus", "＋", cx, |this| {
+                                this.moa.nudge_max_tokens(512)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(match preset.reference_max_tokens {
+                                Some(tokens) => format!("Reference max tokens: {tokens}"),
+                                None => "Reference max tokens: uncapped".to_string(),
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.moa_mini("moa-ref-tokens-minus", "−", cx, |this| {
+                                this.moa.nudge_reference_max_tokens(-128)
+                            }))
+                            .child(self.moa_mini("moa-ref-tokens-plus", "＋", cx, |this| {
+                                this.moa.nudge_reference_max_tokens(128)
+                            }))
+                            .child(self.moa_mini("moa-ref-tokens-clear", "clear", cx, |this| {
+                                this.moa.clear_reference_max_tokens()
+                            })),
+                    ),
+            );
+
+        if let Some(status) = self.moa.status.as_deref() {
+            body = body.child(self.note(status));
+        }
+        body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(text_dim()))
+                .child("Presets are saved together. Model changes apply to new turns; disabled presets stay available in the model picker."),
+        )
+        .into_any_element()
+    }
+
+    fn moa_chip(
+        &self,
+        id: &'static str,
+        label: &str,
+        selected: bool,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(rgb(accent_soft())).text_color(rgb(accent()))
+            })
+            .when(!selected, |this| {
+                this.bg(rgb(bg_elev()))
+                    .text_color(rgb(text_muted()))
+                    .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+            })
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                action(this);
+                cx.notify();
+            }))
+            .child(SharedString::from(label.to_string()))
+    }
+
+    fn moa_mini(
+        &self,
+        id: &'static str,
+        label: &str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(surface()))
+            .text_xs()
+            .text_color(rgb(text_muted()))
+            .cursor_pointer()
+            .hover(|this| this.text_color(rgb(text())))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                action(this);
+                cx.notify();
+            }))
+            .child(SharedString::from(label.to_string()))
+    }
+
+    fn automation_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut body = div()
+            .id("automation-body")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(div().text_xs().text_color(rgb(text_dim())).child(
+                    if self.automations.loaded {
+                        format!(
+                            "{} jobs · runs are ordinary sessions",
+                            self.automations.jobs.len()
+                        )
+                    } else {
+                        "Loading jobs…".to_string()
+                    },
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("cron-reload")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .text_xs()
+                                .text_color(rgb(text_muted()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(bg_elev())).text_color(rgb(text())))
+                                .on_click(
+                                    cx.listener(|this, _event, _window, cx| this.load_cron(cx)),
+                                )
+                                .child("Reload"),
+                        )
+                        .child(
+                            div()
+                                .id("cron-new")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(accent()))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(bg()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(accent_hi())))
+                                .on_click(
+                                    cx.listener(|this, _event, _window, cx| this.begin_cron(cx)),
+                                )
+                                .child("＋ New job"),
+                        ),
+                ),
+        );
+
+        if self.automations.creating {
+            let form = &self.automations.form;
+            body =
+                body.child(self.section_label("NEW JOB"))
+                    .child(self.cron_field(
+                        "Name (optional)",
+                        &form.name,
+                        "e.g. Morning brief",
+                        cron::Field::Name,
+                        cx,
+                    ))
+                    .child(self.cron_field(
+                        "Schedule",
+                        &form.schedule,
+                        "e.g. every day at 9am",
+                        cron::Field::Schedule,
+                        cx,
+                    ))
+                    .child(self.cron_field(
+                        "Prompt",
+                        &form.prompt,
+                        "What should the agent do?",
+                        cron::Field::Prompt,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id("cron-field-deliver")
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(bg_elev()))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(rgb(surface_hi())))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.automations.form.focus = Some(cron::Field::Deliver);
+                                this.automations.cycle_delivery();
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(text_dim()))
+                                    .child("Deliver to"),
+                            )
+                            .child(div().text_sm().text_color(rgb(text())).child(
+                                SharedString::from(self.automations.delivery_label(&form.deliver)),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(text_dim()))
+                                    .child("Tab moves · Enter creates · Esc cancels"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("cron-cancel")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .text_color(rgb(text_muted()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.text_color(rgb(text())))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.cancel_cron(cx)
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("cron-create")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(accent()))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(bg()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(accent_hi())))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.save_cron(cx)
+                                            }))
+                                            .child("Create job"),
+                                    ),
+                            ),
+                    );
+            if let Some(error) = form.error.as_deref() {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(danger()))
+                        .child(SharedString::from(error.to_string())),
+                );
+            }
+        }
+
+        if let Some(error) = self.automations.error.as_deref() {
+            body = body.child(self.note(error));
+        }
+        if self.automations.loaded && self.automations.jobs.is_empty() {
+            body = body.child(self.note("No cron jobs yet. Create one above."));
+        }
+
+        for job in self.automations.jobs.clone() {
+            let id = job.id.clone();
+            let id_pause = id.clone();
+            let id_trigger = id.clone();
+            let id_runs = id.clone();
+            let id_delete = id.clone();
+            let paused = !job.enabled || job.state == "paused";
+            let deleting = self.automations.confirm_delete.as_deref() == Some(id.as_str());
+            let show_runs = self.automations.runs_for.as_deref() == Some(id.as_str());
+            let name = if job.name.is_empty() {
+                id.clone()
+            } else {
+                job.name.clone()
+            };
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("cron-job-{id}")))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(text()))
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_muted()))
+                                            .child(SharedString::from(cron::job_meta(&job))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(self.cron_action_chip(
+                                        "cron-pause",
+                                        if paused { "Resume" } else { "Pause" },
+                                        cx,
+                                        move |this, cx| {
+                                            this.cron_action(
+                                                &id_pause,
+                                                if paused { "resume" } else { "pause" },
+                                                cx,
+                                            )
+                                        },
+                                    ))
+                                    .child(self.cron_action_chip(
+                                        "cron-trigger",
+                                        "Run now",
+                                        cx,
+                                        move |this, cx| {
+                                            this.cron_action(&id_trigger, "trigger", cx)
+                                        },
+                                    ))
+                                    .child(self.cron_action_chip(
+                                        "cron-runs",
+                                        "Runs",
+                                        cx,
+                                        move |this, cx| this.load_cron_runs(&id_runs, cx),
+                                    ))
+                                    .child(self.cron_action_chip(
+                                        "cron-delete",
+                                        if deleting { "Delete?" } else { "Delete" },
+                                        cx,
+                                        move |this, cx| this.delete_cron(&id_delete, cx),
+                                    )),
+                            ),
+                    )
+                    .when(!job.prompt.is_empty(), |this| {
+                        this.child(div().text_xs().text_color(rgb(text_dim())).child(
+                            SharedString::from(crate::transcript::clip(&job.prompt, 240)),
+                        ))
+                    })
+                    .when(!job.deliver.is_empty(), |this| {
+                        this.child(div().text_xs().text_color(rgb(text_dim())).child(
+                            SharedString::from(format!(
+                                "delivers to {}",
+                                self.automations.delivery_label(&job.deliver)
+                            )),
+                        ))
+                    })
+                    .when(show_runs, |this| {
+                        let mut runs = div().flex().flex_col().gap_1().pt_1();
+                        if !self.automations.runs_loaded {
+                            runs = runs.child(self.note("Loading runs…"));
+                        } else if self.automations.runs.is_empty() {
+                            runs = runs.child(self.note("No runs recorded for this job."));
+                        } else {
+                            for run in &self.automations.runs {
+                                let run_id = run.id.clone();
+                                runs = runs.child(
+                                    div()
+                                        .id(SharedString::from(format!("cron-run-{run_id}")))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(bg()))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(rgb(surface_hi())))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.close_settings(cx);
+                                            this.open_session(&run_id, cx);
+                                        }))
+                                        .child(div().text_xs().text_color(rgb(text())).child(
+                                            SharedString::from(if run.title.is_empty() {
+                                                run.id.clone()
+                                            } else {
+                                                run.title.clone()
+                                            }),
+                                        ))
+                                        .child(
+                                            div().text_xs().text_color(rgb(text_muted())).child(
+                                                SharedString::from(sessions::meta(
+                                                    run,
+                                                    sessions::now_secs(),
+                                                )),
+                                            ),
+                                        ),
+                                );
+                            }
+                        }
+                        this.child(runs)
+                    }),
+            );
+        }
+
+        if let Some(status) = self.automations.status.as_deref() {
+            body = body.child(self.note(status));
+        }
+        body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(text_dim()))
+                .child("Schedules are parsed by the host. Trigger runs immediately; pause keeps the job and its history."),
+        )
+        .into_any_element()
+    }
+
+    fn cron_field(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        field: cron::Field,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let focused = self.automations.form.focus == Some(field);
+        div()
+            .id(SharedString::from(format!("cron-field-{label}")))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(bg_elev()))
+            .border_1()
+            .when(focused, |this| this.border_color(rgb(accent())))
+            .when(!focused, |this| this.border_color(rgb(border())))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.automations.form.focus = Some(field);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(text_dim()))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(if value.is_empty() {
+                        rgb(text_dim())
+                    } else {
+                        rgb(text())
+                    })
+                    .child(SharedString::from(if value.is_empty() {
+                        placeholder.to_string()
+                    } else {
+                        value.to_string()
+                    })),
+            )
+    }
+
+    fn cron_action_chip(
+        &self,
+        id: &'static str,
+        label: &str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .text_color(rgb(text_muted()))
+            .cursor_pointer()
+            .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+            .on_click(cx.listener(move |this, _event, _window, cx| action(this, cx)))
+            .child(SharedString::from(label.to_string()))
+    }
+
+    fn accounts_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut body = div()
+            .id("accounts-body")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_5()
+            .py_3();
+
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(text_dim()))
+                        .child("OAuth providers managed by Hermes. External CLI credentials are read-only here."),
+                )
+                .child(
+                    div()
+                        .id("oauth-reload")
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(rgb(text_muted()))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(bg_elev())).text_color(rgb(text())))
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.load_accounts(cx)
+                        }))
+                        .child("Reload"),
+                ),
+        );
+
+        if let Some(flow) = self.accounts.flow.clone() {
+            match flow {
+                oauth::Flow::Pkce {
+                    provider,
+                    auth_url,
+                    code,
+                    ..
+                } => {
+                    body = body.child(self.section_label("SIGN-IN")).child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(bg_elev()))
+                            .child(div().text_sm().text_color(rgb(text())).child(
+                                SharedString::from(format!("Finish {provider} in your browser")),
+                            ))
+                            .child(
+                                div()
+                                    .id("oauth-open")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(accent()))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(bg()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(accent_hi())))
+                                    .on_click(cx.listener(move |this, _event, _window, _cx| {
+                                        this.open_external(&auth_url)
+                                    }))
+                                    .child("Open sign-in page"),
+                            )
+                            .child(
+                                div()
+                                    .id("oauth-code")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(bg()))
+                                    .border_1()
+                                    .border_color(rgb(accent()))
+                                    .text_sm()
+                                    .text_color(if code.is_empty() {
+                                        rgb(text_dim())
+                                    } else {
+                                        rgb(text())
+                                    })
+                                    .child(SharedString::from(if code.is_empty() {
+                                        "Paste the authorization code".to_string()
+                                    } else {
+                                        code.clone()
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(text_dim()))
+                                            .child("Enter submits · Esc cancels"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("oauth-submit")
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(rgb(accent()))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(bg()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(accent_hi())))
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.submit_oauth(cx)
+                                            }))
+                                            .child("Submit code"),
+                                    ),
+                            ),
+                    );
+                }
+                oauth::Flow::Device {
+                    provider,
+                    user_code,
+                    verification_url,
+                    status,
+                    terminal,
+                    ..
+                } => {
+                    body =
+                        body.child(self.section_label("SIGN-IN")).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .p_3()
+                                .rounded_md()
+                                .bg(rgb(bg_elev()))
+                                .child(div().text_sm().text_color(rgb(text())).child(
+                                    SharedString::from(format!("{provider}: enter this code")),
+                                ))
+                                .child(
+                                    div()
+                                        .text_2xl()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(accent()))
+                                        .child(SharedString::from(user_code)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(SharedString::from(status.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("oauth-open")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .bg(rgb(accent()))
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(rgb(bg()))
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(rgb(accent_hi())))
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, _cx| {
+                                                        this.open_external(&verification_url)
+                                                    },
+                                                ))
+                                                .child("Open verification page"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("oauth-close")
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_md()
+                                                .text_xs()
+                                                .text_color(rgb(text_muted()))
+                                                .cursor_pointer()
+                                                .hover(|this| this.text_color(rgb(text())))
+                                                .on_click(cx.listener(
+                                                    |this, _event, _window, cx| {
+                                                        this.accounts.close_flow();
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child(if terminal { "Done" } else { "Cancel" }),
+                                        ),
+                                ),
+                        );
+                }
+            }
+        }
+
+        if !self.accounts.loaded {
+            body = body.child(self.note("Loading provider accounts…"));
+        }
+        if let Some(error) = self.accounts.error.as_deref() {
+            body = body.child(self.note(error));
+        }
+
+        for provider in self.accounts.providers.clone() {
+            let id = provider.id.clone();
+            let id_connect = id.clone();
+            let id_disconnect = id.clone();
+            let connected = provider.status.logged_in;
+            let can_disconnect = provider.disconnectable && connected;
+            let confirming = self.accounts.confirm_disconnect.as_deref() == Some(id.as_str());
+            body = body.child(
+                div()
+                    .id(SharedString::from(format!("oauth-provider-{id}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(bg_elev()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(text()))
+                                            .child(SharedString::from(provider.name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(rgb(surface()))
+                                            .text_xs()
+                                            .text_color(rgb(text_dim()))
+                                            .child(SharedString::from(provider.flow.clone())),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if connected {
+                                        rgb(accent())
+                                    } else {
+                                        rgb(text_muted())
+                                    })
+                                    .child(SharedString::from(oauth::status_line(&provider))),
+                            )
+                            .when(!provider.cli_command.is_empty(), |this| {
+                                this.child(div().text_xs().text_color(rgb(text_dim())).child(
+                                    SharedString::from(format!(
+                                        "CLI fallback: {}",
+                                        provider.cli_command
+                                    )),
+                                ))
+                            })
+                            .when_some(provider.disconnect_hint.clone(), |this, hint| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_dim()))
+                                        .child(SharedString::from(hint)),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(provider.flow != "external" && !connected, |this| {
+                                this.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "oauth-connect-{id_connect}"
+                                        )))
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(rgb(accent()))
+                                        .text_xs()
+                                        .text_color(rgb(bg()))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(rgb(accent_hi())))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.start_oauth(&id_connect, cx)
+                                        }))
+                                        .child("Connect"),
+                                )
+                            })
+                            .when(can_disconnect, |this| {
+                                this.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "oauth-disconnect-{id_disconnect}"
+                                        )))
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(if confirming {
+                                            rgb(danger())
+                                        } else {
+                                            rgb(text_muted())
+                                        })
+                                        .cursor_pointer()
+                                        .hover(|this| this.text_color(rgb(danger())))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.disconnect_oauth(&id_disconnect, cx)
+                                        }))
+                                        .child(if confirming {
+                                            "Disconnect?"
+                                        } else {
+                                            "Disconnect"
+                                        }),
+                                )
+                            }),
+                    ),
+            );
+        }
+
+        if let Some(status) = self.accounts.status.as_deref() {
+            body = body.child(self.note(status));
+        }
+        body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(text_dim()))
+                .child("Codes are exchanged by the host and never stored by the desktop. External provider credentials stay owned by their CLI."),
+        )
+        .into_any_element()
     }
 
     fn assignments_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3737,6 +6005,10 @@ impl HermesApp {
             Section::Vault => self.vault_body(cx),
             Section::Model => self.models_body(cx),
             Section::Assignments => self.assignments_body(cx),
+            Section::Moa => self.moa_body(cx),
+            Section::Automations => self.automation_body(cx),
+            Section::Kanban => self.kanban_body(cx),
+            Section::Accounts => self.accounts_body(cx),
             Section::Skills => self.skills_body(cx),
             Section::Mcp => self.mcp_body(cx),
             Section::Memory => self.memory_body(cx),
@@ -3754,12 +6026,14 @@ impl HermesApp {
             .overflow_hidden()
             .child(
                 div()
+                    .id("settings-navigation")
                     .w(px(190.))
                     .h_full()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .p_3()
+                    .overflow_y_scroll()
                     .bg(rgb(bg_elev()))
                     .border_r_1()
                     .border_color(rgb(border()))
@@ -3773,11 +6047,11 @@ impl HermesApp {
                             )))
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .px_2()
+                            .gap_3()
+                            .px_3()
                             .py_2()
-                            .rounded_md()
-                            .text_xs()
+                            .rounded_lg()
+                            .text_sm()
                             .cursor_pointer()
                             .when(selected, |this| {
                                 this.bg(rgb(accent_soft())).text_color(rgb(accent()))
@@ -3791,6 +6065,10 @@ impl HermesApp {
                                     Section::Usage => this.open_usage(cx),
                                     Section::Model => this.open_models(cx),
                                     Section::Assignments => this.load_assignments(cx),
+                                    Section::Moa => this.open_moa(cx),
+                                    Section::Automations => this.open_cron(cx),
+                                    Section::Kanban => this.open_kanban(cx),
+                                    Section::Accounts => this.open_accounts(cx),
                                     Section::Skills => this.open_skills(cx),
                                     Section::Mcp => this.open_mcp(cx),
                                     Section::Memory => this.open_memory(cx),
@@ -4426,9 +6704,39 @@ impl HermesApp {
     }
 
     fn open_session(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.sessions.status = Some("loading transcript…".to_string());
+        self.sessions.status = Some("resuming session…".to_string());
         self.backend
-            .send(Command::LoadSession { id: id.to_string() });
+            .send(Command::ResumeSession { id: id.to_string() });
+        cx.notify();
+    }
+
+    fn export_session(&mut self, id: String, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        cx.spawn(async move |_this, _cx| {
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_file_name("hermes-session.json")
+                .add_filter("JSON", &["json"])
+                .save_file()
+                .await
+            {
+                backend.send(Command::ExportSession {
+                    id,
+                    path: file.path().to_path_buf(),
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn cycle_project(&mut self, cx: &mut Context<Self>) {
+        let projects = sessions::projects(&self.sessions.rows);
+        self.sessions.project = match self.sessions.project.as_deref() {
+            None => projects.first().cloned(),
+            Some(current) => projects
+                .iter()
+                .position(|project| project == current)
+                .and_then(|index| projects.get(index + 1).cloned()),
+        };
         cx.notify();
     }
 
@@ -4521,9 +6829,19 @@ impl HermesApp {
     }
 
     fn sessions_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = sessions::filtered(&self.sessions.rows, &self.sessions.query);
+        let rows = sessions::filtered_project(
+            &self.sessions.rows,
+            &self.sessions.query,
+            self.sessions.project.as_deref(),
+        );
         let now = sessions::now_secs();
         let focus = self.sessions.focus;
+        let project_label = self
+            .sessions
+            .project
+            .as_deref()
+            .map(sessions::project_label)
+            .unwrap_or_else(|| "All projects".to_string());
 
         let mut list = div()
             .id("sessions-list")
@@ -4549,6 +6867,7 @@ impl HermesApp {
         for row in rows {
             let open_id = row.id.clone();
             let delete_id = row.id.clone();
+            let export_id = row.id.clone();
             let pin_id = row.id.clone();
             let archive_id = row.id.clone();
             let rename_id = row.id.clone();
@@ -4567,9 +6886,10 @@ impl HermesApp {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .px_1()
-                    .py_1()
-                    .rounded_md()
+                    .px_2()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(surface()))
                     .when(active, |this| this.bg(rgb(accent_soft())))
                     .child(
                         div()
@@ -4692,6 +7012,21 @@ impl HermesApp {
                             )
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("session-export-{}", row.id)))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.text_color(rgb(text())))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.export_session(export_id.clone(), cx)
+                                    }))
+                                    .child("↓"),
+                            )
+                            .child(
+                                div()
                                     .id(SharedString::from(format!("session-del-{}", row.id)))
                                     .px_1()
                                     .py_1()
@@ -4804,6 +7139,26 @@ impl HermesApp {
                                     .child(SharedString::from(self.sessions.query.clone())),
                             )
                         }),
+                ),
+            )
+            .child(
+                div().px_3().pb_2().child(
+                    div()
+                        .id("sessions-project")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(surface()))
+                        .text_xs()
+                        .text_color(rgb(text_muted()))
+                        .cursor_pointer()
+                        .hover(|this| this.bg(rgb(surface_hi())).text_color(rgb(text())))
+                        .on_click(cx.listener(|this, _event, _window, cx| this.cycle_project(cx)))
+                        .child(SharedString::from(format!("Project: {project_label}")))
+                        .child("cycle"),
                 ),
             )
             .child(list)
@@ -5239,12 +7594,12 @@ impl HermesApp {
                     .mx_auto()
                     .px_6()
                     .py_5()
-                    .children(self.lines.iter().map(|line| self.render_line(line))),
+                    .children(self.lines.iter().map(|line| self.render_line(line, cx))),
             )
             .into_any_element()
     }
 
-    fn render_line(&self, line: &Line) -> gpui::AnyElement {
+    fn render_line(&self, line: &Line, cx: &mut Context<Self>) -> gpui::AnyElement {
         let streaming = self.busy
             && line.role == Role::Assistant
             && std::ptr::eq(line, self.lines.last().unwrap_or(line));
@@ -5287,13 +7642,77 @@ impl HermesApp {
                     .map(|profile| profile.label().to_string())
                     .unwrap_or_else(|| self.profile_name());
                 let mut body = div().flex().flex_col().gap_1();
-                for part in text.split('\n') {
-                    body = body.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(crate::theme::text()))
-                            .child(SharedString::from(part.to_string())),
-                    );
+                for (index, block) in crate::transcript::markdown_blocks(&text)
+                    .into_iter()
+                    .enumerate()
+                {
+                    use crate::transcript::MarkdownBlock;
+                    if let MarkdownBlock::Image(path) = block {
+                        match self.media.get(&path) {
+                            Some(Ok(image)) => {
+                                body = body.child(
+                                    gpui::img(image.clone())
+                                        .max_w(px(BUBBLE_W))
+                                        .max_h(px(BUBBLE_W)),
+                                );
+                            }
+                            Some(Err(message)) => {
+                                body = body.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(text_muted()))
+                                        .child(SharedString::from(message.clone())),
+                                );
+                            }
+                            None => {
+                                body = body.child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "media-{}-{index}",
+                                            line.text
+                                        )))
+                                        .text_xs()
+                                        .text_color(rgb(accent()))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.backend.send(Command::LoadMedia(path.clone()));
+                                            cx.notify();
+                                        }))
+                                        .child("Load image"),
+                                );
+                            }
+                        }
+                    } else {
+                        let (value, heading, code, quote, item) = match block {
+                            MarkdownBlock::Paragraph(value) => (value, false, false, false, false),
+                            MarkdownBlock::Heading(value) => (value, true, false, false, false),
+                            MarkdownBlock::Code(value) => (value, false, true, false, false),
+                            MarkdownBlock::Quote(value) => (value, false, false, true, false),
+                            MarkdownBlock::ListItem(value) => (value, false, false, false, true),
+                            MarkdownBlock::Image(_) => unreachable!(),
+                        };
+                        body = body.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(crate::theme::text()))
+                                .when(heading, |v| {
+                                    v.font_weight(gpui::FontWeight::BOLD).text_base()
+                                })
+                                .when(code, |v| {
+                                    v.font_family("monospace")
+                                        .bg(rgb(bg_elev()))
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                })
+                                .when(quote, |v| v.pl_3().border_l_2().border_color(rgb(accent())))
+                                .child(SharedString::from(if item {
+                                    format!("• {value}")
+                                } else {
+                                    value
+                                })),
+                        );
+                    }
                 }
                 div()
                     .flex()

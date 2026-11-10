@@ -85,6 +85,10 @@ impl HostConfig {
         let mut cfg = ConnectionConfig::new(self.ws_url());
         if let Some(ticket) = &self.ticket {
             cfg.url = format!("{}?ticket={}", cfg.url, percent_encode(ticket));
+        } else if let Some(token) = &self.token {
+            // Loopback Hermes validates WebSocket credentials in the query,
+            // while REST uses the Authorization header.
+            cfg.url = format!("{}?token={}", cfg.url, percent_encode(token));
         }
         if let Some(token) = &self.token {
             cfg = cfg.with_bearer(token.clone());
@@ -543,6 +547,244 @@ pub struct AuxiliaryModels {
     pub main: Option<AuxiliaryMain>,
 }
 
+/// One provider/model slot in a MoA preset. Optional per-slot knobs are kept
+/// so a round trip through the desktop never erases hand-set values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoaSlot {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One MoA preset exactly as `GET /api/model/moa` returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoaPreset {
+    #[serde(default)]
+    pub reference_models: Vec<MoaSlot>,
+    #[serde(default)]
+    pub aggregator: MoaSlot,
+    #[serde(default)]
+    pub reference_temperature: Option<f64>,
+    #[serde(default)]
+    pub aggregator_temperature: Option<f64>,
+    #[serde(default)]
+    pub reference_timeout: Option<f64>,
+    #[serde(default = "default_loud")]
+    pub degraded_reference_policy: String,
+    #[serde(default = "default_moa_max_tokens")]
+    pub max_tokens: u64,
+    #[serde(default)]
+    pub reference_max_tokens: Option<u64>,
+    #[serde(default = "default_fanout")]
+    pub fanout: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+fn default_loud() -> String {
+    "loud".into()
+}
+
+fn default_moa_max_tokens() -> u64 {
+    4096
+}
+
+fn default_fanout() -> String {
+    "user_turn".into()
+}
+
+impl Default for MoaPreset {
+    fn default() -> Self {
+        Self {
+            reference_models: Vec::new(),
+            aggregator: MoaSlot::default(),
+            reference_temperature: None,
+            aggregator_temperature: None,
+            reference_timeout: None,
+            degraded_reference_policy: default_loud(),
+            max_tokens: default_moa_max_tokens(),
+            reference_max_tokens: None,
+            fanout: default_fanout(),
+            enabled: true,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+/// `GET/PUT /api/model/moa`. The host also returns a flattened view of the
+/// active preset; `extra` keeps those keys plus future host additions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoaConfig {
+    #[serde(default)]
+    pub default_preset: String,
+    #[serde(default)]
+    pub active_preset: String,
+    #[serde(default)]
+    pub presets: std::collections::BTreeMap<String, MoaPreset>,
+    #[serde(default)]
+    pub privacy_filter: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+impl MoaConfig {
+    /// The preset the editor starts on: active, then default, then first.
+    pub fn selected_preset(&self) -> Option<String> {
+        if !self.active_preset.is_empty() && self.presets.contains_key(&self.active_preset) {
+            return Some(self.active_preset.clone());
+        }
+        if !self.default_preset.is_empty() && self.presets.contains_key(&self.default_preset) {
+            return Some(self.default_preset.clone());
+        }
+        self.presets.keys().next().cloned()
+    }
+}
+
+/// One stored cron job from `GET /api/cron/jobs`. The host owns schedule
+/// parsing and derives `state` from `enabled`; the UI only displays and acts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJob {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub schedule: String,
+    #[serde(default)]
+    pub schedule_display: String,
+    #[serde(default)]
+    pub deliver: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub next_run_at: Option<String>,
+    #[serde(default)]
+    pub last_run_at: Option<String>,
+    #[serde(default)]
+    pub last_status: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+impl Default for CronJob {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            prompt: String::new(),
+            schedule: String::new(),
+            schedule_display: String::new(),
+            deliver: String::new(),
+            state: String::new(),
+            enabled: true,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CronDeliveryTarget {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub home_target_set: bool,
+    #[serde(default)]
+    pub home_env_var: Option<String>,
+}
+
+/// One provider row from `GET /api/providers/oauth`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OAuthProvider {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub flow: String,
+    #[serde(default)]
+    pub cli_command: String,
+    #[serde(default)]
+    pub docs_url: String,
+    #[serde(default)]
+    pub disconnect_hint: Option<String>,
+    #[serde(default)]
+    pub disconnect_command: Option<String>,
+    #[serde(default)]
+    pub disconnectable: bool,
+    #[serde(default)]
+    pub status: OAuthStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OAuthStatus {
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default)]
+    pub token_preview: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub has_refresh_token: bool,
+}
+
+/// `POST /api/providers/oauth/{id}/start`. PKCE fills `auth_url`; device
+/// flows fill `user_code`/`verification_url` and a poll interval.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OAuthStart {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub flow: String,
+    #[serde(default)]
+    pub auth_url: String,
+    #[serde(default)]
+    pub user_code: String,
+    #[serde(default)]
+    pub verification_url: String,
+    #[serde(default)]
+    pub expires_in: u64,
+    #[serde(default)]
+    pub poll_interval: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OAuthPoll {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<f64>,
+}
+
 /// One installed skill from `GET /api/skills`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Skill {
@@ -668,6 +910,9 @@ pub struct SessionSummary {
     pub model: String,
     #[serde(default)]
     pub profile_name: String,
+    /// Working directory the session ran in; the desktop groups/filters on it.
+    #[serde(default)]
+    pub cwd: String,
     #[serde(default)]
     pub last_active: f64,
     #[serde(default)]
@@ -676,6 +921,55 @@ pub struct SessionSummary {
     pub archived: bool,
     #[serde(default)]
     pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanBoards {
+    pub boards: Vec<KanbanBoardInfo>,
+    pub current: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanBoardInfo {
+    pub slug: String,
+    pub name: String,
+}
+
+fn kanban_scoped_path(path: &str, board: Option<&str>) -> String {
+    match board.filter(|value| !value.is_empty()) {
+        Some(board) => format!("{path}?board={}", percent_encode(board)),
+        None => path.to_string(),
+    }
+}
+
+/// A board returned by the optional Hermes Kanban plugin.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanBoard {
+    pub columns: Vec<KanbanColumn>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanColumn {
+    pub name: String,
+    pub tasks: Vec<KanbanTask>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub assignee: Option<String>,
+}
+
+/// State of a host-managed MCP OAuth authorization.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpOAuthFlow {
+    pub flow_id: String,
+    pub server_name: String,
+    pub status: String,
+    pub authorization_url: Option<String>,
+    pub error: Option<String>,
 }
 
 /// `GET /api/sessions` — a page of history plus the unfiltered total.
@@ -975,8 +1269,79 @@ impl RestClient {
         self.decode_response(path, response).await
     }
 
-    pub async fn cron_jobs(&self) -> Result<Value, ApiError> {
+    pub async fn cron_jobs(&self) -> Result<Vec<CronJob>, ApiError> {
         self.get("/api/cron/jobs").await
+    }
+
+    pub async fn cron_delivery_targets(&self) -> Result<Vec<CronDeliveryTarget>, ApiError> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[serde(default)]
+            targets: Vec<CronDeliveryTarget>,
+        }
+        Ok(self
+            .get::<Response>("/api/cron/delivery-targets")
+            .await?
+            .targets)
+    }
+
+    /// `POST /api/cron/jobs` — raw body so future create fields pass through.
+    pub async fn create_cron_job(&self, body: Value) -> Result<Value, ApiError> {
+        const PATH: &str = "/api/cron/jobs";
+        let response = self
+            .authed(reqwest::Method::POST, PATH)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        self.decode_response(PATH, response).await
+    }
+
+    /// `pause`, `resume` or `trigger` one job.
+    pub async fn cron_action(&self, id: &str, action: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/cron/jobs/{}/{action}", percent_encode(id));
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    pub async fn delete_cron_job(&self, id: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/cron/jobs/{}", percent_encode(id));
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// `GET /api/cron/jobs/{id}/runs` — cron runs are ordinary sessions.
+    pub async fn cron_runs(&self, id: &str) -> Result<Vec<SessionSummary>, ApiError> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[serde(default)]
+            runs: Vec<SessionSummary>,
+        }
+        Ok(self
+            .get::<Response>(&format!(
+                "/api/cron/jobs/{}/runs?limit=20",
+                percent_encode(id)
+            ))
+            .await?
+            .runs)
     }
 
     pub async fn health(&self) -> Result<Value, ApiError> {
@@ -1065,6 +1430,120 @@ impl RestClient {
     /// `DELETE /api/mcp/servers/{name}`.
     pub async fn delete_mcp_server(&self, name: &str) -> Result<Value, ApiError> {
         let path = format!("/api/mcp/servers/{}", percent_encode(name));
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// List boards without changing the host's active board.
+    pub async fn kanban_boards(&self) -> Result<KanbanBoards, ApiError> {
+        self.get("/api/plugins/kanban/boards").await
+    }
+
+    /// Read a board from the optional Kanban plugin.
+    pub async fn kanban_board(&self, board: Option<&str>) -> Result<KanbanBoard, ApiError> {
+        self.get(&kanban_scoped_path("/api/plugins/kanban/board", board))
+            .await
+    }
+
+    /// Create a task in triage, without assigning or dispatching a worker.
+    pub async fn create_kanban_task(
+        &self,
+        title: &str,
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path("/api/plugins/kanban/tasks", board);
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({ "title": title, "triage": true }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// Update task fields using the plugin's validation.
+    pub async fn update_kanban_task(
+        &self,
+        id: &str,
+        patch: Value,
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/tasks/{}", percent_encode(id)),
+            board,
+        );
+        let response = self
+            .authed(reqwest::Method::PATCH, &path)
+            .json(&patch)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// Delete a task from the selected board.
+    pub async fn delete_kanban_task(
+        &self,
+        id: &str,
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/tasks/{}", percent_encode(id)),
+            board,
+        );
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// Start host-managed MCP OAuth in the selected profile.
+    pub async fn start_mcp_oauth(
+        &self,
+        name: &str,
+        profile: Option<&str>,
+    ) -> Result<McpOAuthFlow, ApiError> {
+        let mut path = format!("/api/mcp/servers/{}/auth", percent_encode(name));
+        if let Some(profile) = profile.filter(|profile| !profile.is_empty()) {
+            path.push_str(&format!("?profile={}", percent_encode(profile)));
+        }
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        let value = self.decode_response(&path, response).await?;
+        serde_json::from_value(value).map_err(|source| ApiError::Decode { path, source })
+    }
+
+    pub async fn mcp_oauth_status(&self, id: &str) -> Result<McpOAuthFlow, ApiError> {
+        self.get(&format!("/api/mcp/oauth/flows/{}", percent_encode(id)))
+            .await
+    }
+
+    pub async fn cancel_mcp_oauth(&self, id: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/mcp/oauth/flows/{}", percent_encode(id));
         let response = self
             .authed(reqwest::Method::DELETE, &path)
             .send()
@@ -1234,12 +1713,109 @@ impl RestClient {
         .await
     }
 
+    /// Request an image from the host's restricted media endpoint.
+    pub async fn media_data_url(&self, path: &str) -> Result<String, ApiError> {
+        #[derive(Deserialize)]
+        struct Media {
+            data_url: String,
+        }
+        Ok(self
+            .get::<Media>(&format!("/api/media?path={}", percent_encode(path)))
+            .await?
+            .data_url)
+    }
+
+    /// Export a complete session as JSON using the host's profile-aware route.
+    pub async fn export_session(&self, id: &str, profile: Option<&str>) -> Result<Value, ApiError> {
+        let mut path = format!("/api/sessions/{}/export", percent_encode(id));
+        if let Some(profile) = profile.filter(|profile| !profile.is_empty()) {
+            path.push_str(&format!("?profile={}", percent_encode(profile)));
+        }
+        self.get(&path).await
+    }
+
     /// `PATCH /api/sessions/{id}` — rename, pin, archive or mark read.
     pub async fn update_session(&self, id: &str, patch: Value) -> Result<Value, ApiError> {
         let path = format!("/api/sessions/{id}");
         let response = self
             .authed(reqwest::Method::PATCH, &path)
             .json(&patch)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    /// `GET /api/providers/oauth` — every OAuth-capable provider and status.
+    pub async fn oauth_providers(&self) -> Result<Vec<OAuthProvider>, ApiError> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[serde(default)]
+            providers: Vec<OAuthProvider>,
+        }
+        Ok(self
+            .get::<Response>("/api/providers/oauth")
+            .await?
+            .providers)
+    }
+
+    /// Start a PKCE or device-code login. The host keeps the flow state.
+    pub async fn start_oauth(&self, provider: &str) -> Result<OAuthStart, ApiError> {
+        let path = format!("/api/providers/oauth/{}/start", percent_encode(provider));
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        let value = self.decode_response(&path, response).await?;
+        serde_json::from_value(value).map_err(|source| ApiError::Decode { path, source })
+    }
+
+    /// Submit the pasted authorization code for a PKCE flow.
+    pub async fn submit_oauth_code(
+        &self,
+        provider: &str,
+        session_id: &str,
+        code: &str,
+    ) -> Result<Value, ApiError> {
+        let path = format!("/api/providers/oauth/{}/submit", percent_encode(provider));
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({ "session_id": session_id, "code": code }))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
+    }
+
+    pub async fn poll_oauth(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<OAuthPoll, ApiError> {
+        let path = format!(
+            "/api/providers/oauth/{}/poll/{}",
+            percent_encode(provider),
+            percent_encode(session_id)
+        );
+        self.get(&path).await
+    }
+
+    /// `DELETE /api/providers/oauth/{id}` — removes Hermes-managed creds only.
+    pub async fn disconnect_oauth(&self, provider: &str) -> Result<Value, ApiError> {
+        let path = format!("/api/providers/oauth/{}", percent_encode(provider));
+        let response = self
+            .authed(reqwest::Method::DELETE, &path)
             .send()
             .await
             .map_err(|source| ApiError::Transport {
@@ -1338,6 +1914,31 @@ impl RestClient {
                 source,
             })?;
         self.decode_response(PATH, response).await
+    }
+
+    /// `GET /api/model/moa` — named Mixture-of-Agents presets.
+    pub async fn moa_config(&self) -> Result<MoaConfig, ApiError> {
+        self.get("/api/model/moa").await
+    }
+
+    /// `PUT /api/model/moa` — saves the whole preset map. The host rejects
+    /// half-filled slots with 422 rather than silently repairing them.
+    pub async fn set_moa_config(&self, config: &MoaConfig) -> Result<MoaConfig, ApiError> {
+        const PATH: &str = "/api/model/moa";
+        let response = self
+            .authed(reqwest::Method::PUT, PATH)
+            .json(config)
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: PATH.to_string(),
+                source,
+            })?;
+        let value = self.decode_response(PATH, response).await?;
+        serde_json::from_value(value).map_err(|source| ApiError::Decode {
+            path: PATH.to_string(),
+            source,
+        })
     }
 
     /// `POST /api/model/set` — writes the main model for *new* sessions.
@@ -1553,9 +2154,8 @@ fn percent_encode(value: &str) -> String {
 
 /// Resolve credentials for a host before dialing: password-login when only
 /// basic credentials are configured, then mint a single-use WS ticket.
-///
-/// Failures come back as human-readable notes rather than errors so a caller
-/// can still attempt the connection (loopback hosts need no auth at all).
+///    /// Failures come back as human-readable notes rather than errors so a caller
+/// can still attempt the connection (loopback hosts may require a token).
 pub async fn authenticate(host: &HostConfig) -> (HostConfig, Vec<String>) {
     let mut host = host.clone();
     let mut notes = Vec::new();
@@ -1608,6 +2208,44 @@ pub mod gateway {
         }
         client
             .request("session.create", Value::Object(params))
+            .await
+    }
+
+    /// `session.resume` answer. The runtime `session_id` is the id prompts must
+    /// target; `resumed` is the durable transcript id that was reopened.
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct ResumedSession {
+        #[serde(default)]
+        pub session_id: String,
+        #[serde(default)]
+        pub resumed: String,
+        #[serde(default)]
+        pub messages: Vec<Value>,
+        #[serde(default)]
+        pub message_count: u64,
+        #[serde(default)]
+        pub running: bool,
+        #[serde(default)]
+        pub info: Value,
+    }
+
+    /// Reopen a stored conversation and bind it to a live gateway runtime.
+    /// The host hydrates the transcript and lazily builds the agent, so this is
+    /// safe to call from the UI thread's async worker.
+    pub async fn resume_session(
+        client: &GatewayClient,
+        id: &str,
+        profile: Option<&str>,
+    ) -> Result<ResumedSession, hermes_rpc::RpcError> {
+        let mut params = serde_json::Map::new();
+        params.insert("session_id".into(), Value::String(id.to_string()));
+        params.insert("cols".into(), Value::from(120));
+        params.insert("omit_messages".into(), Value::Bool(false));
+        if let Some(profile) = profile {
+            params.insert("profile".into(), Value::String(profile.to_string()));
+        }
+        client
+            .request("session.resume", Value::Object(params))
             .await
     }
 
@@ -1761,6 +2399,117 @@ pub mod gateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn kanban_and_mcp_oauth_use_authenticated_plugin_routes() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                r#"{"columns":[{"name":"todo","tasks":[{"id":"t/1","title":"Test","status":"todo","assignee":null}]}]}"#,
+                r#"{"ok":true}"#,
+                r#"{"task":{"id":"new"}}"#,
+                r#"{"flow_id":"f/1","server_name":"demo","status":"authorization_required","authorization_url":"https://example.com/auth","error":null}"#,
+                r#"{"flow_id":"f/1","server_name":"demo","status":"approved","authorization_url":null,"error":null}"#,
+                r#"{"ok":true}"#,
+            ];
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    data.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|n| n.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(data).unwrap());
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).unwrap();
+            }
+            requests
+        });
+        let host = HostConfig {
+            base_url: format!("http://{address}"),
+            token: Some("test-token".into()),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+        let board = client.kanban_board(Some("work & ops")).await.unwrap();
+        assert_eq!(board.columns[0].tasks[0].id, "t/1");
+        client
+            .update_kanban_task(
+                "t/1",
+                serde_json::json!({"status":"ready"}),
+                Some("work & ops"),
+            )
+            .await
+            .unwrap();
+        client
+            .create_kanban_task("New task", Some("work & ops"))
+            .await
+            .unwrap();
+        let flow = client
+            .start_mcp_oauth("demo/name", Some("work profile"))
+            .await
+            .unwrap();
+        assert_eq!(flow.flow_id, "f/1");
+        assert_eq!(
+            client.mcp_oauth_status(&flow.flow_id).await.unwrap().status,
+            "approved"
+        );
+        client.cancel_mcp_oauth(&flow.flow_id).await.unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /api/plugins/kanban/board?board=work%20%26%20ops "));
+        assert!(
+            requests[1]
+                .starts_with("PATCH /api/plugins/kanban/tasks/t%2F1?board=work%20%26%20ops ")
+        );
+        assert!(requests[1].ends_with(r#"{"status":"ready"}"#));
+        assert!(
+            requests[3]
+                .starts_with("POST /api/mcp/servers/demo%2Fname/auth?profile=work%20profile ")
+        );
+        assert!(requests[2].starts_with("POST /api/plugins/kanban/tasks?board=work%20%26%20ops "));
+        assert!(requests[2].ends_with(r#"{"title":"New task","triage":true}"#));
+        assert!(requests[4].starts_with("GET /api/mcp/oauth/flows/f%2F1 "));
+        assert!(requests[5].starts_with("DELETE /api/mcp/oauth/flows/f%2F1 "));
+        assert!(requests.iter().all(|request| {
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token")
+        }));
+    }
+
+    #[test]
+    fn bearer_token_is_sent_as_the_loopback_websocket_query() {
+        let host = HostConfig {
+            token: Some("a/b &c".into()),
+            ..HostConfig::local()
+        };
+        assert_eq!(
+            host.connection_config().url,
+            "ws://127.0.0.1:9119/api/ws?token=a%2Fb%20%26c"
+        );
+    }
 
     #[test]
     fn ws_url_keeps_origin_and_swaps_scheme() {

@@ -381,6 +381,9 @@ pub struct Mcp {
     pub status: Option<String>,
     /// Set while a server test is in flight.
     pub testing: Option<String>,
+    pub oauth: Option<hermes_api::McpOAuthFlow>,
+    pub oauth_opened: Option<String>,
+    pub oauth_busy: bool,
     pub tab: Tab,
     pub form: Option<Form>,
     pub confirm_delete: Option<String>,

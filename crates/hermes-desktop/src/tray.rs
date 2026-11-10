@@ -13,6 +13,7 @@ use ksni::{MenuItem, Tray};
 pub struct TrayStatus {
     inner: Arc<Mutex<StatusInner>>,
     quit_requested: Arc<AtomicBool>,
+    show_requested: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -36,6 +37,10 @@ impl TrayStatus {
             Ok(inner) => (inner.host.clone(), inner.profile.clone(), inner.connected),
             Err(_) => (String::new(), String::new(), false),
         }
+    }
+
+    pub fn take_show(&self) -> bool {
+        self.show_requested.swap(false, Ordering::SeqCst)
     }
 
     /// True once the user picked Quit, cleared on read.
@@ -117,6 +122,14 @@ impl Tray for HermesTray {
             }
             .into(),
             MenuItem::Separator,
+            StandardItem {
+                label: "Show Hermes".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    tray.status.show_requested.store(true, Ordering::SeqCst);
+                }),
+                ..Default::default()
+            }
+            .into(),
             StandardItem {
                 label: "Quit Hermes".into(),
                 icon_name: "application-exit".into(),

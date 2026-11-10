@@ -285,19 +285,36 @@ fn palette_from_str(text: &str) -> Palette {
     let danger = get("red").unwrap_or(DEFAULT_DANGER);
     let cyan = get("cyan").unwrap_or(DEFAULT_BOT_ACCENT_CYAN);
 
+    let bg_elev = mix(bg, lighter, 0.55);
+    let surface_hi = mix(lighter, text, 0.08);
+    let accent_soft = get("selection").unwrap_or_else(|| mix(bg, accent, 0.18));
+    let planes = [bg, bg_elev, lighter, surface_hi, accent_soft];
+    let muted = ensure_contrast(
+        get("muted").unwrap_or_else(|| mix(text, bg, 0.35)),
+        text,
+        &planes,
+        4.5,
+    );
+    let dim = ensure_contrast(
+        get("dark_foreground").unwrap_or_else(|| mix(text, bg, 0.50)),
+        text,
+        &planes,
+        3.0,
+    );
+
     Palette {
         bg,
-        bg_elev: mix(bg, lighter, 0.55),
+        bg_elev,
         surface: lighter,
-        surface_hi: mix(lighter, text, 0.08),
+        surface_hi,
         border: mix(bg, text, 0.18),
         border_hi: mix(bg, text, 0.30),
         text,
-        text_muted: get("muted").unwrap_or_else(|| mix(text, bg, 0.35)),
-        text_dim: get("dark_foreground").unwrap_or_else(|| mix(text, bg, 0.50)),
+        text_muted: muted,
+        text_dim: dim,
         accent,
         accent_hi: get("bright_blue").unwrap_or_else(|| mix(accent, text, 0.20)),
-        accent_soft: get("selection").unwrap_or_else(|| mix(bg, accent, 0.18)),
+        accent_soft,
         user,
         reasoning,
         reasoning_soft: mix(bg, reasoning, 0.16),
@@ -308,6 +325,38 @@ fn palette_from_str(text: &str) -> Palette {
         bot_accent_cyan: cyan,
         scrim: 0xcc00_0000 | (bg & 0x00ff_ffff),
     }
+}
+
+fn luminance(hex: u32) -> f32 {
+    let channel = |shift: u32| {
+        let raw = ((hex >> shift) & 0xff_u32) as f32 / 255.;
+        if raw <= 0.04045 {
+            raw / 12.92
+        } else {
+            ((raw + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+fn contrast(a: u32, b: u32) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Move low-contrast theme hints toward the theme foreground, without changing
+/// the actual theme colors or assuming a dark palette.
+fn ensure_contrast(color: u32, foreground: u32, planes: &[u32], minimum: f32) -> u32 {
+    for step in 0..=100 {
+        let candidate = mix(color, foreground, step as f32 / 100.);
+        if planes
+            .iter()
+            .all(|plane| contrast(candidate, *plane) >= minimum)
+        {
+            return candidate;
+        }
+    }
+    foreground
 }
 
 fn parse_hex(raw: &str) -> Option<u32> {
@@ -351,25 +400,6 @@ magenta = "#c89dc1"
 bright_blue = "#c2c4f0"
 "##;
 
-    fn channel(value: u32, shift: u32) -> f32 {
-        let raw = ((value >> shift) & 0xff) as f32 / 255.;
-        if raw <= 0.03928 {
-            raw / 12.92
-        } else {
-            ((raw + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    fn luminance(hex: u32) -> f32 {
-        0.2126 * channel(hex, 16) + 0.7152 * channel(hex, 8) + 0.0722 * channel(hex, 0)
-    }
-
-    fn contrast(a: u32, b: u32) -> f32 {
-        let (la, lb) = (luminance(a), luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
     #[test]
     fn omarchy_colors_map_onto_the_semantic_palette() {
         let palette = palette_from_str(SAMPLE);
@@ -384,6 +414,21 @@ bright_blue = "#c2c4f0"
         assert_eq!(palette.danger, 0xed5b5a);
         assert_eq!(palette.bot_accent_cyan, 0xa3bfd1);
         assert_eq!(palette.scrim >> 24, 0xcc);
+    }
+
+    #[test]
+    fn theme_hints_remain_readable_on_derived_planes() {
+        let palette = palette_from_str(SAMPLE);
+        for plane in [
+            palette.bg,
+            palette.bg_elev,
+            palette.surface,
+            palette.surface_hi,
+            palette.accent_soft,
+        ] {
+            assert!(contrast(palette.text_muted, plane) >= 4.5);
+            assert!(contrast(palette.text_dim, plane) >= 3.0);
+        }
     }
 
     #[test]

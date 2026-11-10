@@ -38,6 +38,120 @@ pub fn clip(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Recognize standalone Markdown image references to host-local image paths.
+/// Fetching is explicit: ordinary links and remote URLs are never requested.
+pub fn host_image_path(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let (_, rest) = line.strip_prefix("![")?.split_once("](")?;
+    let path = rest.strip_suffix(')')?;
+    if !path.starts_with('/') || path.contains(['\n', '\r']) {
+        return None;
+    }
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".webp"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+        .then_some(path)
+}
+
+/// Renderable Markdown blocks. Links remain text; remote content is never fetched.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MarkdownBlock {
+    Paragraph(String),
+    Heading(String),
+    Code(String),
+    Quote(String),
+    ListItem(String),
+    Image(String),
+}
+
+pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Paragraph,
+        Heading,
+        Code,
+        Quote,
+        Item,
+    }
+    fn finish(blocks: &mut Vec<MarkdownBlock>, text: &mut String, kind: Kind) {
+        if text.is_empty() {
+            return;
+        }
+        let content = std::mem::take(text);
+        blocks.push(match kind {
+            Kind::Paragraph => MarkdownBlock::Paragraph(content),
+            Kind::Heading => MarkdownBlock::Heading(content),
+            Kind::Code => MarkdownBlock::Code(content),
+            Kind::Quote => MarkdownBlock::Quote(content),
+            Kind::Item => MarkdownBlock::ListItem(content),
+        });
+    }
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    let mut kind = Kind::Paragraph;
+    let mut quote = false;
+    let mut item = false;
+    let mut image = None;
+    for event in Parser::new(source) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                finish(&mut blocks, &mut text, kind);
+                kind = Kind::Heading;
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                finish(&mut blocks, &mut text, kind);
+                kind = Kind::Code;
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote = true;
+            }
+            Event::Start(Tag::Item) => {
+                item = true;
+            }
+            Event::Start(Tag::Paragraph) => {
+                kind = if item {
+                    Kind::Item
+                } else if quote {
+                    Kind::Quote
+                } else {
+                    Kind::Paragraph
+                };
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                image = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(path) = image.take()
+                    && host_image_path(&format!("![]({path})")).is_some()
+                {
+                    finish(&mut blocks, &mut text, kind);
+                    blocks.push(MarkdownBlock::Image(path));
+                }
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock) => {
+                finish(&mut blocks, &mut text, kind)
+            }
+            Event::End(TagEnd::BlockQuote(_)) => quote = false,
+            Event::End(TagEnd::Item) => {
+                finish(&mut blocks, &mut text, Kind::Item);
+                item = false;
+            }
+            Event::Text(value) | Event::Code(value) => text.push_str(&value),
+            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            Event::Rule => {
+                finish(&mut blocks, &mut text, kind);
+                blocks.push(MarkdownBlock::Paragraph("────────".into()));
+            }
+            Event::Html(value) | Event::InlineHtml(value) => text.push_str(&value),
+            _ => {}
+        }
+    }
+    finish(&mut blocks, &mut text, kind);
+    blocks
+}
+
 /// Append streamed text to the trailing line of the same role, or start a new
 /// one when the speaker changed. Deltas from the gateway arrive per token, so
 /// this runs once per frame.
@@ -51,6 +165,46 @@ pub fn append_streaming(lines: &mut Vec<Line>, role: Role, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_only_standalone_host_image_references() {
+        assert_eq!(
+            host_image_path("![chart](/home/user/.hermes/images/a.png)"),
+            Some("/home/user/.hermes/images/a.png")
+        );
+        assert_eq!(host_image_path("![x](https://example.test/a.png)"), None);
+        assert_eq!(host_image_path("prefix ![x](/tmp/a.png)"), None);
+        assert_eq!(host_image_path("![x](/tmp/a.pdf)"), None);
+    }
+
+    #[test]
+    fn markdown_preserves_blocks_streaming_and_untrusted_text() {
+        assert_eq!(
+            markdown_blocks("# Heading\n\nHello **world**\n\n```rust\nlet x = 1;\n```"),
+            vec![
+                MarkdownBlock::Heading("Heading".into()),
+                MarkdownBlock::Paragraph("Hello world".into()),
+                MarkdownBlock::Code("let x = 1;\n".into()),
+            ]
+        );
+        assert_eq!(
+            markdown_blocks("```\npartial"),
+            vec![MarkdownBlock::Code("partial".into())]
+        );
+        assert_eq!(
+            markdown_blocks("<script>alert(1)</script>"),
+            vec![MarkdownBlock::Paragraph("<script>alert(1)</script>".into())]
+        );
+        assert!(
+            markdown_blocks("![chart](/tmp/a.png)")
+                .contains(&MarkdownBlock::Image("/tmp/a.png".into()))
+        );
+        assert!(
+            !markdown_blocks("![remote](https://example.test/a.png)")
+                .iter()
+                .any(|block| matches!(block, MarkdownBlock::Image(_)))
+        );
+    }
 
     #[test]
     fn consecutive_deltas_merge_into_one_line() {

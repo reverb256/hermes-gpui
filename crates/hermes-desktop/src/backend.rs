@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hermes_api::{
-    ActiveProfile, AuxiliaryTask, EnvEntry, GatewayClient, GatewayEvent, HostConfig, McpCatalog,
-    McpServer, MemoryStatus, ModelInfo, ModelOptions, PortalStatus, Profile, ProfileDetail,
+    ActiveProfile, AuxiliaryTask, CronDeliveryTarget, CronJob, EnvEntry, GatewayClient,
+    GatewayEvent, HostConfig, McpCatalog, McpServer, MemoryStatus, MoaConfig, ModelInfo,
+    ModelOptions, OAuthPoll, OAuthProvider, OAuthStart, PortalStatus, Profile, ProfileDetail,
     RestClient, SessionSummary, Skill, SkillHubPreview, SkillHubResult, SkillHubScan,
     UsageAnalytics, gateway,
 };
@@ -156,6 +157,15 @@ pub enum BackendEvent {
     },
     Spoken,
     SpeakFailed(String),
+    Media {
+        path: String,
+        mime: String,
+        bytes: Vec<u8>,
+    },
+    MediaFailed {
+        path: String,
+        message: String,
+    },
     /// `profiles.describe` answer for the inspector.
     ProfileDetail(ProfileDetail),
     /// The host `.env`, redacted server-side.
@@ -183,10 +193,36 @@ pub enum BackendEvent {
     },
     ReasoningEffort(String),
     ReasoningFailed(String),
+    Moa(MoaConfig),
+    MoaSaved(MoaConfig),
+    MoaFailed(String),
+    Cron(Vec<CronJob>, Vec<CronDeliveryTarget>),
+    CronFailed(String),
+    CronSaved(String),
+    CronRuns {
+        id: String,
+        runs: Vec<SessionSummary>,
+    },
+    OAuth(Vec<OAuthProvider>),
+    OAuthStarted {
+        provider: String,
+        start: OAuthStart,
+    },
+    OAuthPolled {
+        provider: String,
+        poll: OAuthPoll,
+    },
+    OAuthSaved(String),
+    OAuthFailed(String),
     Sessions(Vec<SessionSummary>, u64),
     SessionsFailed(String),
     SessionMessages {
         id: String,
+        messages: Vec<serde_json::Value>,
+    },
+    SessionResumed {
+        stored_id: String,
+        session_id: String,
         messages: Vec<serde_json::Value>,
     },
     SessionDeleted(String),
@@ -208,6 +244,16 @@ pub enum BackendEvent {
     HubFailed(String),
     Mcp(Vec<McpServer>),
     McpFailed(String),
+    McpOAuth(hermes_api::McpOAuthFlow),
+    McpOAuthFailed(String),
+    McpOAuthCancelled(String),
+    KanbanBoards(hermes_api::KanbanBoards),
+    Kanban {
+        board: Option<String>,
+        data: hermes_api::KanbanBoard,
+    },
+    KanbanCreated,
+    KanbanFailed(String),
     McpToggled {
         name: String,
         enabled: bool,
@@ -269,6 +315,7 @@ pub enum Command {
         session_id: Option<String>,
     },
     Attach(PathBuf),
+    LoadMedia(String),
     Speak {
         text: String,
     },
@@ -311,11 +358,47 @@ pub enum Command {
         model: String,
     },
     ResetAuxModels,
+    LoadMoa,
+    SaveMoa(MoaConfig),
+    LoadCron,
+    CreateCron {
+        body: Value,
+    },
+    CronAction {
+        id: String,
+        action: String,
+    },
+    DeleteCron {
+        id: String,
+    },
+    LoadCronRuns {
+        id: String,
+    },
+    LoadOAuth,
+    StartOAuth {
+        provider: String,
+    },
+    SubmitOAuth {
+        provider: String,
+        session_id: String,
+        code: String,
+    },
+    PollOAuth {
+        provider: String,
+        session_id: String,
+    },
+    DisconnectOAuth {
+        provider: String,
+    },
     SetReasoning {
         level: String,
     },
     LoadSessions,
-    LoadSession {
+    ExportSession {
+        id: String,
+        path: PathBuf,
+    },
+    ResumeSession {
         id: String,
     },
     DeleteSession {
@@ -340,6 +423,34 @@ pub enum Command {
         identifier: String,
     },
     LoadMcp,
+    LoadKanbanBoards,
+    LoadKanban {
+        board: Option<String>,
+    },
+    CreateKanbanTask {
+        title: String,
+        board: Option<String>,
+    },
+    UpdateKanbanTask {
+        id: String,
+        patch: Value,
+        board: Option<String>,
+        editing: bool,
+    },
+    DeleteKanbanTask {
+        id: String,
+        board: Option<String>,
+    },
+    StartMcpOAuth {
+        name: String,
+        profile: Option<String>,
+    },
+    PollMcpOAuth {
+        id: String,
+    },
+    CancelMcpOAuth {
+        id: String,
+    },
     SetMcp {
         name: String,
         enabled: bool,
@@ -420,6 +531,43 @@ impl Backend {
     }
 }
 
+/// Do not queue a click made while disconnected: replaying a mutation after
+/// reconnect could unexpectedly modify credentials, jobs or board state.
+fn offline_event(command: Command) -> BackendEvent {
+    let message = "Gateway offline. Reconnect and try again.".to_string();
+    match command {
+        Command::LoadSessions => BackendEvent::SessionsFailed(message),
+        Command::LoadMcp => BackendEvent::McpFailed(message),
+        Command::LoadMcpCatalog => BackendEvent::McpCatalogFailed(message),
+        Command::LoadKanbanBoards
+        | Command::LoadKanban { .. }
+        | Command::CreateKanbanTask { .. }
+        | Command::UpdateKanbanTask { .. }
+        | Command::DeleteKanbanTask { .. } => BackendEvent::KanbanFailed(message),
+        Command::StartMcpOAuth { .. }
+        | Command::PollMcpOAuth { .. }
+        | Command::CancelMcpOAuth { .. } => BackendEvent::McpOAuthFailed(message),
+        Command::LoadOAuth
+        | Command::StartOAuth { .. }
+        | Command::PollOAuth { .. }
+        | Command::SubmitOAuth { .. }
+        | Command::DisconnectOAuth { .. } => BackendEvent::OAuthFailed(message),
+        Command::LoadCron
+        | Command::CreateCron { .. }
+        | Command::CronAction { .. }
+        | Command::DeleteCron { .. }
+        | Command::LoadCronRuns { .. } => BackendEvent::CronFailed(message),
+        Command::LoadMoa | Command::SaveMoa(_) => BackendEvent::MoaFailed(message),
+        Command::LoadSkills => BackendEvent::SkillsFailed(message),
+        Command::LoadModels => BackendEvent::ModelsFailed(message),
+        Command::LoadAuxiliary => BackendEvent::AuxiliaryFailed(message),
+        Command::LoadUsage { .. } => BackendEvent::UsageFailed(message),
+        Command::LoadMemory => BackendEvent::MemoryFailed(message),
+        Command::LoadMemoryConfig { .. } => BackendEvent::MemoryConfigFailed(message),
+        _ => BackendEvent::Error(message),
+    }
+}
+
 async fn worker(
     host: HostConfig,
     mut commands: mpsc::UnboundedReceiver<Command>,
@@ -446,7 +594,17 @@ async fn worker(
                     host.ws_url()
                 )));
                 let _ = events.send(BackendEvent::Connection(ConnectionState::Closed));
-                tokio::time::sleep(backoff).await;
+                let retry = tokio::time::sleep(backoff);
+                tokio::pin!(retry);
+                loop {
+                    tokio::select! {
+                        _ = &mut retry => break,
+                        command = commands.recv() => {
+                            let Some(command) = command else { return };
+                            let _ = events.send(offline_event(command));
+                        }
+                    }
+                }
                 backoff = (backoff * 2).min(RECONNECT_MAX);
                 continue;
             }
@@ -759,6 +917,69 @@ async fn worker(
                                 }
                             }
                         }
+                        Command::LoadKanbanBoards => match rest.kanban_boards().await {
+                            Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
+                            Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                        },
+                        Command::LoadKanban { board } => match rest.kanban_board(board.as_deref()).await {
+                            Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
+                            Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                        },
+                        Command::CreateKanbanTask { title, board } => {
+                            match rest.create_kanban_task(&title, board.as_deref()).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::KanbanCreated);
+                                    match rest.kanban_board(board.as_deref()).await {
+                                        Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
+                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                },
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::UpdateKanbanTask { id, patch, board, editing } => {
+                            match rest.update_kanban_task(&id, patch, board.as_deref()).await {
+                                Ok(_) => {
+                                    if editing { let _ = events.send(BackendEvent::KanbanCreated); }
+                                    match rest.kanban_board(board.as_deref()).await {
+                                        Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
+                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                },
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::DeleteKanbanTask { id, board } => {
+                            match rest.delete_kanban_task(&id, board.as_deref()).await {
+                                Ok(_) => match rest.kanban_board(board.as_deref()).await {
+                                    Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
+                                    Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                },
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::StartMcpOAuth { name, profile } => {
+                            let rest = rest.clone();
+                            let events = events.clone();
+                            tokio::spawn(async move {
+                                match rest.start_mcp_oauth(&name, profile.as_deref()).await {
+                                    Ok(flow) => { let _ = events.send(BackendEvent::McpOAuth(flow)); }
+                                    Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                }
+                            });
+                        }
+                        Command::PollMcpOAuth { id } => {
+                            match rest.mcp_oauth_status(&id).await {
+                                Ok(flow) => { let _ = events.send(BackendEvent::McpOAuth(flow)); }
+                                Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::CancelMcpOAuth { id } => {
+                            match rest.cancel_mcp_oauth(&id).await {
+                                Ok(_) => { let _ = events.send(BackendEvent::McpOAuthCancelled(id)); }
+                                Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
                         Command::LoadMcp => match rest.mcp_servers().await {
                             Ok(servers) => {
                                 let _ = events.send(BackendEvent::Mcp(servers));
@@ -1030,20 +1251,76 @@ async fn worker(
                                 let _ = events.send(BackendEvent::SessionsFailed(message));
                             }
                         },
-                        Command::LoadSession { id } => {
-                            match rest.session_messages(&id).await {
-                                Ok(page) => {
-                                    let _ = events.send(BackendEvent::SessionMessages {
-                                        id: page.session_id,
-                                        messages: page.messages,
+                        Command::LoadMedia(path) => {
+                            let result = match rest.media_data_url(&path).await {
+                                Ok(url) => {
+                                    match url.split_once(",") {
+                                        Some((header, data)) if header.starts_with("data:image/") && header.ends_with(";base64") => {
+                                            match base64_decode(data) {
+                                                Some(bytes) => Ok((header[5..header.len() - 7].to_string(), bytes)),
+                                                None => Err("invalid image data".to_string()),
+                                            }
+                                        }
+                                        _ => Err("invalid image data URL".to_string()),
+                                    }
+                                }
+                                Err(err) => Err(err.detail().unwrap_or_else(|| err.to_string())),
+                            };
+                            match result {
+                                Ok((mime, bytes)) => { let _ = events.send(BackendEvent::Media { path, mime, bytes }); }
+                                Err(message) => { let _ = events.send(BackendEvent::MediaFailed { path, message }); }
+                            }
+                        }
+                        Command::ExportSession { id, path } => {
+                            let result = match rest.export_session(&id, session_profile.as_deref()).await {
+                                Ok(value) => match serde_json::to_vec_pretty(&value) {
+                                    Ok(bytes) => tokio::fs::write(&path, bytes).await.map_err(|err| err.to_string()),
+                                    Err(err) => Err(err.to_string()),
+                                },
+                                Err(err) => Err(err.detail().unwrap_or_else(|| err.to_string())),
+                            };
+                            let message = match result {
+                                Ok(()) => format!("Exported session to {}", path.display()),
+                                Err(err) => format!("Session export failed: {err}"),
+                            };
+                            let _ = events.send(BackendEvent::Notice(message));
+                        }
+                        Command::ResumeSession { id } => {
+                            match gateway::resume_session(
+                                &client,
+                                &id,
+                                session_profile.as_deref(),
+                            )
+                            .await
+                            {
+                                Ok(resumed) => {
+                                    session = Some(resumed.session_id.clone());
+                                    let _ = events.send(BackendEvent::SessionResumed {
+                                        stored_id: resumed.resumed.clone(),
+                                        session_id: resumed.session_id,
+                                        messages: resumed.messages,
                                     });
                                 }
                                 Err(err) => {
-                                    let message =
-                                        err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::Notice(format!(
-                                        "session {id}: {message}"
-                                    )));
+                                    // Older hosts may expose the transcript without
+                                    // `session.resume`; keep a read-only fallback so
+                                    // history is still inspectable, but say why.
+                                    match rest.session_messages(&id).await {
+                                        Ok(page) => {
+                                            let _ = events.send(BackendEvent::SessionMessages {
+                                                id: page.session_id,
+                                                messages: page.messages,
+                                            });
+                                            let _ = events.send(BackendEvent::Notice(format!(
+                                                "resume {id}: {err} (read-only transcript)"
+                                            )));
+                                        }
+                                        Err(_) => {
+                                            let _ = events.send(BackendEvent::Notice(format!(
+                                                "resume {id}: {err}"
+                                            )));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1129,6 +1406,157 @@ async fn worker(
                                 )));
                             }
                         },
+                        Command::LoadMoa => match rest.moa_config().await {
+                            Ok(config) => {
+                                let _ = events.send(BackendEvent::Moa(config));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::MoaFailed(message));
+                            }
+                        },
+                        Command::SaveMoa(config) => match rest.set_moa_config(&config).await {
+                            Ok(saved) => {
+                                let _ = events.send(BackendEvent::MoaSaved(saved));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::MoaFailed(message));
+                            }
+                        },
+                        Command::LoadCron => {
+                            match (
+                                rest.cron_jobs().await,
+                                rest.cron_delivery_targets().await,
+                            ) {
+                                (Ok(jobs), Ok(targets)) => {
+                                    let _ = events.send(BackendEvent::Cron(jobs, targets));
+                                }
+                                (Err(err), _) | (_, Err(err)) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                }
+                            }
+                        }
+                        Command::CreateCron { body } => {
+                            match rest.create_cron_job(body).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::CronSaved(
+                                        "job created".to_string(),
+                                    ));
+                                    refresh_cron(&rest, &events).await;
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                }
+                            }
+                        }
+                        Command::CronAction { id, action } => {
+                            match rest.cron_action(&id, &action).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::CronSaved(format!(
+                                        "{id}: {action}"
+                                    )));
+                                    refresh_cron(&rest, &events).await;
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                }
+                            }
+                        }
+                        Command::DeleteCron { id } => match rest.delete_cron_job(&id).await {
+                            Ok(_) => {
+                                let _ = events
+                                    .send(BackendEvent::CronSaved(format!("{id} deleted")));
+                                refresh_cron(&rest, &events).await;
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::CronFailed(message));
+                            }
+                        },
+                        Command::LoadCronRuns { id } => match rest.cron_runs(&id).await {
+                            Ok(runs) => {
+                                let _ = events.send(BackendEvent::CronRuns { id, runs });
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::CronFailed(message));
+                            }
+                        },
+                        Command::LoadOAuth => match rest.oauth_providers().await {
+                            Ok(providers) => {
+                                let _ = events.send(BackendEvent::OAuth(providers));
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                            }
+                        },
+                        Command::StartOAuth { provider } => {
+                            match rest.start_oauth(&provider).await {
+                                Ok(start) => {
+                                    let _ = events
+                                        .send(BackendEvent::OAuthStarted { provider, start });
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::OAuthFailed(message));
+                                }
+                            }
+                        }
+                        Command::SubmitOAuth {
+                            provider,
+                            session_id,
+                            code,
+                        } => match rest.submit_oauth_code(&provider, &session_id, &code).await {
+                            Ok(_) => {
+                                let _ = events
+                                    .send(BackendEvent::OAuthSaved("credentials saved".into()));
+                                refresh_oauth(&rest, &events).await;
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                            }
+                        },
+                        Command::PollOAuth {
+                            provider,
+                            session_id,
+                        } => match rest.poll_oauth(&provider, &session_id).await {
+                            Ok(poll) => {
+                                let done = !matches!(poll.status.as_str(), "pending" | "");
+                                let _ = events.send(BackendEvent::OAuthPolled { provider, poll });
+                                if done {
+                                    refresh_oauth(&rest, &events).await;
+                                }
+                            }
+                            Err(err) => {
+                                let message = err.detail().unwrap_or_else(|| err.to_string());
+                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                            }
+                        },
+                        Command::DisconnectOAuth { provider } => {
+                            match rest.disconnect_oauth(&provider).await {
+                                Ok(_) => {
+                                    let _ = events.send(BackendEvent::OAuthSaved(format!(
+                                        "{provider} disconnected"
+                                    )));
+                                    refresh_oauth(&rest, &events).await;
+                                }
+                                Err(err) => {
+                                    let message =
+                                        err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::OAuthFailed(message));
+                                }
+                            }
+                        }
                         Command::ResetAuxModels => {
                             match rest.reset_auxiliary_models().await {
                                 Ok(_) => {
@@ -1358,6 +1786,30 @@ fn route_request(
     }
 }
 
+async fn refresh_oauth(rest: &RestClient, events: &mpsc::UnboundedSender<BackendEvent>) {
+    match rest.oauth_providers().await {
+        Ok(providers) => {
+            let _ = events.send(BackendEvent::OAuth(providers));
+        }
+        Err(err) => {
+            let message = err.detail().unwrap_or_else(|| err.to_string());
+            let _ = events.send(BackendEvent::OAuthFailed(message));
+        }
+    }
+}
+
+async fn refresh_cron(rest: &RestClient, events: &mpsc::UnboundedSender<BackendEvent>) {
+    match (rest.cron_jobs().await, rest.cron_delivery_targets().await) {
+        (Ok(jobs), Ok(targets)) => {
+            let _ = events.send(BackendEvent::Cron(jobs, targets));
+        }
+        (Err(err), _) | (_, Err(err)) => {
+            let message = err.detail().unwrap_or_else(|| err.to_string());
+            let _ = events.send(BackendEvent::CronFailed(message));
+        }
+    }
+}
+
 async fn attach(
     client: &GatewayClient,
     events: &mpsc::UnboundedSender<BackendEvent>,
@@ -1559,14 +2011,11 @@ async fn refresh(
         }
     }
     if let Ok(jobs) = rest.cron_jobs().await {
-        let mut names = Vec::new();
-        if let Some(jobs) = jobs.get("jobs").and_then(Value::as_array) {
-            for job in jobs {
-                if let Some(name) = job.get("name").and_then(Value::as_str) {
-                    names.push(name.to_string());
-                }
-            }
-        }
+        let names = jobs
+            .into_iter()
+            .map(|job| job.name)
+            .filter(|name| !name.is_empty())
+            .collect();
         let _ = events.send(BackendEvent::Routines(names));
     }
 }
@@ -1715,6 +2164,34 @@ pub async fn probe(host: &HostConfig) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::LoadKanban { board: None }),
+            BackendEvent::KanbanFailed(_)
+        ));
+        assert!(matches!(
+            offline_event(Command::LoadSessions),
+            BackendEvent::SessionsFailed(_)
+        ));
+        assert!(matches!(
+            offline_event(Command::UpdateKanbanTask {
+                id: "task".into(),
+                patch: serde_json::json!({"status": "done"}),
+                board: None,
+                editing: false,
+            }),
+            BackendEvent::KanbanFailed(_)
+        ));
+        assert!(matches!(
+            offline_event(Command::StartMcpOAuth {
+                name: "server".into(),
+                profile: None
+            }),
+            BackendEvent::McpOAuthFailed(_)
+        ));
+    }
 
     #[test]
     fn base64_decoder_round_trips_the_encoder() {

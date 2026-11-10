@@ -39,7 +39,7 @@ impl std::fmt::Debug for Auth {
 }
 
 /// How to reach a gateway.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectionConfig {
     /// `ws://host:9119/api/ws` or `wss://…/api/ws`.
     pub url: String,
@@ -47,6 +47,18 @@ pub struct ConnectionConfig {
     pub request_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub heartbeat_deadline: Duration,
+}
+
+impl std::fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionConfig")
+            .field("url", &self.url.split('?').next().unwrap_or_default())
+            .field("auth", &self.auth)
+            .field("request_timeout", &self.request_timeout)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("heartbeat_deadline", &self.heartbeat_deadline)
+            .finish()
+    }
 }
 
 impl ConnectionConfig {

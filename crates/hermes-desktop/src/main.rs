@@ -1,10 +1,14 @@
 mod app;
 mod backend;
+mod cron;
 mod inspector;
+mod ipc;
 mod keys;
 mod mcp;
 mod memory;
+mod moa;
 mod models;
+mod oauth;
 mod sessions;
 mod settings;
 mod skills;
@@ -41,6 +45,24 @@ fn main() {
         std::process::exit(i32::from(failed));
     }
 
+    let toggle = std::env::args().any(|arg| arg == "--toggle");
+    let listener = match ipc::claim() {
+        ipc::Claim::Primary(listener) => Some(listener),
+        ipc::Claim::Secondary => {
+            let request = if toggle {
+                ipc::Request::Toggle
+            } else {
+                ipc::Request::Show
+            };
+            if !ipc::forward(request) {
+                tracing::error!("another Hermes instance owns the socket but did not answer");
+                std::process::exit(1);
+            }
+            return;
+        }
+        ipc::Claim::Unavailable => None,
+    };
+
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
         let options = WindowOptions {
@@ -59,7 +81,7 @@ fn main() {
                 window.minimize_window();
                 false
             });
-            cx.new(|cx| app::HermesApp::new(host.clone(), cx))
+            cx.new(|cx| app::HermesApp::new(host.clone(), listener, cx))
         })
         .expect("open Hermes window");
 

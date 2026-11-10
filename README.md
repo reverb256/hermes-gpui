@@ -72,6 +72,21 @@ two seconds, so `omarchy theme set …` is reflected without restarting the app.
 Set `HERMES_OMARCHY_THEME` to a theme directory or a `colors.toml` path to test a
 specific palette.
 
+### Omarchy launcher
+
+`hermes-desktop --toggle` shows or hides the existing instance; a normal second
+launch brings it forward. The tray also offers **Show Hermes** and **Quit**.
+For example, add a binding to your own Hyprland configuration after choosing
+an unused shortcut (and ensure `hermes-desktop` is on `PATH`):
+
+```ini
+bind = SUPER, H, exec, hermes-desktop --toggle
+```
+
+The per-user socket defaults to `$XDG_RUNTIME_DIR/hermes-gpui-$USER.sock`, or
+the temporary directory if `XDG_RUNTIME_DIR` is unset. `HERMES_GPUI_SOCKET`
+overrides the path. This example does not modify your desktop configuration.
+
 ### Authentication
 
 A gated dashboard (`auth_required: true`) does not accept basic auth on its
@@ -162,10 +177,19 @@ merge. Both apply to new sessions only.
 
 **Sessions** swaps the bot rail for history: `/api/sessions` newest-first with
 message/tool counts and relative age, a client-side search, inline rename, pin/archive, and delete per row.
-Opening one hydrates the stored transcript from
-`/api/sessions/{id}/messages` read-only — the gateway has no resume call, so
-sending is disabled until **New chat**. `Ctrl+Shift+S` or the header's
-**Sessions** chip toggles the rail; Escape/Bots goes back.
+Opening one requests `session.resume`; older hosts fall back to a read-only
+transcript. Filter the loaded list by project, or export a session as JSON using
+the download button. `Ctrl+Shift+S` or the header's **Sessions** chip toggles
+the rail; Escape/Bots goes back.
+
+Standalone Markdown image references to host-local PNG, JPEG or WebP files in
+assistant messages offer **Load image**, which uses the host's restricted media
+endpoint. Remote URLs are not loaded automatically.
+
+**MoA** edits existing mixture-of-agents presets, keeping the full preset map
+when saving. **Automations** lists cron jobs and supports creation, pause,
+resume, trigger, deletion and run history. **Accounts** shows provider OAuth
+status and supports host-managed sign-in and disconnect where available.
 
 **MCP** lists configured servers with transport, source, endpoint and auth,
 a host-side **Test** ping (`POST /api/mcp/servers/{name}/test`) and an On/Off
@@ -173,7 +197,15 @@ toggle (`PUT /api/mcp/servers/{name}/enabled`). **Add server** opens a validated
 HTTP/stdio form; **Edit** reads the raw entry and saves through the host's
 whole-map `PUT /api/mcp/servers`, preserving tool selection and unknown keys.
 **Delete** requires a second click. The **Catalog** tab installs curated
-entries, prompts for required env vars, and reports clone/build jobs.
+entries, prompts for required env vars, and reports clone/build jobs. HTTP
+servers offer a host-managed **Authorize** flow with browser hand-off and cancel;
+this flow has not yet been verified against a live OAuth provider.
+
+**Kanban** reads boards from the optional Hermes Kanban plugin. Board selection
+is local and requests are scoped to the selected board. It supports basic,
+host-validated status transitions, title-only triage task creation and editing,
+and two-click task deletion. Board administration, comments, attachments and
+drag-and-drop are not yet implemented.
 
 **Memory** lists discovered providers, opens a schema-driven **Configure** form
 for every declared provider (text, secret, boolean, number, select and JSON
@@ -260,8 +292,9 @@ theme that follows the live desktop palette.
 Dictation remains Superwhisper's job (`Alt+Space`), since the client does not
 capture audio itself.
 
-Not yet wired: file browser, voice mode, multi-host switching, markdown
-rendering, MoA presets, artifacts/media, cron and Kanban writes, and resuming a
-stored session (the gateway exposes no resume call). The composer handles
-printable keys, backspace and enter; there is no IME composition or text
-selection yet.
+Not yet wired: file browser, voice mode, multi-host switching, full Markdown
+formatting, general artifact previews, and advanced Kanban management. The
+composer handles printable keys, paste, backspace and enter; there is no IME
+composition or text selection yet. An isolated Hermes 0.20.3 host was used to
+verify the gateway probe and Kanban HTTP contracts; provider OAuth and the other
+new integrations have not yet been verified end to end.
