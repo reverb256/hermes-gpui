@@ -131,27 +131,22 @@ state channel — options, in preference order:
 2. A `hermes status --json` CLI subcommand the widget shells out to.
 3. A shell `service` plugin that subscribes to the same socket.
 
-Ship it as a plugin users add with `omarchy plugin add <git-url>` (plugins land
-disabled and are unsandboxed; document that warning).
+Ship it as a plugin users copy into `~/.config/omarchy/plugins/` and enable
+(plugins are unsandboxed; document that warning).
 
 ### 4. Theme changes: prefer the `theme-set` hook over polling
 
 Omarchy hooks run from `~/.config/omarchy/hooks/<name>` and
 `~/.config/omarchy/hooks/<name>.d/`; `omarchy hook install <type> <file>` puts a
-script in the `.d` directory. `omarchy-theme-set` itself keeps
-`~/.local/state/omarchy/current/theme.generation` (a cheap change marker),
-`theme.name`, `shell.toml`, and a log at `~/.local/state/omarchy/theme-set.log`,
-and takes a lock at `$XDG_RUNTIME_DIR/omarchy-theme-set.lock` while switching.
-A `theme-set` hook can signal the running app (e.g. `kill -USR1`, or a socket
-message) instead of polling.
+script in the `.d` directory. `omarchy-theme-set` takes a lock at
+`$XDG_RUNTIME_DIR/omarchy-theme-set.lock` while switching and logs to
+`~/.local/state/omarchy/theme-set.log`.
 
-Keep polling as the fallback for other desktops, but on Omarchy the hook is
-exact: it fires after every `omarchy theme set`, including theme installs that
-change fonts. Poll `theme.generation` rather than the whole file: it changes
-once per applied theme. Read `shell.toml` for `[bar]` `size-horizontal`,
-`size-vertical`, `scale-with-font` and the `[font]` scale rather than assuming
-26 px, and `theme.name` for display. Bracket the theme directory when generating
-CSS/colour strings, as Omarchy's own templates do.
+The client reads one source: `~/.local/state/omarchy/current/theme/colors.toml`.
+There is no separate theme, no override and no `shell.toml`/`theme.name`
+ingestion; other desktops get the bundled fallback palette. Polling every 2 s is
+the default; the `theme-set` hook touches a marker that forces an immediate
+reload, so a theme switch does not wait for the next tick.
 
 ### 5. Screenshots and capture: reuse `omarchy capture`
 

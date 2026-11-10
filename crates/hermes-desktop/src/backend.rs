@@ -129,9 +129,38 @@ impl ApprovalChoice {
     }
 }
 
+/// Which surface a message-only failure belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Usage,
+    Models,
+    Auxiliary,
+    Reasoning,
+    Moa,
+    Cron,
+    OAuth,
+    Sessions,
+    Mcp,
+    McpCatalog,
+    McpOAuth,
+    Memory,
+    MemoryConfig,
+    Skills,
+    Hub,
+    Kanban,
+    KanbanBoardSave,
+    KanbanBoardRemove,
+    Capture,
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     Connection(ConnectionState),
+    /// A message-only failure for one surface.
+    Failed {
+        page: Page,
+        message: String,
+    },
     Profiles(Vec<Profile>),
     ActiveProfile(ActiveProfile),
     Routines(Vec<String>),
@@ -161,7 +190,6 @@ pub enum BackendEvent {
     },
     /// OCR text from `omarchy capture text`, for the composer.
     CapturedText(String),
-    CaptureFailed(String),
     Spoken,
     SpeakFailed(String),
     Media {
@@ -184,27 +212,21 @@ pub enum BackendEvent {
         portal: Option<PortalStatus>,
     },
     /// Analytics refused (a host with an unreadable `state.db`, for example).
-    UsageFailed(String),
     /// `GET /api/model/options` for the picker.
     Models(ModelOptions),
-    ModelsFailed(String),
     ModelStatus(String),
     /// The model after a successful switch, so the usage page stays honest.
     ModelInfo(ModelInfo),
     Auxiliary(Vec<AuxiliaryTask>),
-    AuxiliaryFailed(String),
     AuxiliarySaved {
         task: String,
         provider: String,
         model: String,
     },
     ReasoningEffort(String),
-    ReasoningFailed(String),
     Moa(MoaConfig),
     MoaSaved(MoaConfig),
-    MoaFailed(String),
     Cron(Vec<CronJob>, Vec<CronDeliveryTarget>),
-    CronFailed(String),
     CronSaved(String),
     CronRuns {
         id: String,
@@ -220,13 +242,11 @@ pub enum BackendEvent {
         poll: OAuthPoll,
     },
     OAuthSaved(String),
-    OAuthFailed(String),
     Sessions {
         rows: Vec<SessionSummary>,
         total: u64,
         offset: u32,
     },
-    SessionsFailed(String),
     SessionMessages {
         id: String,
         messages: Vec<serde_json::Value>,
@@ -239,7 +259,6 @@ pub enum BackendEvent {
     SessionDeleted(String),
     SessionUpdated(String),
     Skills(Vec<Skill>),
-    SkillsFailed(String),
     SkillToggled {
         name: String,
         enabled: bool,
@@ -252,11 +271,8 @@ pub enum BackendEvent {
     HubInstalled {
         identifier: String,
     },
-    HubFailed(String),
     Mcp(Vec<McpServer>),
-    McpFailed(String),
     McpOAuth(hermes_api::McpOAuthFlow),
-    McpOAuthFailed(String),
     McpOAuthCancelled(String),
     KanbanBoards(hermes_api::KanbanBoards),
     Kanban {
@@ -268,12 +284,10 @@ pub enum BackendEvent {
         slug: String,
         created: bool,
     },
-    KanbanBoardSaveFailed(String),
     KanbanBoardRemoved {
         slug: String,
         hard: bool,
     },
-    KanbanBoardRemoveFailed(String),
     KanbanDetail {
         board: String,
         id: String,
@@ -315,7 +329,6 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
-    KanbanFailed(String),
     McpToggled {
         name: String,
         enabled: bool,
@@ -325,9 +338,7 @@ pub enum BackendEvent {
         result: serde_json::Value,
     },
     McpCatalog(McpCatalog),
-    McpCatalogFailed(String),
     MemoryConfig(hermes_api::MemoryProviderConfig),
-    MemoryConfigFailed(String),
     MemoryConfigSaved(String),
     MemoryReset(Vec<String>),
     McpCreated(String),
@@ -342,7 +353,6 @@ pub enum BackendEvent {
         background: bool,
     },
     Memory(MemoryStatus),
-    MemoryFailed(String),
     MemoryProviderSet(String),
     Avatar {
         profile: String,
@@ -663,9 +673,18 @@ fn mime_for(filename: &str) -> Option<&'static str> {
 fn offline_event(command: Command) -> BackendEvent {
     let message = "Gateway offline. Reconnect and try again.".to_string();
     match command {
-        Command::LoadSessions { .. } => BackendEvent::SessionsFailed(message),
-        Command::LoadMcp => BackendEvent::McpFailed(message),
-        Command::LoadMcpCatalog => BackendEvent::McpCatalogFailed(message),
+        Command::LoadSessions { .. } => BackendEvent::Failed {
+            page: Page::Sessions,
+            message,
+        },
+        Command::LoadMcp => BackendEvent::Failed {
+            page: Page::Mcp,
+            message,
+        },
+        Command::LoadMcpCatalog => BackendEvent::Failed {
+            page: Page::McpCatalog,
+            message,
+        },
         Command::LoadKanbanTask { board, id } => {
             BackendEvent::KanbanDetailFailed { board, id, message }
         }
@@ -681,35 +700,77 @@ fn offline_event(command: Command) -> BackendEvent {
             BackendEvent::KanbanAttachmentFailed { board, id, message }
         }
         Command::CreateKanbanBoard { .. } | Command::RenameKanbanBoard { .. } => {
-            BackendEvent::KanbanBoardSaveFailed(message)
+            BackendEvent::Failed {
+                page: Page::KanbanBoardSave,
+                message,
+            }
         }
-        Command::RemoveKanbanBoard { .. } => BackendEvent::KanbanBoardRemoveFailed(message),
+        Command::RemoveKanbanBoard { .. } => BackendEvent::Failed {
+            page: Page::KanbanBoardRemove,
+            message,
+        },
         Command::LoadKanbanBoards
         | Command::LoadKanban { .. }
         | Command::CreateKanbanTask { .. }
         | Command::UpdateKanbanTask { .. }
-        | Command::DeleteKanbanTask { .. } => BackendEvent::KanbanFailed(message),
+        | Command::DeleteKanbanTask { .. } => BackendEvent::Failed {
+            page: Page::Kanban,
+            message,
+        },
         Command::StartMcpOAuth { .. }
         | Command::PollMcpOAuth { .. }
-        | Command::CancelMcpOAuth { .. } => BackendEvent::McpOAuthFailed(message),
+        | Command::CancelMcpOAuth { .. } => BackendEvent::Failed {
+            page: Page::McpOAuth,
+            message,
+        },
         Command::LoadOAuth
         | Command::StartOAuth { .. }
         | Command::PollOAuth { .. }
         | Command::SubmitOAuth { .. }
-        | Command::DisconnectOAuth { .. } => BackendEvent::OAuthFailed(message),
+        | Command::DisconnectOAuth { .. } => BackendEvent::Failed {
+            page: Page::OAuth,
+            message,
+        },
         Command::LoadCron
         | Command::CreateCron { .. }
         | Command::CronAction { .. }
         | Command::DeleteCron { .. }
-        | Command::LoadCronRuns { .. } => BackendEvent::CronFailed(message),
-        Command::LoadMoa | Command::SaveMoa(_) => BackendEvent::MoaFailed(message),
-        Command::LoadSkills => BackendEvent::SkillsFailed(message),
-        Command::LoadModels => BackendEvent::ModelsFailed(message),
-        Command::LoadAuxiliary => BackendEvent::AuxiliaryFailed(message),
-        Command::LoadUsage { .. } => BackendEvent::UsageFailed(message),
-        Command::LoadMemory => BackendEvent::MemoryFailed(message),
-        Command::LoadMemoryConfig { .. } => BackendEvent::MemoryConfigFailed(message),
-        Command::CaptureScreenshot | Command::CaptureText => BackendEvent::CaptureFailed(message),
+        | Command::LoadCronRuns { .. } => BackendEvent::Failed {
+            page: Page::Cron,
+            message,
+        },
+        Command::LoadMoa | Command::SaveMoa(_) => BackendEvent::Failed {
+            page: Page::Moa,
+            message,
+        },
+        Command::LoadSkills => BackendEvent::Failed {
+            page: Page::Skills,
+            message,
+        },
+        Command::LoadModels => BackendEvent::Failed {
+            page: Page::Models,
+            message,
+        },
+        Command::LoadAuxiliary => BackendEvent::Failed {
+            page: Page::Auxiliary,
+            message,
+        },
+        Command::LoadUsage { .. } => BackendEvent::Failed {
+            page: Page::Usage,
+            message,
+        },
+        Command::LoadMemory => BackendEvent::Failed {
+            page: Page::Memory,
+            message,
+        },
+        Command::LoadMemoryConfig { .. } => BackendEvent::Failed {
+            page: Page::MemoryConfig,
+            message,
+        },
+        Command::CaptureScreenshot | Command::CaptureText => BackendEvent::Failed {
+            page: Page::Capture,
+            message,
+        },
         _ => BackendEvent::Error(message),
     }
 }
@@ -872,7 +933,7 @@ async fn worker(
                                     let _ = events.send(BackendEvent::Captured { path });
                                 }
                                 Err(message) => {
-                                    let _ = events.send(BackendEvent::CaptureFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Capture, message });
                                 }
                             }
                         }
@@ -882,7 +943,7 @@ async fn worker(
                                     let _ = events.send(BackendEvent::CapturedText(text));
                                 }
                                 Err(message) => {
-                                    let _ = events.send(BackendEvent::CaptureFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Capture, message });
                                 }
                             }
                         }
@@ -1003,7 +1064,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::MemoryFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Memory, message });
                             }
                         },
                         Command::SetMemoryProvider { provider } => {
@@ -1018,9 +1079,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::MemoryFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Memory, message: format!(
                                         "{provider}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1032,9 +1093,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::MemoryConfigFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::MemoryConfig, message: format!(
                                         "{provider}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1050,9 +1111,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::MemoryConfigFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::MemoryConfig, message: format!(
                                         "{provider}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1077,9 +1138,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::MemoryFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Memory, message: format!(
                                         "reset {target}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1089,10 +1150,10 @@ async fn worker(
                                     let _ = events.send(BackendEvent::KanbanBoardSaved { slug: result.board.slug, created: true });
                                     match rest.kanban_boards().await {
                                         Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
-                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                        Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                     }
                                 }
-                                Err(err) => { let _ = events.send(BackendEvent::KanbanBoardSaveFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::KanbanBoardSave, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::RenameKanbanBoard { slug, name } => {
@@ -1101,10 +1162,10 @@ async fn worker(
                                     let _ = events.send(BackendEvent::KanbanBoardSaved { slug: result.board.slug, created: false });
                                     match rest.kanban_boards().await {
                                         Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
-                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                        Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                     }
                                 }
-                                Err(err) => { let _ = events.send(BackendEvent::KanbanBoardSaveFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::KanbanBoardSave, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::RemoveKanbanBoard { slug, hard } => {
@@ -1113,22 +1174,22 @@ async fn worker(
                                     let _ = events.send(BackendEvent::KanbanBoardRemoved { slug, hard });
                                     match rest.kanban_boards().await {
                                         Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
-                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                        Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                     }
                                 }
                                 Err(err) => {
                                     let message = err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::KanbanBoardRemoveFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::KanbanBoardRemove, message });
                                 }
                             }
                         }
                         Command::LoadKanbanBoards => match rest.kanban_boards().await {
                             Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
-                            Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                         },
                         Command::LoadKanban { board } => match rest.kanban_board(board.as_deref()).await {
                             Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
-                            Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                         },
                         Command::LoadKanbanTask { board, id } => {
                             match rest.kanban_task(&id, Some(&board)).await {
@@ -1204,10 +1265,10 @@ async fn worker(
                                     let _ = events.send(BackendEvent::KanbanCreated);
                                     match rest.kanban_board(board.as_deref()).await {
                                         Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
-                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                        Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                     }
                                 },
-                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::UpdateKanbanTask { id, patch, board, editing } => {
@@ -1216,19 +1277,19 @@ async fn worker(
                                     if editing { let _ = events.send(BackendEvent::KanbanCreated); }
                                     match rest.kanban_board(board.as_deref()).await {
                                         Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
-                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                        Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                     }
                                 },
-                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::DeleteKanbanTask { id, board } => {
                             match rest.delete_kanban_task(&id, board.as_deref()).await {
                                 Ok(_) => match rest.kanban_board(board.as_deref()).await {
                                     Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
-                                    Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                 },
-                                Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::Kanban, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::StartMcpOAuth { name, profile } => {
@@ -1237,20 +1298,20 @@ async fn worker(
                             tokio::spawn(async move {
                                 match rest.start_mcp_oauth(&name, profile.as_deref()).await {
                                     Ok(flow) => { let _ = events.send(BackendEvent::McpOAuth(flow)); }
-                                    Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::McpOAuth, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                                 }
                             });
                         }
                         Command::PollMcpOAuth { id } => {
                             match rest.mcp_oauth_status(&id).await {
                                 Ok(flow) => { let _ = events.send(BackendEvent::McpOAuth(flow)); }
-                                Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::McpOAuth, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::CancelMcpOAuth { id } => {
                             match rest.cancel_mcp_oauth(&id).await {
                                 Ok(_) => { let _ = events.send(BackendEvent::McpOAuthCancelled(id)); }
-                                Err(err) => { let _ = events.send(BackendEvent::McpOAuthFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                Err(err) => { let _ = events.send(BackendEvent::Failed { page: Page::McpOAuth, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
                             }
                         }
                         Command::LoadMcp => match rest.mcp_servers().await {
@@ -1259,7 +1320,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::McpFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message });
                             }
                         },
                         Command::CreateMcp { body } => {
@@ -1278,9 +1339,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                         "create {name}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1292,17 +1353,17 @@ async fn worker(
                                             .send(BackendEvent::McpConfig { name, config: entry });
                                     }
                                     None => {
-                                        let _ = events.send(BackendEvent::McpFailed(format!(
+                                        let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                             "{name}: server not found in config"
-                                        )));
+                                        ) });
                                     }
                                 },
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                         "read {name}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1320,9 +1381,9 @@ async fn worker(
                                         .cloned()
                                         .unwrap_or_default();
                                     if old_name != name && servers.contains_key(&name) {
-                                        let _ = events.send(BackendEvent::McpFailed(format!(
+                                        let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                             "{name}: a server with that name already exists"
-                                        )));
+                                        ) });
                                         continue;
                                     }
                                     servers.remove(&old_name);
@@ -1337,18 +1398,18 @@ async fn worker(
                                         Err(err) => {
                                             let message =
                                                 err.detail().unwrap_or_else(|| err.to_string());
-                                            let _ = events.send(BackendEvent::McpFailed(format!(
+                                            let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                                 "save {name}: {message}"
-                                            )));
+                                            ) });
                                         }
                                     }
                                 }
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                         "read config: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1361,9 +1422,9 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::McpFailed(format!(
+                                let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                     "delete {name}: {message}"
-                                )));
+                                ) });
                             }
                         },
                         Command::LoadMcpCatalog => match rest.mcp_catalog().await {
@@ -1372,7 +1433,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::McpCatalogFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::McpCatalog, message });
                             }
                         },
                         Command::InstallMcp { name, env, enable } => {
@@ -1394,9 +1455,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                         "install {name}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         },
@@ -1414,9 +1475,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::McpFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                         "{name}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1426,9 +1487,9 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::McpFailed(format!(
+                                let _ = events.send(BackendEvent::Failed { page: Page::Mcp, message: format!(
                                     "{name}: {message}"
-                                )));
+                                ) });
                             }
                         },
                         Command::LoadSkills => match rest.skills().await {
@@ -1437,7 +1498,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::SkillsFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Skills, message });
                             }
                         },
                         Command::SetSkill { name, enabled } => {
@@ -1454,9 +1515,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::SkillsFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Skills, message: format!(
                                         "{name}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1468,9 +1529,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Hub, message: format!(
                                         "hub search: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1484,9 +1545,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Hub, message: format!(
                                         "preview {identifier}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1508,9 +1569,9 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::HubFailed(format!(
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Hub, message: format!(
                                         "install {identifier}: {message}"
-                                    )));
+                                    ) });
                                 }
                             }
                         }
@@ -1524,7 +1585,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::SessionsFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Sessions, message });
                             }
                         },
                         Command::LoadMedia(path) => {
@@ -1653,7 +1714,7 @@ async fn worker(
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     let _ =
-                                        events.send(BackendEvent::AuxiliaryFailed(message));
+                                        events.send(BackendEvent::Failed { page: Page::Auxiliary, message });
                                 }
                             }
                             match rest.reasoning_effort().await {
@@ -1664,7 +1725,7 @@ async fn worker(
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     let _ =
-                                        events.send(BackendEvent::ReasoningFailed(message));
+                                        events.send(BackendEvent::Failed { page: Page::Reasoning, message });
                                 }
                             }
                         }
@@ -1696,7 +1757,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::MoaFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Moa, message });
                             }
                         },
                         Command::SaveMoa(config) => match rest.set_moa_config(&config).await {
@@ -1705,7 +1766,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::MoaFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Moa, message });
                             }
                         },
                         Command::LoadCron => {
@@ -1719,7 +1780,7 @@ async fn worker(
                                 (Err(err), _) | (_, Err(err)) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Cron, message });
                                 }
                             }
                         }
@@ -1734,7 +1795,7 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Cron, message });
                                 }
                             }
                         }
@@ -1749,7 +1810,7 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::CronFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Cron, message });
                                 }
                             }
                         }
@@ -1761,7 +1822,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::CronFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Cron, message });
                             }
                         },
                         Command::LoadCronRuns { id } => match rest.cron_runs(&id).await {
@@ -1770,7 +1831,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::CronFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Cron, message });
                             }
                         },
                         Command::LoadOAuth => match rest.oauth_providers().await {
@@ -1779,7 +1840,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::OAuth, message });
                             }
                         },
                         Command::StartOAuth { provider } => {
@@ -1791,7 +1852,7 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::OAuthFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::OAuth, message });
                                 }
                             }
                         }
@@ -1807,7 +1868,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::OAuth, message });
                             }
                         },
                         Command::PollOAuth {
@@ -1823,7 +1884,7 @@ async fn worker(
                             }
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
-                                let _ = events.send(BackendEvent::OAuthFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::OAuth, message });
                             }
                         },
                         Command::DisconnectOAuth { provider } => {
@@ -1837,7 +1898,7 @@ async fn worker(
                                 Err(err) => {
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
-                                    let _ = events.send(BackendEvent::OAuthFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::OAuth, message });
                                 }
                             }
                         }
@@ -1869,7 +1930,7 @@ async fn worker(
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     let _ =
-                                        events.send(BackendEvent::ReasoningFailed(message));
+                                        events.send(BackendEvent::Failed { page: Page::Reasoning, message });
                                 }
                             }
                         }
@@ -1884,7 +1945,7 @@ async fn worker(
                             Err(err) => {
                                 let message = err.detail().unwrap_or_else(|| err.to_string());
                                 tracing::warn!(%message, "models: options failed");
-                                let _ = events.send(BackendEvent::ModelsFailed(message));
+                                let _ = events.send(BackendEvent::Failed { page: Page::Models, message });
                             }
                         },
                         Command::SetModel { provider, model } => {
@@ -1929,7 +1990,7 @@ async fn worker(
                                     let message =
                                         err.detail().unwrap_or_else(|| err.to_string());
                                     tracing::warn!(%message, "usage: analytics failed");
-                                    let _ = events.send(BackendEvent::UsageFailed(message));
+                                    let _ = events.send(BackendEvent::Failed { page: Page::Usage, message });
                                 }
                             }
                         }
@@ -2077,7 +2138,10 @@ async fn refresh_oauth(rest: &RestClient, events: &mpsc::UnboundedSender<Backend
         }
         Err(err) => {
             let message = err.detail().unwrap_or_else(|| err.to_string());
-            let _ = events.send(BackendEvent::OAuthFailed(message));
+            let _ = events.send(BackendEvent::Failed {
+                page: Page::OAuth,
+                message,
+            });
         }
     }
 }
@@ -2089,7 +2153,10 @@ async fn refresh_cron(rest: &RestClient, events: &mpsc::UnboundedSender<BackendE
         }
         (Err(err), _) | (_, Err(err)) => {
             let message = err.detail().unwrap_or_else(|| err.to_string());
-            let _ = events.send(BackendEvent::CronFailed(message));
+            let _ = events.send(BackendEvent::Failed {
+                page: Page::Cron,
+                message,
+            });
         }
     }
 }
@@ -2456,7 +2523,10 @@ mod tests {
                 slug: "work".into(),
                 hard: false
             }),
-            BackendEvent::KanbanBoardRemoveFailed(_)
+            BackendEvent::Failed {
+                page: Page::KanbanBoardRemove,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::UpdateKanbanDetail {
@@ -2509,22 +2579,34 @@ mod tests {
             offline_event(Command::CreateKanbanBoard {
                 slug: "work".into()
             }),
-            BackendEvent::KanbanBoardSaveFailed(_)
+            BackendEvent::Failed {
+                page: Page::KanbanBoardSave,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::RenameKanbanBoard {
                 slug: "work".into(),
                 name: "Work".into()
             }),
-            BackendEvent::KanbanBoardSaveFailed(_)
+            BackendEvent::Failed {
+                page: Page::KanbanBoardSave,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::LoadKanban { board: None }),
-            BackendEvent::KanbanFailed(_)
+            BackendEvent::Failed {
+                page: Page::Kanban,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::LoadSessions { offset: 0 }),
-            BackendEvent::SessionsFailed(_)
+            BackendEvent::Failed {
+                page: Page::Sessions,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::UpdateKanbanTask {
@@ -2533,14 +2615,20 @@ mod tests {
                 board: None,
                 editing: false,
             }),
-            BackendEvent::KanbanFailed(_)
+            BackendEvent::Failed {
+                page: Page::Kanban,
+                message: _
+            }
         ));
         assert!(matches!(
             offline_event(Command::StartMcpOAuth {
                 name: "server".into(),
                 profile: None
             }),
-            BackendEvent::McpOAuthFailed(_)
+            BackendEvent::Failed {
+                page: Page::McpOAuth,
+                message: _
+            }
         ));
     }
 

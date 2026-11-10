@@ -18,7 +18,7 @@ use hermes_rpc::ConnectionState;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::backend::{
-    ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command,
+    ApprovalChoice, ApprovalRequest, Backend, BackendEvent, ClarifyRequest, Command, Page,
 };
 use crate::cron::{self, Automations};
 use crate::inspector::{self, Field, Inspector, Tab};
@@ -450,13 +450,49 @@ impl HermesApp {
                 model,
                 portal,
             } => self.usage.loaded(analytics, model, portal),
-            BackendEvent::UsageFailed(message) => self.usage.failed(message),
+            BackendEvent::Failed { page, message } => match page {
+                Page::Usage => self.usage.failed(message),
+                Page::Models => self.models.failed(message),
+                Page::Auxiliary => self.models.auxiliary_failed(message),
+                Page::Reasoning => self.models.status = Some(format!("reasoning: {message}")),
+                Page::Moa => self.moa.failed(message),
+                Page::Cron => self.automations.failed(message),
+                Page::OAuth => self.accounts.failed(message),
+                Page::Sessions => self.sessions.failed(message),
+                Page::Mcp => self.mcp.failed(message),
+                Page::McpCatalog => self.mcp.catalog_failed(message),
+                Page::McpOAuth => {
+                    self.mcp.oauth_busy = false;
+                    self.mcp.status = Some(format!("MCP OAuth: {message}"));
+                }
+                Page::Memory => self.memory.failed(message),
+                Page::MemoryConfig => self.memory.config_failed(message),
+                Page::Skills => self.skills.failed(message),
+                Page::Hub => self.skills.hub_failed(message),
+                Page::Kanban => {
+                    self.kanban.creating = false;
+                    self.kanban.status = Some(message);
+                }
+                Page::KanbanBoardSave => {
+                    self.kanban.board_saving = false;
+                    self.kanban.status = Some(message);
+                }
+                Page::KanbanBoardRemove => {
+                    self.kanban.board_remove = None;
+                    self.kanban.status = Some(message);
+                }
+                Page::Capture => {
+                    self.error = Some(message.clone());
+                    self.lines
+                        .push(Line::new(Role::System, format!("⚠ {message}")));
+                    self.scroll.scroll_to_bottom();
+                    self.publish_status();
+                }
+            },
             BackendEvent::Models(options) => self.models.loaded(options),
-            BackendEvent::ModelsFailed(message) => self.models.failed(message),
             BackendEvent::ModelStatus(text) => self.models.status = Some(text),
             BackendEvent::ModelInfo(info) => self.usage.model = Some(info),
             BackendEvent::Mcp(rows) => self.mcp.loaded(rows),
-            BackendEvent::McpFailed(message) => self.mcp.failed(message),
             BackendEvent::KanbanBoards(boards) => {
                 self.kanban.boards = boards.boards;
                 if self.kanban.selected.is_none() {
@@ -490,10 +526,6 @@ impl HermesApp {
                     self.kanban.status = Some("Board renamed.".into());
                 }
             }
-            BackendEvent::KanbanBoardSaveFailed(message) => {
-                self.kanban.board_saving = false;
-                self.kanban.status = Some(message);
-            }
             BackendEvent::KanbanBoardRemoved { slug, hard } => {
                 self.kanban.board_remove = None;
                 self.kanban.detail_target = None;
@@ -510,10 +542,6 @@ impl HermesApp {
                 } else {
                     format!("Board {slug} archived.")
                 });
-            }
-            BackendEvent::KanbanBoardRemoveFailed(message) => {
-                self.kanban.board_remove = None;
-                self.kanban.status = Some(message);
             }
             BackendEvent::KanbanDetail { board, id, detail } => {
                 if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
@@ -598,10 +626,6 @@ impl HermesApp {
                     self.kanban.status = Some(message);
                 }
             }
-            BackendEvent::KanbanFailed(message) => {
-                self.kanban.creating = false;
-                self.kanban.status = Some(message);
-            }
             BackendEvent::McpOAuth(flow) => {
                 self.mcp.oauth_busy = false;
                 self.mcp.status = Some(match flow.status.as_str() {
@@ -632,10 +656,6 @@ impl HermesApp {
                     self.mcp.oauth = Some(flow);
                 }
             }
-            BackendEvent::McpOAuthFailed(message) => {
-                self.mcp.oauth_busy = false;
-                self.mcp.status = Some(format!("MCP OAuth: {message}"));
-            }
             BackendEvent::McpOAuthCancelled(id) => {
                 self.mcp.oauth_busy = false;
                 if self
@@ -660,7 +680,6 @@ impl HermesApp {
                 self.mcp.status = Some(mcp::test_summary(&name, &result));
             }
             BackendEvent::McpCatalog(catalog) => self.mcp.catalog_loaded(catalog),
-            BackendEvent::McpCatalogFailed(message) => self.mcp.catalog_failed(message),
             BackendEvent::McpCreated(name) => {
                 self.mcp.form = None;
                 self.mcp.status = Some(format!("{name} added"));
@@ -686,12 +705,10 @@ impl HermesApp {
                 });
             }
             BackendEvent::Memory(status) => self.memory.loaded(status),
-            BackendEvent::MemoryFailed(message) => self.memory.failed(message),
             BackendEvent::MemoryProviderSet(provider) => {
                 self.memory.status = Some(format!("switching to {provider}…"));
             }
             BackendEvent::MemoryConfig(config) => self.memory.config_loaded(config),
-            BackendEvent::MemoryConfigFailed(message) => self.memory.config_failed(message),
             BackendEvent::MemoryConfigSaved(name) => self.memory.saved(&name),
             BackendEvent::MemoryReset(files) => {
                 self.memory.confirm_reset = None;
@@ -702,7 +719,6 @@ impl HermesApp {
                 });
             }
             BackendEvent::Skills(rows) => self.skills.loaded(rows),
-            BackendEvent::SkillsFailed(message) => self.skills.failed(message),
             BackendEvent::SkillToggled { name, enabled } => {
                 self.skills.status = Some(format!(
                     "{name} {}",
@@ -714,7 +730,6 @@ impl HermesApp {
                 self.skills.hub_previewed(preview, scan)
             }
             BackendEvent::HubInstalled { identifier } => self.skills.hub_installed(&identifier),
-            BackendEvent::HubFailed(message) => self.skills.hub_failed(message),
             BackendEvent::Sessions {
                 rows,
                 total,
@@ -726,7 +741,6 @@ impl HermesApp {
                     self.sessions.append(rows, total);
                 }
             }
-            BackendEvent::SessionsFailed(message) => self.sessions.failed(message),
             BackendEvent::SessionUpdated(_id) => {
                 self.sessions.status = Some("session updated".into());
             }
@@ -765,7 +779,6 @@ impl HermesApp {
                 }
             }
             BackendEvent::Auxiliary(tasks) => self.models.auxiliary_loaded(tasks),
-            BackendEvent::AuxiliaryFailed(message) => self.models.auxiliary_failed(message),
             BackendEvent::AuxiliarySaved {
                 task,
                 provider,
@@ -779,14 +792,9 @@ impl HermesApp {
                 self.settings.show(Section::Assignments);
             }
             BackendEvent::ReasoningEffort(level) => self.models.reasoning_loaded(level),
-            BackendEvent::ReasoningFailed(message) => {
-                self.models.status = Some(format!("reasoning: {message}"))
-            }
             BackendEvent::Moa(config) => self.moa.loaded(config),
             BackendEvent::MoaSaved(config) => self.moa.saved(config),
-            BackendEvent::MoaFailed(message) => self.moa.failed(message),
             BackendEvent::Cron(jobs, targets) => self.automations.loaded(jobs, targets),
-            BackendEvent::CronFailed(message) => self.automations.failed(message),
             BackendEvent::CronSaved(message) => self.automations.status = Some(message),
             BackendEvent::CronRuns { id, runs } => self.automations.runs_loaded(id, runs),
             BackendEvent::OAuth(providers) => self.accounts.loaded(providers),
@@ -806,7 +814,6 @@ impl HermesApp {
                 self.accounts.close_flow();
                 self.accounts.status = Some(message);
             }
-            BackendEvent::OAuthFailed(message) => self.accounts.failed(message),
             BackendEvent::Avatar {
                 profile,
                 mime,
@@ -844,13 +851,6 @@ impl HermesApp {
                 self.composer_input
                     .update(cx, |input, cx| input.emplace(&next, cx));
                 self.refresh_mention();
-                self.scroll.scroll_to_bottom();
-                self.publish_status();
-            }
-            BackendEvent::CaptureFailed(message) => {
-                self.error = Some(message.clone());
-                self.lines
-                    .push(Line::new(Role::System, format!("⚠ {message}")));
                 self.scroll.scroll_to_bottom();
                 self.publish_status();
             }

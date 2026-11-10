@@ -33,7 +33,7 @@ plane; everything in the third layer is additive and feature-detected.
 | --- | --- | --- |
 | `hermes-rpc` | transport only: request ids, per-call timeouts, keepalive (`gateway.ping`, 45 s deadline), server→client request replay, credential redaction in debug output | tokio-tungstenite, serde |
 | `hermes-api` | `HostConfig` (env, URL normalisation, WS URL), REST client, typed payloads, session/prompt helpers, Kanban/plugin clients, local contract tests | reqwest, serde |
-| `hermes-desktop` | application: `HermesApp` (GPUI entity), backend worker, views, theme, tray, IPC, feature helpers (`sessions`, `mcp`, `cron`, `memory`, `moa`, `models`, `oauth`, `skills`, `transcript`, `usage`, `vault`, `voice`) | gpui-ce, hermes-api, rfd |
+| `hermes-desktop` | application: `HermesApp` (GPUI entity), backend worker, views, theme, tray, IPC, and the surface modules (`kanban`, `sessions`, `mcp`, `cron`, `memory`, `moa`, `models`, `oauth`, `skills`, `transcript`, `usage`, `vault`, `voice`, `omarchy`, `status`) | gpui-ce, hermes-api, rfd |
 
 ## Runtime shape
 
@@ -42,9 +42,12 @@ plane; everything in the third layer is additive and feature-detected.
 - `backend.rs` owns a tokio worker. The UI sends `Command`; the worker performs
   REST/RPC calls and sends `BackendEvent` back over a channel, which the app
   applies on the main thread. No network call happens on the UI thread.
-- `app.rs` holds UI state only. Feature helpers are pure where possible so their
-  rules are unit-tested without a window (e.g. streaming merge, Markdown spans,
-  session filtering, Kanban size labels).
+- `app.rs` holds event wiring and window state; surface modules own their own
+  state and views (`kanban.rs` holds the board view and its fields). Feature
+  helpers stay pure where possible so their rules are unit-tested without a
+  window (streaming merge, Markdown spans, session filtering, Kanban state).
+- One 200 ms tick drives the tray, the IPC socket, window presence and a 2 s
+  theme poll, so their ordering lives in one place.
 - Closing the window hides to the tray so a turn keeps streaming; Quit is on the
   tray and in the command palette.
 
