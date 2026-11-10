@@ -44,7 +44,7 @@ weeks and lands first because it is useful without the hub.
 | --- | --- |
 | Client (`hermes-gpui`) | In progress — chat, sessions, profiles, skills, MCP, cron, memory, Kanban details/comments/attachments, transcript find, Omarchy theme/notifications/bar widget, building PKGBUILD |
 | Host agent (`hermes-agent`) | Mature single-user agent; needs token auth for remote access, pagination, typed events, screen/input, sync, artifacts and voice |
-| Personal hub (`hermes-hub`) | In progress — pairing, host registry, command routing, audit and secret-prompt broker built; Tailscale/ArgoCD deployment and client picker pending |
+| Personal hub (`hermes-hub`) | In progress — deployed to k3s through ArgoCD and reachable over Tailscale; pairing, host registry, command routing, audit and node picker built; file, screen, browser and GPU executors pending |
 
 ## Target shape
 
@@ -152,7 +152,7 @@ reconnect or expiry invalidates the challenge.
 
 | Phase | Scope | Exit demo | Est. (eng-mo) | Status |
 | --- | --- | --- | --- | --- |
-| **0. Personal spine** | Helm chart + ArgoCD app for `hermes-hub`; node protocol v1 (register, heartbeat, capabilities, command, cancel, resume, prompt); `hermes-node` on all four hosts; pairing, node registry and capability map; Tailscale Ingress and optional Connector; client login/node picker; personal audit skeleton | A paired device reaches the hub over Tailscale with no inbound port; all four node agents are connected and one remote command has run on each; revoking the device cuts access | 2–3 | **In progress** — protocol, hub, node shell executor, prompt broker, audit, chart, GPUI node picker/command surface, credential cards and a PTY terminal built; the hub runs in k3s through ArgoCD and all four agents (`forge`, `nexus`, `sentry`, `zephyr`) are enrolled, online and advertising `pty`. Remaining for the milestone: a remote command has run on each host through the client itself |
+| **0. Personal spine** | Helm chart + ArgoCD app for `hermes-hub`; node protocol v1 (register, heartbeat, capabilities, command, cancel, resume, prompt); `hermes-node` on all four hosts; pairing, node registry and capability map; Tailscale Ingress and optional Connector; client login/node picker; personal audit skeleton | A paired device reaches the hub over Tailscale with no inbound port; all four node agents are connected and one remote command has run on each; revoking the device cuts access | 2–3 | **Done** — the hub runs in k3s through ArgoCD and is reached over Tailscale; all four agents (`forge`, `nexus`, `sentry`, `zephyr`) are enrolled, online and advertising `shell`, `pty` and `files`. A paired device ran a PTY session and argv commands on every host with exit 0 (recorded in the hub audit as `command.requested` from a device), and revoking a device both disconnects its socket and leaves its token refused (`revoked_at_ms`). File, screen, browser and GPU executors are Phase 1 |
 | **1. Node execution** | Local executors on `hermes-node`: shell/PTY, files, screen (Xvfb or real display), browser/CDP, GPU; optional `hermes-computer` container for an isolated desktop; named volumes; view-only screen stream, terminal, file browser, snapshot/restore, client surfaces | Close the client mid-turn, reopen on another device, watch the same turn finish; restoring the volume brings back the same browser state | 2–3 | **In progress (shell and terminal)** — argv execution, streaming, timeout, cancel and a PTY terminal with input/resize are implemented; files, screen, browser, GPU and resume are not |
 | **2. Approvals, secret prompts, takeover, audit** | Secret/password/sudo/credential prompt cards with one-time challenges; input injection with a takeover lease; approval expiry/replay/idempotency; typed tool results; personal audit from tool/approval/shell events | Every action answers what happened and why from the personal audit; a secret card completes without the value appearing in transcript, logs or argv; a blocked action is blocked server-side | 2–2.5 | **Not started** — the prompt broker, challenge/expiry/replay rejection and audit slice were built early in Phase 0; client cards, sudo stdin, approvals and takeover remain |
 | **3. Connectors and vault** | Connector catalog, server-side OAuth broker, personal credential vault, rotation/revocation, MCP per-tool schemas and costs | Connect an app, use it, revoke it; the computer never holds the token | 2 | Not started |
@@ -167,7 +167,7 @@ reconnect or expiry invalidates the challenge.
 
 | ID | Workstream | Phase | Status |
 | --- | --- | --- | --- |
-| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | In progress — hub, chart and enrolment exist; not deployed |
+| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | In progress — hub runs in k3s through ArgoCD, chart and pairing exist, all four nodes are enrolled; a per-host command through the client is the remaining Phase 0 check |
 | B | Node agents, capability registry, remote execution and screen/input relay | 0–2 | In progress — outbound agent, shell execution and streams; screen/input pending |
 | C | Connectors, vault and credentials | 3 | Not started |
 | D | Sync, continuity and notifications | 4 | Not started |
@@ -186,7 +186,7 @@ Anything marked **Blocked** stays out of the UI rather than shipping a stub.
 | S1 | `--version` / `--help` CLI | none | Not started |
 | S1 | Command palette coverage and complete key map | none | Not started |
 | S1 | Markdown link activation with scheme allowlist | none | Not started |
-| S1 | Correct stale parity/roadmap claims | none | In progress (this update) |
+| S1 | Correct stale parity/roadmap claims | none | Done — hub deployment, client node picker and terminal surfaces now match what the client ships |
 | S2 | Transcript find | none | Done — `Ctrl+F`, highlighting, match cycling |
 | S2 | Older-turn pagination, virtualization, text selection | host pagination; none for virtualization | In progress — search done; pagination, virtualization and selection remain |
 | S2 | Edit/retry/fork, replies, reactions, drafts | host persistence and gateway lifecycle | Blocked |
