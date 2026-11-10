@@ -15,6 +15,11 @@ spec:
       releaseName: hermes-hub
       valueFiles:
         - values.yaml
+      valuesObject:
+        image:
+          repository: registry.registry.svc.cluster.local:5000/hermes/hub
+          digest: sha256:9c5bd4fe75d5f4dfb1bcafa099dd801b7c6087d8355ceee89416b9c412c88304
+          pullPolicy: IfNotPresent
   destination:
     server: https://kubernetes.default.svc
     namespace: hermes
