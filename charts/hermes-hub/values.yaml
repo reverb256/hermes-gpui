@@ -1,0 +1,84 @@
+# Single owner, single replica: SQLite is a single-writer store. Do not scale
+# this Deployment horizontally; run one hub and many outbound nodes.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/reverb256/hermes-hub
+  # Empty tag uses the chart appVersion. A digest, when set, wins over the tag.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The admin token gates the owner API. Create the Secret out of band (sealed
+# secret, SOPS, or kubectl) and name it here. `create` exists for local testing
+# only; never commit a real token to values.yaml.
+adminToken:
+  existingSecret: hermes-hub-admin
+  key: admin-token
+  create: false
+  value: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  # Use an existing PVC instead of creating one.
+  existingClaim: ""
+  # Keep the SQLite volume if the release is deleted.
+  keep: true
+
+hub:
+  heartbeatMs: 15000
+  maxCommandTimeoutMs: 900000
+
+# The Tailscale operator is already installed in the target cluster. The
+# ingress gets a tailnet hostname and no inbound port is published.
+tailscale:
+  enabled: true
+  hostname: hermes
+  ingressClassName: tailscale
+  annotations: {}
+  # Optional ACL tag for the ingress proxy, e.g. tag:k8s.
+  tags: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+# Extra environment variables, e.g. RUST_LOG. Do not put the admin token here.
+extraEnv: []

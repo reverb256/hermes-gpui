@@ -152,9 +152,9 @@ reconnect or expiry invalidates the challenge.
 
 | Phase | Scope | Exit demo | Est. (eng-mo) | Status |
 | --- | --- | --- | --- | --- |
-| **0. Personal spine** | Helm chart + ArgoCD app for `hermes-hub`; node protocol v1 (register, heartbeat, capabilities, command, cancel, resume, prompt); `hermes-node` on all four hosts; pairing, node registry and capability map; Tailscale Ingress and optional Connector; client login/node picker; personal audit skeleton | A paired device reaches the hub over Tailscale with no inbound port; all four node agents are connected and one remote command has run on each; revoking the device cuts access | 2–3 | Not started |
-| **1. Node execution** | Local executors on `hermes-node`: shell/PTY, files, screen (Xvfb or real display), browser/CDP, GPU; optional `hermes-computer` container for an isolated desktop; named volumes; view-only screen stream, terminal, file browser, snapshot/restore, client surfaces | Close the client mid-turn, reopen on another device, watch the same turn finish; restoring the volume brings back the same browser state | 2–3 | Not started |
-| **2. Approvals, secret prompts, takeover, audit** | Secret/password/sudo/credential prompt cards with one-time challenges; input injection with a takeover lease; approval expiry/replay/idempotency; typed tool results; personal audit from tool/approval/shell events | Every action answers what happened and why from the personal audit; a secret card completes without the value appearing in transcript, logs or argv; a blocked action is blocked server-side | 2–2.5 | Not started |
+| **0. Personal spine** | Helm chart + ArgoCD app for `hermes-hub`; node protocol v1 (register, heartbeat, capabilities, command, cancel, resume, prompt); `hermes-node` on all four hosts; pairing, node registry and capability map; Tailscale Ingress and optional Connector; client login/node picker; personal audit skeleton | A paired device reaches the hub over Tailscale with no inbound port; all four node agents are connected and one remote command has run on each; revoking the device cuts access | 2–3 | **In progress** — protocol, hub, node shell executor, prompt broker, audit and chart built and covered by `cargo test -p hermes-hub --test e2e`; cluster deploy, four-host install and client picker remain |
+| **1. Node execution** | Local executors on `hermes-node`: shell/PTY, files, screen (Xvfb or real display), browser/CDP, GPU; optional `hermes-computer` container for an isolated desktop; named volumes; view-only screen stream, terminal, file browser, snapshot/restore, client surfaces | Close the client mid-turn, reopen on another device, watch the same turn finish; restoring the volume brings back the same browser state | 2–3 | **In progress (shell only)** — argv execution, streaming, timeout and cancel are implemented; PTY, files, screen, browser, GPU and resume are not |
+| **2. Approvals, secret prompts, takeover, audit** | Secret/password/sudo/credential prompt cards with one-time challenges; input injection with a takeover lease; approval expiry/replay/idempotency; typed tool results; personal audit from tool/approval/shell events | Every action answers what happened and why from the personal audit; a secret card completes without the value appearing in transcript, logs or argv; a blocked action is blocked server-side | 2–2.5 | **Not started** — the prompt broker, challenge/expiry/replay rejection and audit slice were built early in Phase 0; client cards, sudo stdin, approvals and takeover remain |
 | **3. Connectors and vault** | Connector catalog, server-side OAuth broker, personal credential vault, rotation/revocation, MCP per-tool schemas and costs | Connect an app, use it, revoke it; the computer never holds the token | 2 | Not started |
 | **4. Sync and notifications** | Revisioned transcripts, drafts and read state, idempotent appends, resumable streams, device registry, desktop/mobile push with action routing | Same state on two devices within seconds; a notification opens the exact turn | 2 | Not started |
 | **5. Triggers and routines** | Cron, webhook and email triggers; retries, dead-letter, run history and self-imposed cost caps | A misconfigured trigger retries without duplicate side effects and stops at its cap | 1.5 | Not started |
@@ -167,8 +167,8 @@ reconnect or expiry invalidates the challenge.
 
 | ID | Workstream | Phase | Status |
 | --- | --- | --- | --- |
-| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | Not started |
-| B | Node agents, capability registry, remote execution and screen/input relay | 0–2 | Not started |
+| A | Personal identity, Tailscale ingress, Helm/ArgoCD, pairing and hub | 0 | In progress — hub, chart and enrolment exist; not deployed |
+| B | Node agents, capability registry, remote execution and screen/input relay | 0–2 | In progress — outbound agent, shell execution and streams; screen/input pending |
 | C | Connectors, vault and credentials | 3 | Not started |
 | D | Sync, continuity and notifications | 4 | Not started |
 | E | Triggers and routines | 5 | Not started |
@@ -195,9 +195,9 @@ Anything marked **Blocked** stays out of the UI rather than shipping a stub.
 | S4 | Kanban plugin contract audit (board fields, events, runs) | disposable host + plugin source | Not started — next client action |
 | S4 | Board metadata, drag/drop, live updates | verified plugin schema and events | Blocked until S4 audit |
 | S4 | Task dispatch, runs, diagnostics, recovery | verified routes plus cost/approval disclosure | Blocked |
-| S5 | Node/host picker with live capabilities and presence | Phase 0 | Not started |
+| S5 | Node/host picker with live capabilities and presence | Phase 0 | Blocked — device protocol and node list exist; GPUI hub transport not wired |
 | S5 | File browser, embedded terminal, screen view/takeover | Phase 1–2 | Not started |
-| S5 | Secret/password/sudo/credential prompt cards | Phase 2 node prompt API | Not started |
+| S5 | Secret/password/sudo/credential prompt cards | Phase 2 node prompt API | Blocked — protocol, challenge validation and audit verified end to end; card UI not wired |
 | S6 | Artifact browser and previews | Phase 6 | Not started |
 | S6 | Voice capture, device pickers, call state | host voice work | Not started |
 | S6 | Notification action routing and per-bot preferences | Phase 4 | Not started |
@@ -275,11 +275,11 @@ These change the plan and need an ADR before the affected phase starts:
 | --- | --- | --- |
 | First runtime for the OCI images: k3s, Docker or Podman | 0–1 | k3s on the existing cluster, with compose as the portable fallback |
 | Which machine runs `hermes-computer`: `nexus`, `zephyr` or `forge` | 1 | `nexus`, where the agent data already lives |
-| Node transport: outbound WSS/mTLS through the hub, or direct Tailscale path | 0 | Outbound to the hub; Tailscale only for the UI and optional direct SSH |
-| Node runtime: systemd user service, OCI container, or bundled in the GPUI client | 0 | Ship all three against the same protocol |
-| Secret “remember”: OS keyring or hub vault | 2 | OS keyring (Secret Service); the hub vault is for connector tokens only |
+| Node transport: outbound WSS/mTLS through the hub, or direct Tailscale path | 0 | **Decided in ADR-0007:** outbound WSS; Tailscale only for the UI and optional direct SSH |
+| Node runtime: systemd user service, OCI container, or bundled in the GPUI client | 0 | **Decided:** systemd and OCI ship now; bundling is Phase 1 |
+| Secret “remember”: OS keyring or hub vault | 2 | OS keyring (Secret Service); the hub vault is for connector tokens only; `remember` is parsed but not persisted in v1 |
 | Sync devices: desktop only, or desktop + phone companion | 4, 7 | Desktop first, phone later |
-| Auth: device pairing tokens or an OIDC login | 0 | Pairing tokens |
+| Auth: device pairing tokens or an OIDC login | 0 | **Decided:** pairing tokens; no OIDC in the personal build |
 | Platforms at GA: Linux/Omarchy only, or macOS/Windows too | 7 | Linux/Omarchy only |
 
 ## Milestones

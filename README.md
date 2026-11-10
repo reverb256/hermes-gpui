@@ -24,6 +24,7 @@ timeouts, `gateway.ping` keepalive with a 45 s liveness deadline,
 - [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) — the single-user build plan (personal hub, node agents, connectors, sync, artifacts).
 - [`docs/README.md`](docs/README.md) — full documentation index.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/FEATURES.md`](docs/FEATURES.md) — how it is built and what each surface does.
+- [`docs/NODE-PROTOCOL.md`](docs/NODE-PROTOCOL.md) — hub/node/device wire contract, pairing, prompts and failure semantics.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md), [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — build/test and run/operate.
 - [`docs/OMARCHY.md`](docs/OMARCHY.md) — Omarchy integration (theme, notifications, bar widget, Superwhisper).
 - [`docs/adr/`](docs/adr/README.md) — architecture decision records.
@@ -33,8 +34,37 @@ timeouts, `gateway.ping` keepalive with a 45 s liveness deadline,
 ```
 crates/hermes-rpc        JSON-RPC 2.0 WebSocket channel (transport only)
 crates/hermes-api        host config, REST client, session/prompt helpers
+crates/hermes-protocol   versioned hub/node/device frames and validation
+crates/hermes-hub        owner API, SQLite registry, node/device sockets, audit
+crates/hermes-node       outbound agent: local policy, shell execution, prompts
 crates/hermes-desktop    GPUI app: sidebar, transcript, composer, tray
+charts/hermes-hub        Helm chart (Deployment, PVC, Tailscale Ingress)
+deploy/argocd            ArgoCD Application
+docker, deploy/compose   OCI images and portable fallback
 ```
+
+## Personal hub
+
+The hub is the single-owner control plane for reaching several computers from
+one client: each computer runs `hermes-node`, dials out to `hermes-hub` and
+advertises what it can do. No inbound port is needed on a node, and secret
+prompts are brokered as one-time cards rather than stored credentials. The
+protocol is [`docs/NODE-PROTOCOL.md`](docs/NODE-PROTOCOL.md).
+
+```bash
+export HERMES_HUB_ADMIN_TOKEN="$(openssl rand -base64 48)"
+cargo run -p hermes-hub    # http://127.0.0.1:8080
+
+# on each computer, with a token from POST /api/v1/enroll
+HERMES_HUB_URL=http://127.0.0.1:8080 \
+HERMES_NODE_ID=node-… HERMES_NODE_TOKEN=… \
+cargo run -p hermes-node
+```
+
+The hub deploys from `charts/hermes-hub` through the ArgoCD Application in
+`deploy/argocd/hermes-hub.yaml`, behind a Tailscale Ingress. Compose is in
+`deploy/compose`. The GPUI client does not yet consume the device socket, so the
+hub is exercised today by the REST/WS API and the end-to-end tests.
 
 ## Running
 
@@ -308,8 +338,10 @@ theme that follows the live desktop palette.
 cycles them with Enter / Shift+Enter. Dictation remains Superwhisper's job
 (`Alt+Space`), since the client does not capture audio itself.
 
-Not yet wired: file browser, voice mode, multi-host switching, full Markdown
-formatting, general artifact previews, and advanced Kanban management. The
+Not yet wired: file browser, voice mode, multi-host switching (the hub roster
+and node picker are not in the client yet), secret-prompt cards in the GPUI UI,
+full Markdown formatting, general artifact previews, and advanced Kanban
+management. The
 composer uses GPUI's native multiline editor for cursor navigation, selection,
 undo and IME input; accessibility and platform behavior still need end-to-end
 validation. An isolated Hermes 0.20.3 host was used to

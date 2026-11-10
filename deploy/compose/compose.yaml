@@ -1,0 +1,25 @@
+# Portable fallback when not running on k3s. The hub still listens only on the
+# host; put Tailscale or an SSH tunnel in front of it for remote devices.
+services:
+  hub:
+    build:
+      context: ../..
+      dockerfile: docker/hermes-hub.Dockerfile
+    image: ghcr.io/reverb256/hermes-hub:0.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      HERMES_HUB_BIND: 0.0.0.0:8080
+      HERMES_HUB_DB: /data/hermes.db
+      HERMES_HUB_ADMIN_TOKEN: ${HERMES_HUB_ADMIN_TOKEN:?set HERMES_HUB_ADMIN_TOKEN in .env or the environment}
+    volumes:
+      - hermes-hub-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  hermes-hub-data:

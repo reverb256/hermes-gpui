@@ -69,6 +69,138 @@ bindings — see [`OMARCHY.md`](OMARCHY.md).
 Closing the window hides to the tray so a running turn keeps streaming; **Quit**
 is on the tray menu and in the command palette.
 
+## Personal hub and node agents
+
+Phase 0 services live in `crates/hermes-hub` and `crates/hermes-node`. The hub
+is single-owner and one replica; nodes dial out to it. Protocol details are in
+[`NODE-PROTOCOL.md`](NODE-PROTOCOL.md).
+
+### Hub
+
+```bash
+# local development
+export HERMES_HUB_ADMIN_TOKEN="$(openssl rand -base64 48)"
+HERMES_HUB_BIND=127.0.0.1:8080 HERMES_HUB_DB=/tmp/hermes-hub.db \
+  cargo run -p hermes-hub
+
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `HERMES_HUB_BIND` | `0.0.0.0:8080` | listen address |
+| `HERMES_HUB_DB` | `data/hermes.db` | SQLite path; parent directories are created |
+| `HERMES_HUB_ADMIN_TOKEN` | required | owner credential, at least 32 characters; never logged |
+| `HERMES_HUB_HEARTBEAT_MS` | `15000` | heartbeat period advertised to nodes |
+| `HERMES_HUB_MAX_COMMAND_TIMEOUT_MS` | `900000` | upper bound accepted by the API |
+
+Mint an enrollment code, then exchange it once (the node token is printed only
+by the second call):
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8080/api/v1/enrollments \
+  -H "Authorization: Bearer $HERMES_HUB_ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"node","name":"forge"}'
+
+curl -fsS -X POST http://127.0.0.1:8080/api/v1/enroll \
+  -H 'content-type: application/json' -d '{"code":"<code>"}'
+```
+
+`GET /api/v1/nodes` shows presence and capabilities. `DELETE
+/api/v1/nodes/{id}` revokes the node, closes its socket and fails its in-flight
+commands. The same flow with `"kind":"device"` issues a client token; revoke it
+with `DELETE /api/v1/devices/{id}`. `GET /api/v1/audit` is the personal audit;
+it never contains a prompt value.
+
+### Kubernetes / ArgoCD
+
+The chart is `charts/hermes-hub`. It expects the admin Secret
+`hermes-hub-admin` with key `admin-token` in the target namespace and publishes
+a Tailscale Ingress (`tailscale.hostname`, default `hermes`). Apply
+`deploy/argocd/hermes-hub.yaml` after the Secret exists:
+
+```bash
+kubectl create namespace hermes
+kubectl -n hermes create secret generic hermes-hub-admin \
+  --from-literal=admin-token="$(openssl rand -base64 48)"
+kubectl apply -f deploy/argocd/hermes-hub.yaml
+kubectl -n hermes rollout status deploy/hermes-hub
+```
+
+Do not expose the Service with a public LoadBalancer. The tailnet ACL limits the
+network path; the hub bearer token remains the application gate.
+
+Compose fallback: copy `deploy/compose/.env.example` to `.env`, set the token,
+then `docker compose -f deploy/compose/compose.yaml up -d --build`. It binds
+`127.0.0.1:8080` only.
+
+### Node agent
+
+Run `hermes-node` on each computer. It needs no inbound port.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `HERMES_HUB_URL` | required | `http(s)://` or `ws(s)://`; normalised to `/v1/node` |
+| `HERMES_NODE_TOKEN` | required | node token from enrollment |
+| `HERMES_NODE_ID` | required | id returned by enrollment |
+| `HERMES_NODE_NAME` | hostname | display name and prompt requester |
+| `HERMES_NODE_ALLOWED_ROOTS` | `$HOME` | colon-separated existing directories; cwd must resolve inside one |
+| `HERMES_NODE_ALLOW_COMMANDS` | empty | comma-separated program basenames; empty allows any program inside the roots |
+| `HERMES_NODE_MAX_CONCURRENCY` | `2` | simultaneous children, clamped 1–16 |
+
+Check effective policy without connecting:
+
+```bash
+HERMES_HUB_URL=https://hermes HERMES_NODE_ID=node-… \
+HERMES_NODE_TOKEN=… hermes-node --check
+```
+
+A user unit should keep the token in a `0600` env file, not in `ExecStart`:
+
+```ini
+# ~/.config/systemd/user/hermes-node.service
+[Unit]
+Description=Hermes node agent
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/hermes/node.env
+ExecStart=%h/.local/bin/hermes-node
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+```
+
+The agent clears the child environment: it does not inherit
+`HERMES_NODE_TOKEN`, the hub URL or host secrets. Only `PATH`, `HOME`, `LANG`,
+`TERM`, the request's explicit env and a prompted secret are passed. A command
+is executed without a shell, inside an allowed root, with a timeout and
+cancellation.
+
+Container variant (own filesystem, not the host's):
+
+```bash
+docker run --rm --read-only --tmpfs /tmp \
+  -e HERMES_HUB_URL=https://hermes \
+  -e HERMES_NODE_ID=node-… -e HERMES_NODE_TOKEN=… \
+  -v "$HOME/work:/home/hermes/work" \
+  ghcr.io/reverb256/hermes-node:0.1.0
+```
+
+### Secret prompt cards
+
+A command that needs a credential carries `secret{env_var,purpose,scope,
+timeout_ms}`. The node sends a prompt with a one-time challenge; every connected
+device receives it. The first matching answer is forwarded once, injected into
+the child environment and zeroized. A wrong challenge burns the prompt, and a
+disconnect, expiry or node cancel closes it. With no device connected the hub
+cancels immediately. The value is never in the audit, command record, argv,
+transcript or node logs.
+
 ## Packaging and install status
 
 `make release` produces `target/release/hermes-desktop`. An Arch PKGBUILD is
@@ -117,6 +249,10 @@ only covers crashes, not a closed window (closing hides to tray).
 | Tests | `cargo test --workspace --all-targets --locked` | unit + contract behaviour |
 | Host probe | `hermes-desktop --probe` | REST, WS handshake, session creation |
 | Live plugin | `HERMES_GPUI_LIVE_HOST=… HERMES_GPUI_LIVE_TOKEN=… cargo test -p hermes-api -- --ignored live_kanban` | real Kanban detail/comment/attachment/board behaviour and board isolation |
+| Protocol | `cargo test -p hermes-protocol` | frame versioning, validation and secret redaction |
+| Hub/node e2e | `cargo test -p hermes-hub --test e2e` | real enrollment, node execution, streams, prompt answer, audit and revoke |
+| Chart | `helm lint charts/hermes-hub && helm template hermes-hub charts/hermes-hub --namespace hermes` | chart schema and rendered objects |
+| OCI | `docker build -f docker/hermes-hub.Dockerfile .` | image build; requires a Docker daemon |
 
 Record which gates were run when reporting a change; "compiles" is not a gate.
 
@@ -134,6 +270,11 @@ Record which gates were run when reporting a change; "compiles" is not a gate.
 | Second launch opens nothing | stale socket or unresponsive primary | remove the socket only when no instance runs; `HERMES_GPUI_SOCKET` to isolate |
 | Theme does not follow | Omarchy palette path changed or the file is missing | check `~/.local/state/omarchy/current/theme/colors.toml`; see [`OMARCHY.md`](OMARCHY.md) |
 | Blank/black window on Wayland | GPU/driver or compositor mismatch | run under X11 to compare; `RUST_LOG=debug` |
+| Node never appears online | bad token, wrong URL or TLS failure | `hermes-node --check`; hub logs; `curl /api/v1/nodes` |
+| Command returns 409 | node offline or revoked | `GET /api/v1/nodes`; re-enroll if revoked |
+| Prompt never appears | no device connected or challenge expired | `GET /api/v1/prompts`; device socket logs |
+| `decoding` / `bad_frame` on connect | client and hub protocol versions differ | `GET /api/v1/health` and the agent version |
+| Chart pod CrashLoopBackOff | admin Secret missing or wrong key | `kubectl -n hermes describe pod`; Secret name/key |
 
 Logs go to stderr; run from a terminal or capture the journal when using a user
 unit. The client never logs credentials.
@@ -144,6 +285,16 @@ The client stores no user data beyond in-memory state and the IPC socket. All
 sessions, profiles, secrets and Kanban data live on the host; back those up with
 the host's own tooling (`/api/ops/backup` and its docs). Theme data belongs to
 Omarchy.
+
+The hub stores its SQLite database on the `/data` PVC (or the compose volume).
+Take a PVC volume snapshot, or run SQLite's `.backup` from a temporary pod that
+mounts the volume; the image does not ship the `sqlite3` CLI. Do not copy
+`hermes.db` alone while the hub is writing: WAL mode also keeps `-wal` and
+`-shm` files. The database contains command argv, stream chunks and audit; it
+does not contain prompt values, command env or node tokens (only hashes).
+Keep the admin token in a separate secret manager. A restart closes any
+unresolved prompt as `hub_restarted`, because the one-time challenge lived in
+the previous process.
 
 ## Security notes
 

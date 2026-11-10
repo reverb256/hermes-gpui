@@ -1,0 +1,8 @@
+.git
+.github
+target
+charts
+docs
+packaging/pkg
+packaging/src
+*.pkg.tar.*

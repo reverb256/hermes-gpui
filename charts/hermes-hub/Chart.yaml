@@ -1,0 +1,11 @@
+apiVersion: v2
+name: hermes-hub
+description: Single-owner Hermes hub for pairing, node routing, audit and secret prompts
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/reverb256/hermes-gpui
+sources:
+  - https://github.com/reverb256/hermes-gpui
+maintainers:
+  - name: reverb256

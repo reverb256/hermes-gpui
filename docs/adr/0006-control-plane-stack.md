@@ -1,6 +1,6 @@
 # 0006. Control-plane stack and transport choices (proposed)
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0007 for the single-user build; retained as history
 - **Date:** 2026-11-10
 - **Deciders:** platform, security
 

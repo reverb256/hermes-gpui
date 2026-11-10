@@ -4,6 +4,13 @@
 status list; this file is the build plan behind it. Nothing here is implemented
 merely because it is written down.
 
+**Implementation note (2026-11-10):** the Phase 0 backend slice now exists:
+`crates/hermes-protocol`, `crates/hermes-hub`, `crates/hermes-node`, the
+`charts/hermes-hub` chart and the ArgoCD Application. It is verified by
+`cargo test -p hermes-hub --test e2e` and `helm lint`; it is not deployed and
+the GPUI node picker/prompt cards are not wired. See
+[`NODE-PROTOCOL.md`](NODE-PROTOCOL.md) and [ADR-0007](adr/0007-single-user-node-hub.md).
+
 **Scope decision (2026-11-10): single user.** This document was first written
 for a multi-tenant Grok Bot analogue. Teams, organisations, roles, invitations,
 shared bots, group chat, connector sharing, SSO/SCIM, enterprise policy,
@@ -20,7 +27,7 @@ There are three layers, and only the first one is "porting Hermes":
 | --- | --- | --- |
 | **Client** | `hermes-gpui` — GPUI desktop app | ~55% of the Hermes Desktop surface; see `PARITY.md` |
 | **Host agent** | `hermes-agent` — FastAPI + JSON-RPC gateway running on one machine | Mature single-user agent: sessions, tools, MCP, cron, memory, skills, voice, files, browser, computer use, Kanban |
-| **Platform** | Everything Grok Bot has that a single-host agent cannot have | **Does not exist** |
+| **Platform** | The personal hub and node agents that connect several computers for one owner | **Phase 0 backend slice exists; not deployed** |
 
 Grok Bot is not a better desktop client for a local agent. It is a hosted
 product: one persistent cloud computer per user, a fleet that keeps working when
@@ -29,8 +36,9 @@ with brokered credentials, org-level policy and audit, metering and billing, and
 sync across desktop and phone. None of that can be produced by adding screens to
 the client.
 
-So "full parity" means building a platform around `hermes-agent`, while
-`hermes-agent` itself gains the multi-user seams it currently lacks.
+So "full parity" means building a personal platform around `hermes-agent`,
+while `hermes-agent` itself gains the seams it currently lacks. Multi-user
+seams are explicitly withdrawn; the hub is single-owner by construction.
 
 ## 2. What already exists (verified in this workspace)
 
@@ -67,21 +75,29 @@ So "full parity" means building a platform around `hermes-agent`, while
 - Cross-device sync, push notifications, guaranteed background execution.
 - Event-triggered routines (email/Slack/webhook) with ownership and retries.
 - Artifact store with provenance and sharing.
-- Audit log of tool calls, policy decisions and admin events.
 - Metering, entitlements, budget enforcement, invoices.
 - Retention, DLP, network policy, per-team policy engine.
+
+**Built since this list was written:** the personal audit (commands, sessions,
+prompts, revocation), one-time secret prompts with challenge/expiry/replay
+rejection, and outbound node execution with streamed output. They are not yet
+wired into the GPUI client, and node reconnect does not resume in-flight work.
 
 ## 3. Workstreams that are not a port
 
 Each row is a build programme with its own service, schema and exit criteria.
 "Depends on" is the true critical path.
 
-### A. Identity, tenancy and access
+### A. Identity, tenancy and access (withdrawn for the personal build)
 
-Why not a port: the host has one token and one user. Grok Bot has accounts,
-members, roles, seats, and strict per-user isolation.
+Why this is historical: the host has one token and one user, and the product is
+now explicitly single-owner. The hub implements personal enrollment and
+revocation instead: one admin token, one-time node/device enrollment codes,
+hashed long-lived tokens and immediate revocation (ADR-0007). There are no
+accounts, roles, seats or tenants. The multi-tenant build below is retained only
+to explain what is deliberately not being built.
 
-Build:
+Build (withdrawn):
 
 - `hermes-control` service (new): Postgres schema for `accounts`, `orgs`,
   `members`, `roles`, `bots`, `shares`, `devices`, `sessions_meta`,
@@ -95,10 +111,11 @@ Build:
 - Isolation tests: cross-tenant reads must fail at the storage layer, not just
   in a UI check.
 
-Depends on: nothing. **Start here.** Everything else needs an identity.
+Depends on: nothing. Superseded by the personal hub; there is no tenant
+boundary to enforce because there is one owner.
 
-Exit criteria: two accounts cannot see each other's bots, sessions, files,
-usage or audit events under any route; permission matrix covered by tests.
+Exit criteria (withdrawn): two accounts cannot see each other's bots, sessions,
+files, usage or audit events under any route; permission matrix covered by tests.
 
 ### B. Cloud computer fleet
 
@@ -302,8 +319,10 @@ Build:
 
 These are extensions, not a rewrite:
 
-1. **Token auth middleware** — accept short-lived hub-issued, per-device tokens
-   for remote access instead of the single dashboard token.
+1. **Token auth middleware** — accept hub-issued per-device tokens for remote
+   access instead of the single dashboard token. *(Hub side implemented:
+   enrollment, hashed node/device tokens and revocation. Host-side acceptance is
+   still the dashboard token.)*
 2. **Single-user storage hardening** — one owner, one data root, documented
    backup/restore and no account or tenancy columns.
 3. **Event bus** — publish tool/approval/routine/usage events to the control
@@ -314,12 +333,15 @@ These are extensions, not a rewrite:
 6. **Sync APIs** — session metadata and transcript revisions with sequence
    numbers, idempotent appends.
 7. **Approval hardening** — expiry, replay protection, multiple concurrent
-   requests, reconnection replay, choice validation.
+   requests, reconnection replay, choice validation. *(Hub prompt broker
+   implements expiry, one-shot challenge, replay rejection and reconnection
+   replay; client approval cards are unchanged.)*
 8. **Typed tool results** — structured payloads (not just text) so cards can
    render diffs, files, images and errors.
 9. **Secret prompt API** — one-time challenge, requester context, scope and
    expiry for password, sudo and credential cards; values never logged, echoed
-   or passed through argv.
+   or passed through argv. *(Implemented in the hub/node protocol; the GPUI card
+   and sudo-over-stdin path remain.)*
 10. **Streaming voice** — STT/TTS duplex with interruption and device selection.
 11. **Pagination everywhere** — sessions, messages, runs, audit export.
 
@@ -347,8 +369,10 @@ capability list behind it.
 ## 6. Architecture decisions to lock before Phase 1
 
 Decisions live in the records, not here: locked choices in
-[ADR-0001–0005](adr/README.md), and the still-open stack, transport, auth and
-billing choices in [ADR-0006](adr/0006-control-plane-stack.md).
+[ADR-0001–0005](adr/README.md); the personal hub, outbound node transport,
+SQLite, Tailscale UI path and prompt brokering in
+[ADR-0007](adr/0007-single-user-node-hub.md). ADR-0006 is superseded history
+for the withdrawn multi-tenant stack and billing choices.
 
 
 ## 7. Phased roadmap
@@ -385,7 +409,7 @@ withdrawn together with collaboration, metering and enterprise.
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Shared browser profile leaks context between bots | High | Per-bot browser contexts or profiles, explicit warnings, reset action |
-| Secrets exposed to the personal computer | High | Broker tokens server-side; never inject into env; redaction tests |
+| Secrets exposed to the personal computer | High | Broker one-time prompt values; inject only into the target child env, zeroize after use, never argv/log/audit; prefer stdin for sudo and add redaction tests |
 | Container or volume loss destroys state | Critical | Volume backups, restic-style archives, a restore drill before GA |
 | Screen streaming latency | Medium | CDP screencast first; WebRTC only if measurements demand it |
 | Remote exposure of the hub | High | Tailscale ingress with ACLs, outbound-only node connections, scoped device tokens, revocation test |

@@ -33,7 +33,7 @@ product work beyond this GPUI repository.
 | Submit, interrupt and start a conversation | Implemented; verify active-turn resume and interruption against host. |
 | Send another instruction while a turn is active | Missing; verify host steer/queue semantics and surface them safely. |
 | Approval and clarification cards | Partial; audit every gateway request type, choices, expiration, multiple concurrent requests and reconnect replay. |
-| Secret, password and sudo prompts | Planned Phase 2: typed node prompt with a one-time challenge, masked card naming requester/scope/expiry, stdin delivery for sudo, no transcript/log/argv leaks, opt-in OS keyring memory. |
+| Secret, password and sudo prompts | Backend implemented: typed node prompt with one-time challenge, requester/scope/expiry, challenge burn, no transcript/log/argv/audit leak, fail-closed with no device. Client masked card, sudo stdin and opt-in keyring memory remain Phase 2. |
 | Markdown, code blocks, syntax highlighting, copy | Partial: CommonMark blocks and inline bold, italic, code and link styling; link activation, syntax highlighting and copy remain. |
 | Links and safe external navigation | Partial; audit schemes, confirmation and remote content handling. |
 | Image, file and other attachments | Partial: file picker/upload; audit multi-file, paste, previews, size limits and failures. |
@@ -76,7 +76,7 @@ product work beyond this GPUI repository.
 | Shared bots, collaboration roles and access management | Out of scope (single-user). |
 | Bot templates and share links | Out of scope as sharing; local config templates remain possible. |
 | Bot analytics and shared-bot usage | Out of scope (single-user); local usage reporting remains. |
-| Background work when client closes | Planned: `hermes-node` keeps running under systemd/OCI, reconnects to the hub and resumes streams by sequence; validate daemon lifecycle and notifications. |
+| Background work when client closes | Node runs under systemd/OCI and reconnects; device stream history replays by sequence. Node reconnect fails in-flight commands rather than resuming them (Phase 1). |
 
 ## Skills, tools, MCP and connectors
 
@@ -126,7 +126,7 @@ product work beyond this GPUI repository.
 | Watch/take over computer use and demonstrate workflows | Missing; needs remote control arbitration, permissions and audit. |
 | Persistent personal computer, browser sessions and files | Planned as Phase 1: one OCI `hermes-computer` container with saved volumes; a Grok-style per-user fleet is out of scope. |
 | User isolation, bot screens, execution approvals and reset | Partial: personal approval/takeover work is Phase 2 with per-bot browser contexts; multi-user isolation is out of scope. |
-| Connected-device local execution | Planned Phase 0–1: `hermes-node` on each computer, explicit pairing, local policy and per-node audit. |
+| Connected-device local execution | Implemented for shell: outbound `hermes-node`, one-time enrollment, local roots/allowlist, timeout/cancel, streamed output and per-node audit. PTY, files, screen and GPU are not implemented. |
 
 ## Voice and sound
 
@@ -151,7 +151,7 @@ product work beyond this GPUI repository.
 | Memory provider selection, config and confirmed reset | Partial; memory browsing/editing, review, per-profile scope and retention need audit. |
 | Human approval settings, auto-review, scoped execution policies | Missing; requires host-side enforcement, not UI-only controls. |
 | Identity, multi-user RBAC, team sharing and audit logs | Out of scope (multi-user); the personal audit log remains Phase 2. |
-| Auth sessions, logout, tokens, cookie refresh and TLS | Partial: existing host login remains; device pairing, short-lived tokens, revocation and Tailscale-terminated ingress TLS are Phase 0. |
+| Auth sessions, logout, tokens, cookie refresh and TLS | Partial: host login remains; hub enrollment, hashed long-lived node/device tokens, immediate revocation and Tailscale ingress are implemented. Token expiry/rotation remain. |
 | Account usage, billing and cost reporting | Partial: host cost analytics remain; billing, plans and invoicing are out of scope (single-user). |
 
 ## Desktop, Omarchy and operations
@@ -164,7 +164,7 @@ product work beyond this GPUI repository.
 | Dedicated Omarchy bar widget and status | Implemented in `packaging/omarchy-shell-hermes` reading `status --json`; live bar insertion, click behavior and multi-monitor layout remain unverified. |
 | Launch at login, package/install/update/uninstall | Partial: PKGBUILD builds and installs the binary, `.desktop` entry and bar widget; signed packages, auto-update, uninstall and launch-at-login remain. |
 | Desktop notifications, sound, focus and privacy | Partial: Omarchy notifications on turn completion and approvals, click-to-focus, `--replace-id` collapsing and a reminder action; sound, in-notification approve, per-bot preferences and disabled states remain. |
-| Multi-host selection, SSH/remotes and credentials | Partial: node registry, Tailscale ingress and paired device tokens are Phase 0; multi-host picker and SSH credentials remain. |
+| Multi-host selection, SSH/remotes and credentials | Partial: hub node registry, presence, revoke and Tailscale ingress are implemented; the GPUI picker and SSH credentials remain. |
 | Appearance, font scaling, shortcuts and user preferences | Partial: theme sync only; settings persistence and key rebinding missing. |
 | Resizing and small-screen layout | Unknown; inspect responsive behavior and settings sheet overflow. |
 | Cross-platform builds and accessibility APIs | Unknown; no macOS/Windows parity claim from Linux testing. |

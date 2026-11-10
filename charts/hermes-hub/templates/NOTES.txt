@@ -1,0 +1,21 @@
+Hermes hub is deployed.
+
+{{- if not .Values.adminToken.create }}
+1. Put the admin token in a Secret (the chart references it, it does not create it):
+
+   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.adminToken.existingSecret }} \
+     --from-literal={{ .Values.adminToken.key }}="$(openssl rand -base64 48)" \
+     --dry-run=client -o yaml | kubectl apply -f -
+{{- end }}
+
+2. Reach it over Tailscale (no inbound port is published):
+
+{{- if .Values.tailscale.enabled }}
+   https://{{ .Values.tailscale.hostname }}/
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hermes-hub.fullname" . }} 8080:{{ .Values.service.port }}
+{{- end }}
+
+3. Enroll the first node, then run the agent on that computer with the token
+   printed once by the enroll call. Tokens are stored hashed and cannot be
+   recovered; mint a new enrollment if one is lost.

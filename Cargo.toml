@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/hermes-rpc",
     "crates/hermes-api",
+    "crates/hermes-protocol",
+    "crates/hermes-hub",
+    "crates/hermes-node",
     "crates/hermes-desktop",
 ]
 
@@ -16,6 +19,8 @@ repository = "https://github.com/reverb256/hermes-gpui"
 [workspace.dependencies]
 hermes-rpc = { path = "crates/hermes-rpc" }
 hermes-api = { path = "crates/hermes-api" }
+hermes-protocol = { path = "crates/hermes-protocol" }
+hermes-node = { path = "crates/hermes-node" }
 
 anyhow = "1"
 futures-util = "0.3"

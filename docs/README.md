@@ -5,13 +5,14 @@
 | [`../README.md`](../README.md) | users | install, run, connect, features quick tour, system requirements | current |
 | [`../ROADMAP.md`](../ROADMAP.md) | everyone | phases, workstreams, client track, milestones, status rules | planning |
 | [`../PARITY.md`](../PARITY.md) | everyone | per-feature status against Hermes Desktop and Grok Bot | living |
-| [`FULL-PARITY-PLAN.md`](FULL-PARITY-PLAN.md) | architects | what must be built beyond a port: tenancy, cloud computers, collaboration, connectors, sync, governance, metering, distribution; decisions, verification, risks | planning |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | engineers | three layers, crates, protocols, auth flow, data flow, failure modes | current |
+| [`FULL-PARITY-PLAN.md`](FULL-PARITY-PLAN.md) | architects | what must be built beyond a port for one owner: personal hub, node agents, connectors, sync, artifacts, decisions, verification, risks | planning |
+| [`NODE-PROTOCOL.md`](NODE-PROTOCOL.md) | engineers, operators | hub/node/device frames, pairing, command lifecycle, secret prompts, reconnect semantics and limits | current |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | engineers | crates, host and hub layers, protocols, auth flow, data flow, failure modes | current |
 | [`FEATURES.md`](FEATURES.md) | users, support | per-surface behaviour and the exact host routes behind it | current |
 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | contributors | toolchain, build, checks, test strategy, disposable host harness, commit rules | current |
 | [`OPERATIONS.md`](OPERATIONS.md) | operators | environment variables, host prerequisites, packaging, troubleshooting, verification gates | current |
 | [`OMARCHY.md`](OMARCHY.md) | users, contributors | Omarchy 4.x integration: theme, notifications, bar plugin, launch/focus, capture, Superwhisper dictation, packaging | current |
-| [`adr/`](adr/README.md) | architects | decision records for the layer split, the shared computer boundary, connector brokering and sync | accepted |
+| [`adr/`](adr/README.md) | architects | decision records for the layer split, the shared computer boundary, connector brokering, sync and the single-user hub | accepted |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | contributors | PR flow and review expectations | current |
 | [`../STYLE.md`](../STYLE.md) | contributors | UI tokens, spacing, contrast rules | current |
 | [`../SECURITY.md`](../SECURITY.md) | security | private vulnerability reporting | current |
