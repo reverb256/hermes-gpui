@@ -263,6 +263,11 @@ pub enum BackendEvent {
         id: String,
         detail: hermes_api::KanbanTaskDetail,
     },
+    KanbanDetailSaved {
+        board: String,
+        id: String,
+        detail: hermes_api::KanbanTaskDetail,
+    },
     KanbanDetailFailed {
         board: String,
         id: String,
@@ -484,6 +489,11 @@ pub enum Command {
         id: String,
         body: String,
     },
+    UpdateKanbanDetail {
+        board: String,
+        id: String,
+        patch: Value,
+    },
     UploadKanbanAttachment {
         board: String,
         id: String,
@@ -635,6 +645,9 @@ fn offline_event(command: Command) -> BackendEvent {
         }
         Command::CommentKanbanTask { board, id, .. } => {
             BackendEvent::KanbanCommentFailed { board, id, message }
+        }
+        Command::UpdateKanbanDetail { board, id, .. } => {
+            BackendEvent::KanbanDetailFailed { board, id, message }
         }
         Command::UploadKanbanAttachment { board, id, .. }
         | Command::DownloadKanbanAttachment { board, id, .. }
@@ -1064,6 +1077,21 @@ async fn worker(
                             match rest.comment_kanban_task(&id, &body, Some(&board)).await {
                                 Ok(_) => { let _ = events.send(BackendEvent::KanbanCommentSaved { board, id }); }
                                 Err(err) => { let _ = events.send(BackendEvent::KanbanCommentFailed { board, id, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
+                            }
+                        }
+                        Command::UpdateKanbanDetail { board, id, patch } => {
+                            match rest.update_kanban_task(&id, patch, Some(&board)).await {
+                                Ok(_) => match rest.kanban_task(&id, Some(&board)).await {
+                                    Ok(detail) => { let _ = events.send(BackendEvent::KanbanDetailSaved { board, id, detail }); }
+                                    Err(err) => {
+                                        let message = err.detail().unwrap_or_else(|| err.to_string());
+                                        let _ = events.send(BackendEvent::KanbanDetailFailed { board, id, message });
+                                    }
+                                },
+                                Err(err) => {
+                                    let message = err.detail().unwrap_or_else(|| err.to_string());
+                                    let _ = events.send(BackendEvent::KanbanDetailFailed { board, id, message });
+                                }
                             }
                         }
                         Command::UploadKanbanAttachment { board, id, path } => {
@@ -2349,6 +2377,14 @@ mod tests {
 
     #[test]
     fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::UpdateKanbanDetail {
+                board: "work".into(),
+                id: "task".into(),
+                patch: serde_json::json!({"body": "new"})
+            }),
+            BackendEvent::KanbanDetailFailed { .. }
+        ));
         assert!(matches!(
             offline_event(Command::UploadKanbanAttachment {
                 board: "work".into(),

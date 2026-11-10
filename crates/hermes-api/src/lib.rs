@@ -2979,6 +2979,18 @@ mod tests {
         assert!(detail.attachments.is_empty());
 
         client
+            .update_kanban_task(
+                &id,
+                serde_json::json!({"body": "Live description", "assignee": "ops"}),
+                Some(&slug),
+            )
+            .await
+            .unwrap();
+        let detail = client.kanban_task(&id, Some(&slug)).await.unwrap();
+        assert_eq!(detail.task.body.as_deref(), Some("Live description"));
+        assert_eq!(detail.task.assignee.as_deref(), Some("ops"));
+
+        client
             .comment_kanban_task(&id, "Live comment", Some(&slug))
             .await
             .unwrap();

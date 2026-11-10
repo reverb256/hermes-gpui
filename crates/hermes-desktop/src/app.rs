@@ -134,6 +134,9 @@ pub struct HermesApp {
     kanban_comment_saving: bool,
     kanban_attachment_delete: Option<i64>,
     kanban_attachment_busy: bool,
+    kanban_body_draft: Option<String>,
+    kanban_assignee_draft: Option<String>,
+    kanban_detail_saving: bool,
     memory: Memory,
     moa: Moa,
     automations: Automations,
@@ -216,6 +219,9 @@ impl HermesApp {
             kanban_comment_saving: false,
             kanban_attachment_delete: None,
             kanban_attachment_busy: false,
+            kanban_body_draft: None,
+            kanban_assignee_draft: None,
+            kanban_detail_saving: false,
             memory: Memory::default(),
             moa: Moa::default(),
             automations: Automations::default(),
@@ -528,8 +534,18 @@ impl HermesApp {
                 }
             }
             BackendEvent::KanbanDetailFailed { board, id, message } => {
+                self.kanban_detail_saving = false;
                 if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
                     self.kanban_status = Some(message);
+                }
+            }
+            BackendEvent::KanbanDetailSaved { board, id, detail } => {
+                self.kanban_detail_saving = false;
+                self.kanban_body_draft = None;
+                self.kanban_assignee_draft = None;
+                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban_detail = Some(detail);
+                    self.kanban_status = Some("Task updated.".into());
                 }
             }
             BackendEvent::KanbanCommentSaved { board, id } => {
@@ -1610,6 +1626,59 @@ impl HermesApp {
     }
 
     fn route_kanban_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.kanban_body_draft.is_some() {
+            if self.kanban_detail_saving {
+                return true;
+            }
+            let key = &event.keystroke;
+            match key.key.as_str() {
+                "escape" => {
+                    self.kanban_body_draft = None;
+                    cx.notify();
+                    return true;
+                }
+                "enter" if key.modifiers.control || key.modifiers.platform => {
+                    self.save_kanban_body(cx)
+                }
+                "enter" => self.kanban_body_draft.as_mut().unwrap().push('\n'),
+                "backspace" => {
+                    self.kanban_body_draft.as_mut().unwrap().pop();
+                }
+                "space" => self.kanban_body_draft.as_mut().unwrap().push(' '),
+                _ => {
+                    if let Some(text) = key.key_char.as_deref() {
+                        self.kanban_body_draft.as_mut().unwrap().push_str(text);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        if self.kanban_assignee_draft.is_some() {
+            if self.kanban_detail_saving {
+                return true;
+            }
+            let key = &event.keystroke;
+            match key.key.as_str() {
+                "escape" => {
+                    self.kanban_assignee_draft = None;
+                    cx.notify();
+                    return true;
+                }
+                "enter" => self.save_kanban_assignee(cx),
+                "backspace" => {
+                    self.kanban_assignee_draft.as_mut().unwrap().pop();
+                }
+                "space" => self.kanban_assignee_draft.as_mut().unwrap().push(' '),
+                _ => {
+                    if let Some(text) = key.key_char.as_deref() {
+                        self.kanban_assignee_draft.as_mut().unwrap().push_str(text);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
         if self.kanban_comment_draft.is_some() {
             if self.kanban_comment_saving {
                 return true;
@@ -1707,6 +1776,49 @@ impl HermesApp {
         }
         cx.notify();
         true
+    }
+
+    fn save_kanban_body(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_detail_saving {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        let Some(body) = self.kanban_body_draft.as_deref() else {
+            return;
+        };
+        let body = body.trim().to_string();
+        self.kanban_detail_saving = true;
+        self.kanban_status = Some("Saving description…".into());
+        self.backend.send(Command::UpdateKanbanDetail {
+            board,
+            id,
+            patch: serde_json::json!({ "body": body }),
+        });
+        cx.notify();
+    }
+
+    fn save_kanban_assignee(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_detail_saving {
+            return;
+        }
+        let Some((board, id)) = self.kanban_detail_target.clone() else {
+            return;
+        };
+        let Some(assignee) = self.kanban_assignee_draft.as_deref() else {
+            return;
+        };
+        // The host treats an empty assignee as "unassigned".
+        let assignee = assignee.trim().to_string();
+        self.kanban_detail_saving = true;
+        self.kanban_status = Some("Saving assignee…".into());
+        self.backend.send(Command::UpdateKanbanDetail {
+            board,
+            id,
+            patch: serde_json::json!({ "assignee": assignee }),
+        });
+        cx.notify();
     }
 
     fn kanban_size_label(bytes: u64) -> String {
@@ -1929,6 +2041,164 @@ impl HermesApp {
                     );
                 }
             }
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("kanban-edit-body")
+                            .text_sm()
+                            .text_color(rgb(accent()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                    let current = this
+                                        .kanban_detail
+                                        .as_ref()
+                                        .and_then(|detail| detail.task.body.clone())
+                                        .unwrap_or_default();
+                                    this.kanban_assignee_draft = None;
+                                    this.kanban_body_draft = Some(current);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Edit description"),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-edit-assignee")
+                            .text_sm()
+                            .text_color(rgb(accent()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                    let current = this
+                                        .kanban_detail
+                                        .as_ref()
+                                        .and_then(|detail| detail.task.assignee.clone())
+                                        .unwrap_or_default();
+                                    this.kanban_body_draft = None;
+                                    this.kanban_assignee_draft = Some(current);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Edit assignee"),
+                    ),
+            );
+            if let Some(draft) = &self.kanban_body_draft {
+                panel = panel
+                    .child(self.section_label("DESCRIPTION"))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!("{draft}▌"))),
+                    )
+                    .child(self.note("Ctrl+Enter saves · Escape cancels"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("kanban-body-save")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(accent()))
+                                    .text_sm()
+                                    .text_color(rgb(bg()))
+                                    .cursor_pointer()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.save_kanban_body(cx)),
+                                    )
+                                    .child(if self.kanban_detail_saving {
+                                        "Saving…"
+                                    } else {
+                                        "Save description"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("kanban-body-cancel")
+                                    .px_2()
+                                    .py_1()
+                                    .text_sm()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if !this.kanban_detail_saving {
+                                            this.kanban_body_draft = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child("Cancel"),
+                            ),
+                    );
+            }
+            if let Some(draft) = &self.kanban_assignee_draft {
+                panel = panel
+                    .child(self.section_label("ASSIGNEE"))
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!("{draft}▌"))),
+                    )
+                    .child(self.note("Enter saves · empty clears the assignee · Escape cancels"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("kanban-assignee-save")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(accent()))
+                                    .text_sm()
+                                    .text_color(rgb(bg()))
+                                    .cursor_pointer()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.save_kanban_assignee(cx)),
+                                    )
+                                    .child(if self.kanban_detail_saving {
+                                        "Saving…"
+                                    } else {
+                                        "Save assignee"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("kanban-assignee-cancel")
+                                    .px_2()
+                                    .py_1()
+                                    .text_sm()
+                                    .text_color(rgb(text_muted()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if !this.kanban_detail_saving {
+                                            this.kanban_assignee_draft = None;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child("Cancel"),
+                            ),
+                    );
+            }
             panel = panel
                 .child(self.section_label(&format!("ATTACHMENTS · {}", detail.attachments.len())));
             if detail.attachments.is_empty() {
@@ -2150,11 +2420,16 @@ impl HermesApp {
                     .text_color(rgb(text_muted()))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.kanban_comment_saving && !this.kanban_attachment_busy {
+                        if !this.kanban_comment_saving
+                            && !this.kanban_attachment_busy
+                            && !this.kanban_detail_saving
+                        {
                             this.kanban_detail_target = None;
                             this.kanban_detail = None;
                             this.kanban_comment_draft = None;
                             this.kanban_attachment_delete = None;
+                            this.kanban_body_draft = None;
+                            this.kanban_assignee_draft = None;
                             cx.notify();
                         }
                     }))
@@ -2306,11 +2581,16 @@ impl HermesApp {
                                 && !this.kanban_comment_saving
                                 && this.kanban_comment_draft.is_none()
                                 && !this.kanban_attachment_busy
+                                && !this.kanban_detail_saving
+                                && this.kanban_body_draft.is_none()
+                                && this.kanban_assignee_draft.is_none()
                             {
                                 this.kanban_selected = Some(slug.clone());
                                 this.kanban_detail_target = None;
                                 this.kanban_detail = None;
                                 this.kanban_attachment_delete = None;
+                                this.kanban_body_draft = None;
+                                this.kanban_assignee_draft = None;
                                 this.kanban_comment_draft = None;
                                 this.kanban = None;
                                 this.kanban_draft = None;
@@ -2425,6 +2705,8 @@ impl HermesApp {
                                         Some((board.clone(), detail_id.clone()));
                                     this.kanban_detail = None;
                                     this.kanban_attachment_delete = None;
+                                    this.kanban_body_draft = None;
+                                    this.kanban_assignee_draft = None;
                                     this.kanban_status = Some("Loading task details…".into());
                                     this.backend.send(Command::LoadKanbanTask {
                                         board,
