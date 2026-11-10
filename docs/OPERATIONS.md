@@ -145,3 +145,20 @@ Omarchy.
 - Markdown never fetches remote content; images load only on explicit action.
 - Report vulnerabilities privately per [`../SECURITY.md`](../SECURITY.md); never
   paste cookies or tokens into an issue.
+
+## Omarchy integration commands
+
+These are local to the desktop; none of them contact the host.
+
+```bash
+hermes-desktop status --json             # snapshot the bar widget reads
+hermes-desktop --install-omarchy-hooks   # theme-set hook -> immediate repaint
+hermes-desktop --diagnostics             # Omarchy version, theme, metrics, tools, paths
+```
+
+Screenshots are written under `$XDG_CACHE_HOME/hermes-gpui/screenshots`, so the
+client can find the file it just captured without guessing `~/Pictures`. The bar
+widget lives in `packaging/omarchy-shell-hermes` and is installed with
+`omarchy plugin add <path>`; it reads the same `status.json` and needs no socket
+access. Notifications go through `omarchy-notification-send`; without a shell
+notification service the commands fail silently and the client keeps running.

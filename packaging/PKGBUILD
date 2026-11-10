@@ -1,0 +1,40 @@
+# Maintainer: Hermes GPUI maintainers <maintainers@example.invalid>
+# Build from a checkout:  makepkg -si
+# Build from a release:   makepkg -si --pkgver   (needs pkgver to be set)
+pkgname=hermes-gpui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native GPUI client for a Hermes agent host, with Omarchy desktop integration"
+arch=('x86_64' 'aarch64')
+url="https://github.com/reverb256/hermes-gpui"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'wayland')
+makedepends=('cargo' 'rust')
+options=('!lto')
+source=()
+sha256sums=()
+
+prepare() {
+  # A source build runs makepkg from the repository root.
+  if [[ ! -f "$srcdir/hermes-gpui/Cargo.toml" ]]; then
+    mkdir -p "$srcdir/hermes-gpui"
+    cp -r "$startdir"/Cargo.toml "$startdir"/Cargo.lock "$startdir"/crates "$startdir"/rust-toolchain.toml "$srcdir/hermes-gpui/"
+  fi
+}
+
+build() {
+  cd "$srcdir/hermes-gpui"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/hermes-gpui"
+  install -Dm755 target/release/hermes-desktop "$pkgdir/usr/bin/hermes-desktop"
+  install -Dm644 packaging/hermes-gpui.desktop "$pkgdir/usr/share/applications/hermes-gpui.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  install -Dm644 packaging/omarchy-shell-hermes/manifest.json \
+    "$pkgdir/usr/share/hermes-gpui/omarchy-shell-hermes/manifest.json"
+  install -Dm644 packaging/omarchy-shell-hermes/BarWidget.qml \
+    "$pkgdir/usr/share/hermes-gpui/omarchy-shell-hermes/BarWidget.qml"
+}

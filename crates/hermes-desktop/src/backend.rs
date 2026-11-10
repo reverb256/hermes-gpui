@@ -155,6 +155,13 @@ pub enum BackendEvent {
     Attached {
         name: String,
     },
+    /// A fresh `omarchy capture screenshot` file, ready to attach.
+    Captured {
+        path: PathBuf,
+    },
+    /// OCR text from `omarchy capture text`, for the composer.
+    CapturedText(String),
+    CaptureFailed(String),
     Spoken,
     SpeakFailed(String),
     Media {
@@ -370,6 +377,10 @@ pub enum Command {
         session_id: Option<String>,
     },
     Attach(PathBuf),
+    /// Attach a screenshot taken with `omarchy capture screenshot`.
+    CaptureScreenshot,
+    /// Insert OCR text from `omarchy capture text` into the composer.
+    CaptureText,
     LoadMedia(String),
     Speak {
         text: String,
@@ -698,6 +709,7 @@ fn offline_event(command: Command) -> BackendEvent {
         Command::LoadUsage { .. } => BackendEvent::UsageFailed(message),
         Command::LoadMemory => BackendEvent::MemoryFailed(message),
         Command::LoadMemoryConfig { .. } => BackendEvent::MemoryConfigFailed(message),
+        Command::CaptureScreenshot | Command::CaptureText => BackendEvent::CaptureFailed(message),
         _ => BackendEvent::Error(message),
     }
 }
@@ -851,6 +863,26 @@ async fn worker(
                                 }
                                 Err(message) => {
                                     let _ = events.send(BackendEvent::SpeakFailed(message));
+                                }
+                            }
+                        }
+                        Command::CaptureScreenshot => {
+                            match crate::omarchy::screenshot().await {
+                                Ok(path) => {
+                                    let _ = events.send(BackendEvent::Captured { path });
+                                }
+                                Err(message) => {
+                                    let _ = events.send(BackendEvent::CaptureFailed(message));
+                                }
+                            }
+                        }
+                        Command::CaptureText => {
+                            match crate::omarchy::capture_text().await {
+                                Ok(text) => {
+                                    let _ = events.send(BackendEvent::CapturedText(text));
+                                }
+                                Err(message) => {
+                                    let _ = events.send(BackendEvent::CaptureFailed(message));
                                 }
                             }
                         }

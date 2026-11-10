@@ -9,9 +9,11 @@ mod memory;
 mod moa;
 mod models;
 mod oauth;
+mod omarchy;
 mod sessions;
 mod settings;
 mod skills;
+mod status;
 mod theme;
 mod transcript;
 mod tray;
@@ -32,6 +34,34 @@ fn main() {
         .init();
 
     let host = HostConfig::from_env();
+    let args: Vec<String> = std::env::args().collect();
+
+    // Read-only snapshot for the Omarchy bar widget.
+    if args.iter().any(|arg| arg == "--status-json")
+        || (args.get(1).is_some_and(|arg| arg == "status")
+            && args.iter().any(|arg| arg == "--json"))
+    {
+        println!("{}", status::read_json());
+        return;
+    }
+
+    // Install the `theme-set` hook that repaints without waiting for a poll.
+    if args.iter().any(|arg| arg == "--install-omarchy-hooks") {
+        match omarchy::install_hooks() {
+            Ok(path) => println!("installed {}", path.display()),
+            Err(message) => {
+                eprintln!("cannot install Omarchy hooks: {message}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Local facts for support requests; no host contact.
+    if args.iter().any(|arg| arg == "--diagnostics") {
+        println!("{}", omarchy::diagnostics());
+        return;
+    }
 
     // Headless verification: REST, WS handshake, session creation, then exit.
     if std::env::args().any(|arg| arg == "--probe") {

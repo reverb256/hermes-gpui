@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes
+GenericName=AI agent client
+Comment=Native GPUI client for a Hermes agent host
+Exec=hermes-desktop
+TryExec=hermes-desktop
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;
+Keywords=agent;ai;chat;kanban;assistant;
+StartupNotify=true
+StartupWMClass=hermes-desktop
+SingleMainWindow=true

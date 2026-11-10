@@ -22,6 +22,34 @@ plugins inside that process. Hyprland configuration is Lua under
 | Clipboard | GPUI clipboard (Wayland data device) | copy reply, paste in editors |
 | Dictation | External Superwhisper; the app never captures audio | README |
 
+## Implemented in the client
+
+| Surface | Where | Behaviour |
+| --- | --- | --- |
+| Theme palette | `theme.rs` | `colors.toml` mapped onto semantic tokens, checked for contrast |
+| Theme changes | `theme.rs`, `omarchy.rs` | polls `theme.generation`; `--install-omarchy-hooks` drops a `theme-set` hook that touches a marker and forces the next poll to reload |
+| Shell metrics | `theme.rs` | `shell.toml` `[bar] size-horizontal` and `[font] base-size`, reported by `--diagnostics` |
+| Notifications | `omarchy.rs` | turn completion and approvals via `omarchy-notification-send`, `--replace-id` collapse, click `--toggle`, “Remind in 15” action |
+| Bar widget | `packaging/omarchy-shell-hermes/` | `bar-widget` plugin that reads `hermes-desktop status --json`; click toggles, middle click refreshes |
+| Status channel | `status.rs` | atomic snapshot at `$XDG_CACHE_HOME/hermes-gpui/status.json` (connection, streaming, approvals, last reply) |
+| Capture | `app.rs`, `omarchy.rs` | “▣ Shot” attaches `omarchy capture screenshot`; “T Text” OCRs with `omarchy capture text` into the composer |
+| Launch | `ipc.rs`, `packaging/` | `--toggle` single instance, `.desktop` entry, `PKGBUILD` installing binary, entry and widget |
+| Diagnostics | `main.rs` | `--diagnostics` prints Omarchy version, theme, metrics, tools, cache and socket paths |
+
+Install the pieces:
+
+```bash
+hermes-desktop --install-omarchy-hooks      # theme-set hook
+hermes-desktop status --json                # what the bar widget reads
+hermes-desktop --diagnostics                # support information
+install -d ~/.config/omarchy/plugins/io.github.hermes.gpui
+cp packaging/omarchy-shell-hermes/* ~/.config/omarchy/plugins/io.github.hermes.gpui/
+omarchy plugin validate ~/.config/omarchy/plugins/io.github.hermes.gpui
+```
+
+The widget is third-party Quickshell code, so it is unsandboxed and must be
+enabled by the user (`omarchy plugin enable io.github.hermes.gpui`).
+
 ## Conventions to hook into (and what to change)
 
 ### 1. Launch and focus: use Omarchy's helper, not a custom socket

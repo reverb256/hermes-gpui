@@ -82,13 +82,14 @@ Details and commands in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 
 | Item | Status |
 | --- | --- |
-| Theme following (`colors.toml`, semantic tokens, 2 s refresh) | Implemented; `shell.toml` fonts and event-driven `theme-set` hook remain |
+| Theme following (`colors.toml`, semantic tokens, `theme.generation`, `shell.toml` metrics, `theme-set` hook) | Implemented; hook installs with `--install-omarchy-hooks` |
 | Single instance, `--toggle`, tray show/quit | Implemented |
-| `omarchy-notification-send` on turn completion with click-to-focus, `--replace-id` collapsing and `--action` approval buttons | Not started |
-| `omarchy-shell` bar widget (state, approvals, last reply panel); evaluate joining `omarchy.agents` first | Not started |
-| `omarchy-launch-or-focus` binding documented and tested | Not started |
-| Screenshot attachment via `omarchy capture`; OCR prompt via `omarchy capture text` | Not started |
+| `omarchy-notification-send` on turn completion and approvals, click-to-focus, `--replace-id` collapsing, reminder action | Implemented (approval cards notify with Open + Remind; no in-notification Approve) |
+| `omarchy-shell` bar widget reading `status --json` (state, approvals, tooltip) | Implemented in `packaging/omarchy-shell-hermes`; joining `omarchy.agents` not attempted |
+| `omarchy-launch-or-focus` binding, `.desktop` entry and PKGBUILD | Implemented: entry + PKGBUILD ship in `packaging/`; binding documented, not yet run on a live bar |
+| Screenshot attachment via `omarchy capture`; OCR prompt via `omarchy capture text` | Implemented as composer actions “▣ Shot” and “T Text” |
 | Superwhisper-aware composer affordance | Not started (dictation itself is Superwhisper's) |
+| `--diagnostics`, `status --json`, `--install-omarchy-hooks` | Implemented |
 
 ## Host-agent extensions (`hermes-agent`)
 

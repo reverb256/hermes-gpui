@@ -106,6 +106,9 @@ pub struct HermesApp {
     voice_status: Option<String>,
     focus: FocusHandle,
     focused: bool,
+    /// True while the window has focus; completion notifications only fire
+    /// when it does not. Refreshed by `pump_presence` and on IPC show/hide.
+    window_active: bool,
     scroll: ScrollHandle,
     tray: TrayStatus,
     tray_state: (bool, String),
@@ -195,6 +198,7 @@ impl HermesApp {
             voice_status: None,
             focus: cx.focus_handle(),
             focused: false,
+            window_active: true,
             scroll: ScrollHandle::new(),
             tray,
             tray_state: (false, String::new()),
@@ -244,6 +248,7 @@ impl HermesApp {
 
         app.pump(events, cx);
         app.pump_tray(cx);
+        app.pump_presence(cx);
         app.pump_theme(cx);
         app.pump_ipc(cx);
         app.pump_oauth(cx);
@@ -323,6 +328,27 @@ impl HermesApp {
                 }
                 if this.update(cx, |app, cx| app.sync_tray(cx)).is_err() {
                     return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Track window focus so a finished turn only interrupts when the user is
+    /// looking somewhere else.
+    fn pump_presence(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                if this
+                    .update_in(cx, |app, window, _cx| {
+                        app.window_active = window.is_window_active();
+                    })
+                    .is_err()
+                {
+                    break;
                 }
             }
         })
@@ -431,6 +457,7 @@ impl HermesApp {
                 if state == ConnectionState::Closed {
                     self.busy = false;
                 }
+                self.publish_status();
             }
             BackendEvent::Profiles(profiles) => self.profiles = profiles,
             BackendEvent::ActiveProfile(active) => self.active = Some(active),
@@ -453,8 +480,24 @@ impl HermesApp {
                 append_streaming(&mut self.lines, Role::Reasoning, &text);
                 self.scroll.scroll_to_bottom();
             }
-            BackendEvent::MessageStart => self.busy = true,
-            BackendEvent::MessageComplete => self.busy = false,
+            BackendEvent::MessageStart => {
+                self.busy = true;
+                self.publish_status();
+            }
+            BackendEvent::MessageComplete => {
+                self.busy = false;
+                if !self.window_active {
+                    let summary = self
+                        .lines
+                        .iter()
+                        .rev()
+                        .find(|line| line.role == Role::Assistant && !line.text.trim().is_empty())
+                        .map(|line| clip(&line.text, 120))
+                        .unwrap_or_else(|| "reply ready".into());
+                    crate::omarchy::notify_turn(&summary);
+                }
+                self.publish_status();
+            }
             BackendEvent::ToolActivity(text) | BackendEvent::Notice(text) => {
                 self.lines.push(Line::new(Role::System, text));
                 self.scroll.scroll_to_bottom();
@@ -467,10 +510,19 @@ impl HermesApp {
                 self.scroll.scroll_to_bottom();
             }
             BackendEvent::Approval(request) => {
+                if !self.window_active {
+                    let summary = if request.description.trim().is_empty() {
+                        request.command.clone()
+                    } else {
+                        request.description.clone()
+                    };
+                    crate::omarchy::notify_approval(&summary);
+                }
                 self.cards.push(Card {
                     id: request.id.clone(),
                     kind: CardKind::Approval(request),
                 });
+                self.publish_status();
             }
             BackendEvent::Clarify(request) => {
                 self.cards.push(Card {
@@ -863,6 +915,35 @@ impl HermesApp {
                 self.vault.status = Some(text.clone());
                 self.inspector.status = Some(text);
             }
+            BackendEvent::Captured { path } => {
+                self.lines.push(Line::new(
+                    Role::System,
+                    format!("screenshot {}", path.display()),
+                ));
+                self.backend.send(Command::Attach(path));
+                self.scroll.scroll_to_bottom();
+                self.publish_status();
+            }
+            BackendEvent::CapturedText(text) => {
+                let mut next = self.composer.clone();
+                if !next.is_empty() && !next.ends_with(' ') {
+                    next.push(' ');
+                }
+                next.push_str(&text);
+                self.composer = next.clone();
+                self.composer_input
+                    .update(cx, |input, cx| input.emplace(&next, cx));
+                self.refresh_mention();
+                self.scroll.scroll_to_bottom();
+                self.publish_status();
+            }
+            BackendEvent::CaptureFailed(message) => {
+                self.error = Some(message.clone());
+                self.lines
+                    .push(Line::new(Role::System, format!("⚠ {message}")));
+                self.scroll.scroll_to_bottom();
+                self.publish_status();
+            }
             BackendEvent::Attached { name } => {
                 self.attachments.push(name.clone());
                 self.lines
@@ -1247,6 +1328,7 @@ impl HermesApp {
         self.busy = false;
         self.palette = Palette::default();
         self.mention = Mention::default();
+        self.publish_status();
         cx.notify();
     }
 
@@ -1264,6 +1346,53 @@ impl HermesApp {
             }
             None => self.voice_status = Some("no assistant reply to speak".into()),
         }
+        cx.notify();
+    }
+
+    /// Publish the snapshot the Omarchy bar widget reads.
+    fn publish_status(&self) {
+        let last_reply = self
+            .lines
+            .iter()
+            .rev()
+            .find(|line| line.role == Role::Assistant && !line.text.trim().is_empty())
+            .map(|line| clip(&line.text, 160));
+        crate::status::publish(&crate::status::Snapshot {
+            host: self.host.base_url.clone(),
+            profile: self.profile_name(),
+            connected: self.connection == ConnectionState::Open,
+            busy: self.busy,
+            approvals: self.cards.len(),
+            session: self.session_id.clone(),
+            last_reply,
+        });
+    }
+
+    /// Attach a region screenshot through Omarchy's capture path.
+    fn capture_screen(&mut self, cx: &mut Context<Self>) {
+        if !crate::omarchy::has("omarchy") {
+            self.error = Some("omarchy is not on PATH, so capture is unavailable".into());
+            cx.notify();
+            return;
+        }
+        self.lines
+            .push(Line::new(Role::System, "select a region to attach…"));
+        self.backend.send(Command::CaptureScreenshot);
+        self.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// OCR a region and put the text in the composer for review.
+    fn capture_text(&mut self, cx: &mut Context<Self>) {
+        if !crate::omarchy::has("omarchy") {
+            self.error = Some("omarchy is not on PATH, so OCR is unavailable".into());
+            cx.notify();
+            return;
+        }
+        self.lines
+            .push(Line::new(Role::System, "select a region to read…"));
+        self.backend.send(Command::CaptureText);
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -8003,6 +8132,32 @@ impl HermesApp {
             )
             .child(
                 div()
+                    .id("capture-screen")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.capture_screen(cx)))
+                    .child("▣ Shot"),
+            )
+            .child(
+                div()
+                    .id("capture-text")
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(text_muted()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(surface())).text_color(rgb(text())))
+                    .on_click(cx.listener(|this, _event, _window, cx| this.capture_text(cx)))
+                    .child("T Text"),
+            )
+            .child(
+                div()
                     .id("speak-last")
                     .px_2()
                     .py_1()
@@ -11404,6 +11559,7 @@ impl Render for HermesApp {
             self.composer_input.focus_handle(cx)
         };
         self.focused = target.is_focused(window);
+        self.window_active = window.is_window_active();
         if !self.focused {
             window.focus(&target, cx);
         }
