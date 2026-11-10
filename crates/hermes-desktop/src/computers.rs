@@ -31,6 +31,10 @@ pub const TERMINAL_ROWS: u16 = 32;
 /// full-screen program reflows to it) and clamped to what the protocol allows.
 pub const TERMINAL_CELL_WIDTH: f32 = 7.2;
 pub const TERMINAL_CELL_HEIGHT: f32 = 15.0;
+/// Padding inside the output area (each side). The measured bounds of a
+/// padded element include this, so it is subtracted before the conversion to
+/// cells; without that the reported grid is roughly two columns too wide.
+pub const TERMINAL_OUTPUT_PADDING: f32 = 8.0;
 /// Clamp reported geometry to the range `PtySpec::validate` accepts, keeping a
 /// panel that is collapsed or absurdly large from proposing a rejected grid.
 pub const TERMINAL_MIN_COLS: u16 = 20;
@@ -103,6 +107,9 @@ enum Esc {
 
 /// Convert a measured output area in pixels to terminal columns and rows.
 ///
+/// `width_px` and `height_px` are the area text can occupy: callers subtract
+/// `TERMINAL_OUTPUT_PADDING` first, because layout bounds include it.
+///
 /// A zero, negative or non-finite measurement (an element that has not been
 /// laid out yet) keeps the default geometry instead of reporting a 1×1 grid.
 pub fn geometry_for(width_px: f32, height_px: f32) -> (u16, u16) {
@@ -115,6 +122,15 @@ pub fn geometry_for(width_px: f32, height_px: f32) -> (u16, u16) {
         cols.clamp(TERMINAL_MIN_COLS as f32, TERMINAL_MAX_COLS as f32) as u16,
         rows.clamp(TERMINAL_MIN_ROWS as f32, TERMINAL_MAX_ROWS as f32) as u16,
     )
+}
+
+/// Convert the layout bounds of the padded output area to a grid.
+///
+/// `on_children_prepainted` reports the border box, so the padding has to come
+/// off before cells are counted (`TERMINAL_OUTPUT_PADDING`, both sides).
+pub fn geometry_for_bounds(width_px: f32, height_px: f32) -> (u16, u16) {
+    let inset = 2.0 * TERMINAL_OUTPUT_PADDING;
+    geometry_for(width_px - inset, height_px - inset)
 }
 
 /// A live (or finished) terminal on a computer.
@@ -460,7 +476,7 @@ impl Computers {
     /// Convert the panel's measured pixel size into a grid, clamped to the
     /// protocol's bounds, and remember it for the next terminal.
     pub fn measured(&mut self, width_px: f32, height_px: f32) {
-        self.terminal_geometry = geometry_for(width_px, height_px);
+        self.terminal_geometry = geometry_for_bounds(width_px, height_px);
     }
 
     /// The resize frame to send for the live terminal, if the measured grid
@@ -906,6 +922,10 @@ mod tests {
     fn measured_geometry_is_clamped_and_used_for_the_next_terminal() {
         // 900×480 px at the panel's cell size is 125 columns and 32 rows.
         assert_eq!(geometry_for(900.0, 480.0), (125, 32));
+        // Layout bounds are the padded box: 8 px each side is not text, so the
+        // same panel measures 884×464 of content — two fewer columns, one fewer row.
+        assert_eq!(geometry_for_bounds(900.0, 480.0), (122, 30));
+        assert_eq!(geometry_for_bounds(900.0, 480.0), geometry_for(884.0, 464.0));
         // An unlaid-out element keeps the defaults rather than reporting 1×1.
         assert_eq!(geometry_for(0.0, 0.0), (TERMINAL_COLS, TERMINAL_ROWS));
         assert_eq!(geometry_for(f32::NAN, 10.0), (TERMINAL_COLS, TERMINAL_ROWS));
@@ -927,13 +947,13 @@ mod tests {
         assert_eq!(
             request.pty,
             Some(PtySpec {
-                cols: 125,
-                rows: 32
+                cols: 122,
+                rows: 30
             })
         );
         page.terminal_started(&request);
         let terminal = page.terminal.as_ref().expect("terminal panel");
-        assert_eq!((terminal.cols, terminal.rows), (125, 32));
+        assert_eq!((terminal.cols, terminal.rows), (122, 30));
     }
 
     #[test]
@@ -943,12 +963,17 @@ mod tests {
         let id = request.id.clone();
         page.terminal_started(&request);
 
-        // The opening geometry is already on the node, so nothing is sent.
-        page.measured(TERMINAL_COLS as f32 * TERMINAL_CELL_WIDTH, 480.0);
+        // The opening geometry is already on the node, so nothing is sent
+        // (the bounds carry the output area's padding on top of the cells).
+        let inset = 2.0 * TERMINAL_OUTPUT_PADDING;
+        page.measured(
+            TERMINAL_COLS as f32 * TERMINAL_CELL_WIDTH + inset,
+            TERMINAL_ROWS as f32 * TERMINAL_CELL_HEIGHT + inset,
+        );
         assert_eq!(page.resize_terminal(), None);
 
         page.measured(900.0, 480.0);
-        assert_eq!(page.resize_terminal(), Some((id.clone(), 125, 32)));
+        assert_eq!(page.resize_terminal(), Some((id.clone(), 122, 30)));
         // The same size again does not repeat the frame.
         page.measured(900.0, 480.0);
         assert_eq!(page.resize_terminal(), None);
@@ -957,7 +982,7 @@ mod tests {
         page.measured(1440.0, 720.0);
         assert_eq!(page.resize_terminal(), None);
         let terminal = page.terminal.as_ref().expect("terminal panel");
-        assert_eq!((terminal.cols, terminal.rows), (125, 32));
+        assert_eq!((terminal.cols, terminal.rows), (122, 30));
     }
 
     #[test]
