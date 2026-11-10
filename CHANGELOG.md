@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
 - On-demand inline host-local PNG, JPEG and WebP image previews.
 - Single-instance `--toggle` IPC, tray show action and a Hyprland binding example.
 - MoA preset editor, cron job controls and provider OAuth accounts page.
-- MCP OAuth browser hand-off and Kanban board selection, task title editing,
+- MCP OAuth browser hand-off and Kanban board selection, creation and renaming, task title editing,
   confirmed deletion, status transitions and triage task creation.
 - Streamed Markdown block and inline styling and a GPUI multiline composer with
   selection, editing shortcuts, IME support and an accessible label.

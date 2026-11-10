@@ -125,6 +125,9 @@ pub struct HermesApp {
     kanban_status: Option<String>,
     kanban_draft: Option<String>,
     kanban_creating: bool,
+    kanban_board_draft: Option<String>,
+    kanban_board_renaming: Option<String>,
+    kanban_board_saving: bool,
     memory: Memory,
     moa: Moa,
     automations: Automations,
@@ -198,6 +201,9 @@ impl HermesApp {
             kanban_status: None,
             kanban_draft: None,
             kanban_creating: false,
+            kanban_board_draft: None,
+            kanban_board_renaming: None,
+            kanban_board_saving: false,
             memory: Memory::default(),
             moa: Moa::default(),
             automations: Automations::default(),
@@ -485,6 +491,23 @@ impl HermesApp {
                 self.kanban_creating = false;
                 self.kanban_draft = None;
                 self.kanban_editing = None;
+            }
+            BackendEvent::KanbanBoardSaved { slug, created } => {
+                self.kanban_board_saving = false;
+                self.kanban_board_draft = None;
+                self.kanban_board_renaming = None;
+                if created {
+                    self.kanban_selected = Some(slug.clone());
+                    self.kanban = None;
+                    self.kanban_status = Some("Loading board…".into());
+                    self.backend.send(Command::LoadKanban { board: Some(slug) });
+                } else {
+                    self.kanban_status = Some("Board renamed.".into());
+                }
+            }
+            BackendEvent::KanbanBoardSaveFailed(message) => {
+                self.kanban_board_saving = false;
+                self.kanban_status = Some(message);
             }
             BackendEvent::KanbanFailed(message) => {
                 self.kanban_creating = false;
@@ -1503,6 +1526,39 @@ impl HermesApp {
     }
 
     fn route_kanban_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.kanban_board_draft.is_some() {
+            if self.kanban_board_saving {
+                return true;
+            }
+            let key = &event.keystroke;
+            if key.modifiers.control || key.modifiers.platform {
+                if key.key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        self.kanban_board_draft
+                            .as_mut()
+                            .unwrap()
+                            .push_str(&text.replace(['\n', '\r'], " "));
+                    }
+                    cx.notify();
+                    return true;
+                }
+                return false;
+            }
+            match key.key.as_str() {
+                "enter" => self.save_kanban_board(cx),
+                "backspace" => {
+                    self.kanban_board_draft.as_mut().unwrap().pop();
+                }
+                "space" => self.kanban_board_draft.as_mut().unwrap().push(' '),
+                _ => {
+                    if let Some(text) = key.key_char.as_deref() {
+                        self.kanban_board_draft.as_mut().unwrap().push_str(text);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
         if self.kanban_creating && self.kanban_draft.is_some() {
             return true;
         }
@@ -1534,6 +1590,36 @@ impl HermesApp {
         }
         cx.notify();
         true
+    }
+
+    fn save_kanban_board(&mut self, cx: &mut Context<Self>) {
+        if self.kanban_board_saving {
+            return;
+        }
+        let Some(value) = self
+            .kanban_board_draft
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            self.kanban_status = Some("Enter a board name first.".into());
+            cx.notify();
+            return;
+        };
+        let command = if let Some(slug) = &self.kanban_board_renaming {
+            Command::RenameKanbanBoard {
+                slug: slug.clone(),
+                name: value.to_string(),
+            }
+        } else {
+            Command::CreateKanbanBoard {
+                slug: value.to_string(),
+            }
+        };
+        self.kanban_board_saving = true;
+        self.kanban_status = Some("Saving board…".into());
+        self.backend.send(command);
+        cx.notify();
     }
 
     fn create_kanban_task(&mut self, cx: &mut Context<Self>) {
@@ -1582,6 +1668,66 @@ impl HermesApp {
             .py_3();
         if let Some(status) = &self.kanban_status {
             list = list.child(self.note(status));
+        }
+        if let Some(draft) = &self.kanban_board_draft {
+            list = list.child(self.note(if self.kanban_board_renaming.is_some() {
+                "Board display name (slug stays unchanged)"
+            } else {
+                "New board slug (host validates it; existing slugs open the existing board)"
+            }));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(bg()))
+                            .border_1()
+                            .border_color(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(text()))
+                            .child(SharedString::from(format!("{draft}▌"))),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-board-save")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(accent()))
+                            .text_sm()
+                            .text_color(rgb(bg()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.save_kanban_board(cx)))
+                            .child(if self.kanban_board_saving {
+                                "Saving…"
+                            } else {
+                                "Save"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-board-cancel")
+                            .px_2()
+                            .py_2()
+                            .text_sm()
+                            .text_color(rgb(text_muted()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_board_saving {
+                                    this.kanban_board_draft = None;
+                                    this.kanban_board_renaming = None;
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Cancel"),
+                    ),
+            );
         }
         if let Some(draft) = &self.kanban_draft {
             list = list.child(
@@ -1661,7 +1807,10 @@ impl HermesApp {
                         })
                         .when(!selected, |v| v.bg(rgb(surface())).text_color(rgb(text())))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.kanban_creating {
+                            if !this.kanban_creating
+                                && !this.kanban_board_saving
+                                && this.kanban_board_draft.is_none()
+                            {
                                 this.kanban_selected = Some(slug.clone());
                                 this.kanban = None;
                                 this.kanban_draft = None;
@@ -1770,7 +1919,10 @@ impl HermesApp {
                                 .text_color(rgb(accent()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.kanban_creating {
+                                    if !this.kanban_creating
+                                        && !this.kanban_board_saving
+                                        && this.kanban_board_draft.is_none()
+                                    {
                                         this.kanban_editing = Some(edit_id.clone());
                                         this.kanban_draft = Some(edit_title.clone());
                                         this.kanban_delete = None;
@@ -1828,6 +1980,53 @@ impl HermesApp {
                     ))
                     .child(
                         div()
+                            .id("kanban-create-board")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(text()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_board_saving
+                                    && !this.kanban_creating
+                                    && this.kanban_draft.is_none()
+                                {
+                                    this.kanban_board_renaming = None;
+                                    this.kanban_board_draft = Some(String::new());
+                                    cx.notify();
+                                }
+                            }))
+                            .child("＋ Board"),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-rename-board")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(surface()))
+                            .text_xs()
+                            .text_color(rgb(text()))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.kanban_board_saving
+                                    && !this.kanban_creating
+                                    && this.kanban_draft.is_none()
+                                    && let Some(board) = this.kanban_boards.iter().find(|board| {
+                                        Some(&board.slug) == this.kanban_selected.as_ref()
+                                    })
+                                {
+                                    this.kanban_board_renaming = Some(board.slug.clone());
+                                    this.kanban_board_draft = Some(board.name.clone());
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Rename board"),
+                    )
+                    .child(
+                        div()
                             .id("kanban-create")
                             .px_3()
                             .py_1()
@@ -1837,7 +2036,11 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.kanban_draft.is_none() {
+                                if this.kanban_draft.is_none()
+                                    && this.kanban_board_draft.is_none()
+                                    && !this.kanban_board_saving
+                                {
+                                    this.kanban_editing = None;
                                     this.kanban_draft = Some(String::new());
                                 }
                                 cx.notify();

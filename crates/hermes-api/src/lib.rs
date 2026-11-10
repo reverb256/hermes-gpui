@@ -935,6 +935,11 @@ pub struct KanbanBoardInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanBoardResponse {
+    pub board: KanbanBoardInfo,
+}
+
 fn kanban_scoped_path(path: &str, board: Option<&str>) -> String {
     match board.filter(|value| !value.is_empty()) {
         Some(board) => format!("{path}?board={}", percent_encode(board)),
@@ -1444,6 +1449,45 @@ impl RestClient {
     /// List boards without changing the host's active board.
     pub async fn kanban_boards(&self) -> Result<KanbanBoards, ApiError> {
         self.get("/api/plugins/kanban/boards").await
+    }
+
+    /// Create a board without switching the host's active board.
+    pub async fn create_kanban_board(&self, slug: &str) -> Result<KanbanBoardResponse, ApiError> {
+        let path = "/api/plugins/kanban/boards";
+        let response = self
+            .authed(reqwest::Method::POST, path)
+            .json(&serde_json::json!({"slug": slug, "switch": false}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.into(),
+                source,
+            })?;
+        let value = self.decode_response(path, response).await?;
+        serde_json::from_value(value).map_err(|source| ApiError::Decode {
+            path: path.into(),
+            source,
+        })
+    }
+
+    /// Rename a board without changing its immutable slug or other metadata.
+    pub async fn rename_kanban_board(
+        &self,
+        slug: &str,
+        name: &str,
+    ) -> Result<KanbanBoardResponse, ApiError> {
+        let path = format!("/api/plugins/kanban/boards/{}", percent_encode(slug));
+        let response = self
+            .authed(reqwest::Method::PATCH, &path)
+            .json(&serde_json::json!({"name": name}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        let value = self.decode_response(&path, response).await?;
+        serde_json::from_value(value).map_err(|source| ApiError::Decode { path, source })
     }
 
     /// Read a board from the optional Kanban plugin.
@@ -2411,6 +2455,8 @@ mod tests {
                 r#"{"columns":[{"name":"todo","tasks":[{"id":"t/1","title":"Test","status":"todo","assignee":null}]}]}"#,
                 r#"{"ok":true}"#,
                 r#"{"task":{"id":"new"}}"#,
+                r#"{"board":{"slug":"work","name":"Work"},"current":"default"}"#,
+                r#"{"board":{"slug":"work","name":"Renamed"}}"#,
                 r#"{"flow_id":"f/1","server_name":"demo","status":"authorization_required","authorization_url":"https://example.com/auth","error":null}"#,
                 r#"{"flow_id":"f/1","server_name":"demo","status":"approved","authorization_url":null,"error":null}"#,
                 r#"{"ok":true}"#,
@@ -2467,6 +2513,13 @@ mod tests {
             .create_kanban_task("New task", Some("work & ops"))
             .await
             .unwrap();
+        let created = client.create_kanban_board("work").await.unwrap();
+        assert_eq!(created.board.slug, "work");
+        let renamed = client
+            .rename_kanban_board("work/name", "Renamed")
+            .await
+            .unwrap();
+        assert_eq!(renamed.board.name, "Renamed");
         let flow = client
             .start_mcp_oauth("demo/name", Some("work profile"))
             .await
@@ -2485,13 +2538,21 @@ mod tests {
         );
         assert!(requests[1].ends_with(r#"{"status":"ready"}"#));
         assert!(
-            requests[3]
+            requests[5]
                 .starts_with("POST /api/mcp/servers/demo%2Fname/auth?profile=work%20profile ")
         );
         assert!(requests[2].starts_with("POST /api/plugins/kanban/tasks?board=work%20%26%20ops "));
         assert!(requests[2].ends_with(r#"{"title":"New task","triage":true}"#));
-        assert!(requests[4].starts_with("GET /api/mcp/oauth/flows/f%2F1 "));
-        assert!(requests[5].starts_with("DELETE /api/mcp/oauth/flows/f%2F1 "));
+        assert!(requests[3].starts_with("POST /api/plugins/kanban/boards "));
+        let create_body = requests[3].split("\r\n\r\n").nth(1).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(create_body).unwrap(),
+            serde_json::json!({"slug":"work","switch":false})
+        );
+        assert!(requests[4].starts_with("PATCH /api/plugins/kanban/boards/work%2Fname "));
+        assert!(requests[4].ends_with(r#"{"name":"Renamed"}"#));
+        assert!(requests[6].starts_with("GET /api/mcp/oauth/flows/f%2F1 "));
+        assert!(requests[7].starts_with("DELETE /api/mcp/oauth/flows/f%2F1 "));
         assert!(requests.iter().all(|request| {
             request
                 .to_ascii_lowercase()

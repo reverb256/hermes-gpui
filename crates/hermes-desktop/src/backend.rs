@@ -253,6 +253,11 @@ pub enum BackendEvent {
         data: hermes_api::KanbanBoard,
     },
     KanbanCreated,
+    KanbanBoardSaved {
+        slug: String,
+        created: bool,
+    },
+    KanbanBoardSaveFailed(String),
     KanbanFailed(String),
     McpToggled {
         name: String,
@@ -424,6 +429,13 @@ pub enum Command {
     },
     LoadMcp,
     LoadKanbanBoards,
+    CreateKanbanBoard {
+        slug: String,
+    },
+    RenameKanbanBoard {
+        slug: String,
+        name: String,
+    },
     LoadKanban {
         board: Option<String>,
     },
@@ -539,6 +551,9 @@ fn offline_event(command: Command) -> BackendEvent {
         Command::LoadSessions => BackendEvent::SessionsFailed(message),
         Command::LoadMcp => BackendEvent::McpFailed(message),
         Command::LoadMcpCatalog => BackendEvent::McpCatalogFailed(message),
+        Command::CreateKanbanBoard { .. } | Command::RenameKanbanBoard { .. } => {
+            BackendEvent::KanbanBoardSaveFailed(message)
+        }
         Command::LoadKanbanBoards
         | Command::LoadKanban { .. }
         | Command::CreateKanbanTask { .. }
@@ -915,6 +930,30 @@ async fn worker(
                                         "reset {target}: {message}"
                                     )));
                                 }
+                            }
+                        }
+                        Command::CreateKanbanBoard { slug } => {
+                            match rest.create_kanban_board(&slug).await {
+                                Ok(result) => {
+                                    let _ = events.send(BackendEvent::KanbanBoardSaved { slug: result.board.slug, created: true });
+                                    match rest.kanban_boards().await {
+                                        Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
+                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                }
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanBoardSaveFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                            }
+                        }
+                        Command::RenameKanbanBoard { slug, name } => {
+                            match rest.rename_kanban_board(&slug, &name).await {
+                                Ok(result) => {
+                                    let _ = events.send(BackendEvent::KanbanBoardSaved { slug: result.board.slug, created: false });
+                                    match rest.kanban_boards().await {
+                                        Ok(boards) => { let _ = events.send(BackendEvent::KanbanBoards(boards)); }
+                                        Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
+                                    }
+                                }
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanBoardSaveFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
                             }
                         }
                         Command::LoadKanbanBoards => match rest.kanban_boards().await {
@@ -2167,6 +2206,19 @@ mod tests {
 
     #[test]
     fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::CreateKanbanBoard {
+                slug: "work".into()
+            }),
+            BackendEvent::KanbanBoardSaveFailed(_)
+        ));
+        assert!(matches!(
+            offline_event(Command::RenameKanbanBoard {
+                slug: "work".into(),
+                name: "Work".into()
+            }),
+            BackendEvent::KanbanBoardSaveFailed(_)
+        ));
         assert!(matches!(
             offline_event(Command::LoadKanban { board: None }),
             BackendEvent::KanbanFailed(_)

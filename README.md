@@ -204,8 +204,9 @@ this flow has not yet been verified against a live OAuth provider.
 **Kanban** reads boards from the optional Hermes Kanban plugin. Board selection
 is local and requests are scoped to the selected board. It supports basic,
 host-validated status transitions, title-only triage task creation and editing,
-and two-click task deletion. Board administration, comments, attachments and
-drag-and-drop are not yet implemented.
+and two-click task deletion. Boards can be created and their display names edited
+without changing the host's active board. Other board settings, archive, comments,
+attachments and drag-and-drop are not yet implemented.
 
 **Memory** lists discovered providers, opens a schema-driven **Configure** form
 for every declared provider (text, secret, boolean, number, select and JSON
