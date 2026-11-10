@@ -205,7 +205,8 @@ this flow has not yet been verified against a live OAuth provider.
 is local and requests are scoped to the selected board. It supports basic,
 host-validated status transitions, title-only triage task creation and editing,
 and two-click task deletion. Boards can be created and their display names edited
-without changing the host's active board. Other board settings, archive, comments,
+without changing the host's active board. Task details show descriptions, summaries,
+results and comments, and allow adding comments. Other board settings, archive,
 attachments and drag-and-drop are not yet implemented.
 
 **Memory** lists discovered providers, opens a schema-driven **Configure** form

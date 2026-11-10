@@ -94,11 +94,11 @@ product work beyond this GPUI repository.
 | Event-triggered routines and webhook triggers | Missing; requires host event integration and access controls. |
 | Routine ownership, shared access and approvals | Missing; backend permissions and audit needed. |
 | Kanban current board and basic status transitions | Partial: `/api/plugins/kanban/board` and task PATCH; optional plugin required; transitions are host-validated. |
-| Kanban create/edit/delete tasks, comments and attachments | Partial: title-only creation in triage, title editing and confirmed deletion; comments, attachments and other fields remain. |
+| Kanban create/edit/delete tasks, comments and attachments | Partial: title-only triage creation, title editing, confirmed deletion and comments; attachments and other task fields remain. |
 | Board selection, creation, settings, archive and deletion | Partial: local selection, creation and display-name editing; other settings, archive and deletion remain. |
 | Drag/drop, filters, search, bulk actions and live updates | Missing; plugin supports events; define conflict/error behavior. |
 | Assignees, dependencies, scheduling, review and workers | Missing beyond simple next-status action; respect transition constraints. |
-| Task detail, diagnostics, runs, logs and recovery | Missing; plugin routes exist; inspect permission and data sensitivity. |
+| Task detail, diagnostics, runs, logs and recovery | Partial: description, assignee, summary, result and comments; diagnostics, runs, logs and recovery remain. |
 | Dispatch, model overrides, decomposition and estimates | Missing; these can start work or incur model costs, so explicit action and disclosure are required. |
 | Kanban project/worktree settings, orchestration and notifications | Missing; plugin exposes routes, but backend availability varies. |
 

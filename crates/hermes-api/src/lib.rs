@@ -967,6 +967,30 @@ pub struct KanbanTask {
     pub assignee: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanTaskDetail {
+    pub task: KanbanDetailedTask,
+    #[serde(default)]
+    pub comments: Vec<KanbanComment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanDetailedTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub body: Option<String>,
+    pub assignee: Option<String>,
+    pub latest_summary: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KanbanComment {
+    pub author: Option<String>,
+    pub body: String,
+}
+
 /// State of a host-managed MCP OAuth authorization.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpOAuthFlow {
@@ -1494,6 +1518,42 @@ impl RestClient {
     pub async fn kanban_board(&self, board: Option<&str>) -> Result<KanbanBoard, ApiError> {
         self.get(&kanban_scoped_path("/api/plugins/kanban/board", board))
             .await
+    }
+
+    /// Read task details and comments from the selected board.
+    pub async fn kanban_task(
+        &self,
+        id: &str,
+        board: Option<&str>,
+    ) -> Result<KanbanTaskDetail, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/tasks/{}", percent_encode(id)),
+            board,
+        );
+        self.get(&path).await
+    }
+
+    /// Add a comment to a task on the selected board.
+    pub async fn comment_kanban_task(
+        &self,
+        id: &str,
+        body: &str,
+        board: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let path = kanban_scoped_path(
+            &format!("/api/plugins/kanban/tasks/{}/comments", percent_encode(id)),
+            board,
+        );
+        let response = self
+            .authed(reqwest::Method::POST, &path)
+            .json(&serde_json::json!({"body": body}))
+            .send()
+            .await
+            .map_err(|source| ApiError::Transport {
+                path: path.clone(),
+                source,
+            })?;
+        self.decode_response(&path, response).await
     }
 
     /// Create a task in triage, without assigning or dispatching a worker.
@@ -2457,6 +2517,8 @@ mod tests {
                 r#"{"task":{"id":"new"}}"#,
                 r#"{"board":{"slug":"work","name":"Work"},"current":"default"}"#,
                 r#"{"board":{"slug":"work","name":"Renamed"}}"#,
+                r#"{"task":{"id":"t/1","title":"Test","status":"todo","body":"Detail","assignee":null,"latest_summary":null,"result":null},"comments":[{"author":"dashboard","body":"Hello"}]}"#,
+                r#"{"ok":true}"#,
                 r#"{"flow_id":"f/1","server_name":"demo","status":"authorization_required","authorization_url":"https://example.com/auth","error":null}"#,
                 r#"{"flow_id":"f/1","server_name":"demo","status":"approved","authorization_url":null,"error":null}"#,
                 r#"{"ok":true}"#,
@@ -2520,6 +2582,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(renamed.board.name, "Renamed");
+        let detail = client.kanban_task("t/1", Some("work & ops")).await.unwrap();
+        assert_eq!(detail.task.body.as_deref(), Some("Detail"));
+        assert_eq!(detail.comments[0].body, "Hello");
+        client
+            .comment_kanban_task("t/1", "A comment", Some("work & ops"))
+            .await
+            .unwrap();
         let flow = client
             .start_mcp_oauth("demo/name", Some("work profile"))
             .await
@@ -2538,7 +2607,7 @@ mod tests {
         );
         assert!(requests[1].ends_with(r#"{"status":"ready"}"#));
         assert!(
-            requests[5]
+            requests[7]
                 .starts_with("POST /api/mcp/servers/demo%2Fname/auth?profile=work%20profile ")
         );
         assert!(requests[2].starts_with("POST /api/plugins/kanban/tasks?board=work%20%26%20ops "));
@@ -2551,8 +2620,17 @@ mod tests {
         );
         assert!(requests[4].starts_with("PATCH /api/plugins/kanban/boards/work%2Fname "));
         assert!(requests[4].ends_with(r#"{"name":"Renamed"}"#));
-        assert!(requests[6].starts_with("GET /api/mcp/oauth/flows/f%2F1 "));
-        assert!(requests[7].starts_with("DELETE /api/mcp/oauth/flows/f%2F1 "));
+        assert!(
+            requests[5].starts_with("GET /api/plugins/kanban/tasks/t%2F1?board=work%20%26%20ops ")
+        );
+        assert!(
+            requests[6].starts_with(
+                "POST /api/plugins/kanban/tasks/t%2F1/comments?board=work%20%26%20ops "
+            )
+        );
+        assert!(requests[6].ends_with(r#"{"body":"A comment"}"#));
+        assert!(requests[8].starts_with("GET /api/mcp/oauth/flows/f%2F1 "));
+        assert!(requests[9].starts_with("DELETE /api/mcp/oauth/flows/f%2F1 "));
         assert!(requests.iter().all(|request| {
             request
                 .to_ascii_lowercase()

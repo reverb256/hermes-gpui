@@ -258,6 +258,25 @@ pub enum BackendEvent {
         created: bool,
     },
     KanbanBoardSaveFailed(String),
+    KanbanDetail {
+        board: String,
+        id: String,
+        detail: hermes_api::KanbanTaskDetail,
+    },
+    KanbanDetailFailed {
+        board: String,
+        id: String,
+        message: String,
+    },
+    KanbanCommentSaved {
+        board: String,
+        id: String,
+    },
+    KanbanCommentFailed {
+        board: String,
+        id: String,
+        message: String,
+    },
     KanbanFailed(String),
     McpToggled {
         name: String,
@@ -439,6 +458,15 @@ pub enum Command {
     LoadKanban {
         board: Option<String>,
     },
+    LoadKanbanTask {
+        board: String,
+        id: String,
+    },
+    CommentKanbanTask {
+        board: String,
+        id: String,
+        body: String,
+    },
     CreateKanbanTask {
         title: String,
         board: Option<String>,
@@ -551,6 +579,12 @@ fn offline_event(command: Command) -> BackendEvent {
         Command::LoadSessions => BackendEvent::SessionsFailed(message),
         Command::LoadMcp => BackendEvent::McpFailed(message),
         Command::LoadMcpCatalog => BackendEvent::McpCatalogFailed(message),
+        Command::LoadKanbanTask { board, id } => {
+            BackendEvent::KanbanDetailFailed { board, id, message }
+        }
+        Command::CommentKanbanTask { board, id, .. } => {
+            BackendEvent::KanbanCommentFailed { board, id, message }
+        }
         Command::CreateKanbanBoard { .. } | Command::RenameKanbanBoard { .. } => {
             BackendEvent::KanbanBoardSaveFailed(message)
         }
@@ -964,6 +998,18 @@ async fn worker(
                             Ok(data) => { let _ = events.send(BackendEvent::Kanban { board, data }); }
                             Err(err) => { let _ = events.send(BackendEvent::KanbanFailed(err.detail().unwrap_or_else(|| err.to_string()))); }
                         },
+                        Command::LoadKanbanTask { board, id } => {
+                            match rest.kanban_task(&id, Some(&board)).await {
+                                Ok(detail) => { let _ = events.send(BackendEvent::KanbanDetail { board, id, detail }); }
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanDetailFailed { board, id, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
+                            }
+                        }
+                        Command::CommentKanbanTask { board, id, body } => {
+                            match rest.comment_kanban_task(&id, &body, Some(&board)).await {
+                                Ok(_) => { let _ = events.send(BackendEvent::KanbanCommentSaved { board, id }); }
+                                Err(err) => { let _ = events.send(BackendEvent::KanbanCommentFailed { board, id, message: err.detail().unwrap_or_else(|| err.to_string()) }); }
+                            }
+                        }
                         Command::CreateKanbanTask { title, board } => {
                             match rest.create_kanban_task(&title, board.as_deref()).await {
                                 Ok(_) => {
@@ -2206,6 +2252,21 @@ mod tests {
 
     #[test]
     fn offline_actions_fail_without_being_replayed() {
+        assert!(matches!(
+            offline_event(Command::LoadKanbanTask {
+                board: "work".into(),
+                id: "task".into()
+            }),
+            BackendEvent::KanbanDetailFailed { .. }
+        ));
+        assert!(matches!(
+            offline_event(Command::CommentKanbanTask {
+                board: "work".into(),
+                id: "task".into(),
+                body: "hello".into()
+            }),
+            BackendEvent::KanbanCommentFailed { .. }
+        ));
         assert!(matches!(
             offline_event(Command::CreateKanbanBoard {
                 slug: "work".into()
