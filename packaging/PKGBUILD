@@ -9,7 +9,9 @@ url="https://github.com/reverb256/hermes-gpui"
 license=('MIT')
 depends=('gcc-libs' 'glibc' 'wayland')
 makedepends=('cargo' 'rust')
-options=('!lto')
+# Cargo strips debuginfo in the release profile, so a -debug split has nothing
+# to index (gdb-add-index errors); skip it and build the single package.
+options=('!lto' '!debug')
 source=()
 sha256sums=()
 
