@@ -240,117 +240,21 @@ fn load_palette() -> Palette {
     }
 }
 
-/// Omarchy's shell type scale and bar cross-axis size, read from `shell.toml`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ShellMetrics {
-    /// Height of a top/bottom bar at the theme's base font size.
-    pub bar_height: f32,
-    /// Rem root for the shell's type scale.
-    pub font_size: f32,
-    /// Whether the shell scales those sizes with the font root.
-    pub scale_with_font: bool,
-}
-
-impl Default for ShellMetrics {
-    fn default() -> Self {
-        Self {
-            bar_height: 26.,
-            font_size: 12.,
-            scale_with_font: true,
-        }
-    }
-}
-
-pub fn shell_metrics() -> ShellMetrics {
-    let Some(dir) = theme_dir() else {
-        return ShellMetrics::default();
-    };
-    match std::fs::read_to_string(dir.join("shell.toml")) {
-        Ok(text) => metrics_from_str(&text),
-        Err(_) => ShellMetrics::default(),
-    }
-}
-
-fn metrics_from_str(text: &str) -> ShellMetrics {
-    let mut metrics = ShellMetrics::default();
-    let mut section = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line.trim_matches(['[', ']']).to_string();
-            continue;
-        }
-        let Some((key, raw)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        let raw = raw.trim().trim_matches('"');
-        match (section.as_str(), key) {
-            ("bar", "size-horizontal") => {
-                if let Ok(value) = raw.parse() {
-                    metrics.bar_height = value;
-                }
-            }
-            ("bar", "scale-with-font") => metrics.scale_with_font = raw == "true",
-            ("font", "base-size") => {
-                if let Ok(value) = raw.parse() {
-                    metrics.font_size = value;
-                }
-            }
-            _ => {}
-        }
-    }
-    metrics
-}
-
-/// Omarchy's current theme directory, if one is configured.
-fn theme_dir() -> Option<PathBuf> {
-    if let Some(override_path) = std::env::var_os("HERMES_OMARCHY_THEME") {
-        let path = PathBuf::from(override_path);
-        return if path.is_dir() {
-            Some(path)
-        } else {
-            path.parent().map(PathBuf::from)
-        };
-    }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
-        })?;
-    Some(state.join("omarchy/current/theme"))
-}
-
-/// The active theme's name, for display beside the palette.
-pub fn active_theme_name() -> Option<String> {
-    let dir = theme_dir()?;
-    std::fs::read_to_string(dir.join("..").join("theme.name"))
-        .or_else(|_| std::fs::read_to_string(dir.join("theme.name")))
-        .ok()
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-}
-
-/// `HERMES_OMARCHY_THEME` may point at a theme directory or a colors.toml;
-/// otherwise use Omarchy's state path. A missing file means the fallback.
+/// Omarchy's active theme palette. A missing file means the fallback.
 fn theme_path() -> Option<PathBuf> {
-    if let Some(override_path) = std::env::var_os("HERMES_OMARCHY_THEME") {
-        let path = PathBuf::from(override_path);
-        return Some(if path.is_dir() {
-            path.join("colors.toml")
-        } else {
-            path
-        });
-    }
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
     Some(state.join("omarchy/current/theme/colors.toml"))
+}
+
+/// Where the palette is read from, for diagnostics.
+pub fn theme_source() -> String {
+    theme_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".into())
 }
 
 fn palette_from_str(text: &str) -> Palette {
@@ -527,17 +431,6 @@ bright_blue = "#c2c4f0"
             assert!(contrast(palette.text_muted, plane) >= 4.5);
             assert!(contrast(palette.text_dim, plane) >= 3.0);
         }
-    }
-
-    #[test]
-    fn shell_metrics_follow_the_theme_scale() {
-        let metrics = metrics_from_str(
-            "[bar]\nsize-horizontal = 30\nscale-with-font = false\n[font]\nbase-size = 14\n",
-        );
-        assert_eq!(metrics.bar_height, 30.);
-        assert_eq!(metrics.font_size, 14.);
-        assert!(!metrics.scale_with_font);
-        assert_eq!(metrics_from_str("nonsense"), ShellMetrics::default());
     }
 
     #[test]

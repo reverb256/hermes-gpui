@@ -82,7 +82,7 @@ Details and commands in [`docs/OMARCHY.md`](docs/OMARCHY.md).
 
 | Item | Status |
 | --- | --- |
-| Theme following (`colors.toml`, semantic tokens, `theme.generation`, `shell.toml` metrics, `theme-set` hook) | Implemented; hook installs with `--install-omarchy-hooks` |
+| Theme following: Omarchy `colors.toml` only, semantic tokens, 2 s refresh, `theme-set` hook | Implemented; no other theme sources or overrides |
 | Single instance, `--toggle`, tray show/quit | Implemented |
 | `omarchy-notification-send` on turn completion and approvals, click-to-focus, `--replace-id` collapsing, reminder action | Implemented (approval cards notify with Open + Remind; no in-notification Approve) |
 | `omarchy-shell` bar widget reading `status --json` (state, approvals, tooltip) | Implemented in `packaging/omarchy-shell-hermes`; joining `omarchy.agents` not attempted |
@@ -129,5 +129,7 @@ Sequenced so the client and platform can consume them:
   run, or drill) in the same commit as the status change.
 - Scope changes go in [`docs/FULL-PARITY-PLAN.md`](docs/FULL-PARITY-PLAN.md) and
   are reflected here in the same commit.
+- Per-feature client status lives in [`PARITY.md`](PARITY.md); this roadmap
+  tracks phases and only the client work that blocks one.
 - No parity claim is made in `README.md` until `PARITY.md` and this roadmap
   agree.

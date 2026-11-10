@@ -271,15 +271,7 @@ pub fn diagnostics() -> String {
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "not detected".into());
     lines.push(format!("omarchy: {version}"));
-    lines.push(format!(
-        "theme: {}",
-        crate::theme::active_theme_name().unwrap_or_else(|| "none".into())
-    ));
-    let metrics = crate::theme::shell_metrics();
-    lines.push(format!(
-        "shell: bar {} px, font {} px, scale-with-font {}",
-        metrics.bar_height, metrics.font_size, metrics.scale_with_font
-    ));
+    lines.push(format!("theme: {}", crate::theme::theme_source()));
     for binary in [
         "omarchy-notification-send",
         "wl-paste",

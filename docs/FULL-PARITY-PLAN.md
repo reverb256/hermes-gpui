@@ -333,16 +333,10 @@ client can own:
 
 ## 6. Architecture decisions to lock before Phase 1
 
-| Decision | Recommendation | Why |
-| --- | --- | --- |
-| Control plane language | Rust (axum + sqlx) or Python/FastAPI reusing `hermes_cli` models | Rust matches the client's rigor; Python reuses host schema code. Pick one now; both must share the OpenAPI contract |
-| Datastore | Postgres for control plane; SQLite stays host-local; S3-compatible for transcripts/artifacts | Tenancy and audit need relational constraints; host keeps its simple local model |
-| Sandbox isolation | Container + gVisor first, microVM (Firecracker/Kata) for Enterprise | Shipping speed now, stronger isolation where it is sold |
-| Screen transport | CDP screencast first, WebRTC later | Cheapest path to "watch any screen"; WebRTC when latency demands it |
-| Events | NATS JetStream | Durable, simple, good k8s story |
-| Auth | OIDC + device pairing; SCIM/SAML for Enterprise | Standard, testable, enterprise-ready |
-| Sync | Append-only transcripts with sequence numbers; LWW settings | Avoids merge trees for the common case |
-| Billing | Usage events → ledger → monthly invoice | Auditable, reconcilable |
+Decisions live in the records, not here: locked choices in
+[ADR-0001–0005](adr/README.md), and the still-open stack, transport, auth and
+billing choices in [ADR-0006](adr/0006-control-plane-stack.md).
+
 
 ## 7. Phased roadmap
 

@@ -1,6 +1,5 @@
 # Maintainer: Hermes GPUI maintainers <maintainers@example.invalid>
 # Build from a checkout:  makepkg -si
-# Build from a release:   makepkg -si --pkgver   (needs pkgver to be set)
 pkgname=hermes-gpui
 pkgver=0.1.0
 pkgrel=1
@@ -14,21 +13,13 @@ options=('!lto')
 source=()
 sha256sums=()
 
-prepare() {
-  # A source build runs makepkg from the repository root.
-  if [[ ! -f "$srcdir/hermes-gpui/Cargo.toml" ]]; then
-    mkdir -p "$srcdir/hermes-gpui"
-    cp -r "$startdir"/Cargo.toml "$startdir"/Cargo.lock "$startdir"/crates "$startdir"/rust-toolchain.toml "$srcdir/hermes-gpui/"
-  fi
-}
-
 build() {
-  cd "$srcdir/hermes-gpui"
+  cd "$startdir"
   cargo build --release --locked
 }
 
 package() {
-  cd "$srcdir/hermes-gpui"
+  cd "$startdir"
   install -Dm755 target/release/hermes-desktop "$pkgdir/usr/bin/hermes-desktop"
   install -Dm644 packaging/hermes-gpui.desktop "$pkgdir/usr/share/applications/hermes-gpui.desktop"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

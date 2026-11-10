@@ -80,8 +80,8 @@ On Omarchy the palette comes from the active theme at
 accent, selection, muted and the named ANSI colours fill the semantic tokens;
 missing keys fall back to the bundled palette. The file is re-read at most every
 two seconds, so `omarchy theme set …` is reflected without restarting the app.
-Set `HERMES_OMARCHY_THEME` to a theme directory or a `colors.toml` path to test a
-specific palette.
+There is no separate client theme: the palette is Omarchy's, and a missing
+`colors.toml` falls back to the bundled palette.
 
 ### Omarchy launcher
 

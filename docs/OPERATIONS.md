@@ -28,7 +28,6 @@ The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
 | `HERMES_PROFILE` | host active profile | profile the chat is scoped to |
 | `HERMES_TTS_URL` | unset | base URL of a `voice-models` service (`POST /tts`) |
 | `HERMES_TTS_VOICE` | `en-US-AndrewNeural` | TTS voice name |
-| `HERMES_OMARCHY_THEME` | live Omarchy theme | theme directory or `colors.toml` path to test a palette |
 | `HERMES_GPUI_SOCKET` | `$XDG_RUNTIME_DIR/hermes-gpui-$USER.sock` | single-instance IPC path |
 | `HERMES_OPEN_INSPECTOR` | unset | open the bot inspector at launch (`1`) |
 | `HERMES_INSPECTOR_TAB` | `look` | `look`, `connectors`, `secrets` |
@@ -124,7 +123,7 @@ Record which gates were run when reporting a change; "compiles" is not a gate.
 | Speak does nothing | no `HERMES_TTS_URL`, service down, or no player | `command -v pw-play paplay aplay`; service health |
 | Dictation types nowhere | Superwhisper shortcut/paste target | `superwhisper status`; see [`OMARCHY.md`](OMARCHY.md) |
 | Second launch opens nothing | stale socket or unresponsive primary | remove the socket only when no instance runs; `HERMES_GPUI_SOCKET` to isolate |
-| Theme does not follow | Omarchy palette path changed | `HERMES_OMARCHY_THEME` override; see [`OMARCHY.md`](OMARCHY.md) |
+| Theme does not follow | Omarchy palette path changed or the file is missing | check `~/.local/state/omarchy/current/theme/colors.toml`; see [`OMARCHY.md`](OMARCHY.md) |
 | Blank/black window on Wayland | GPU/driver or compositor mismatch | run under X11 to compare; `RUST_LOG=debug` |
 
 Logs go to stderr; run from a terminal or capture the journal when using a user

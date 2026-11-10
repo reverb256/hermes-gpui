@@ -17,9 +17,9 @@ or fight them with its own tray, notifier and theme reader.
 
 Integrate only through Omarchy's documented, user-facing surfaces:
 
-- **Theme**: read the generated palette (with `HERMES_OMARCHY_THEME` override);
-  add a `theme-set` hook so updates are event-driven; keep polling as fallback
-  for other desktops.
+- **Theme**: read Omarchy's generated palette and nothing else — no separate
+  client theme and no other sources; add a `theme-set` hook so updates are
+  event-driven, with the 2 s poll as the fallback.
 - **Notifications**: use `omarchy-notification-send` (never raw `notify-send`),
   with `--app-name`, urgency, argv `--exec` and click routing to focus/toggle.
 - **Bar**: ship an `omarchy-shell` plugin (`bar-widget` kind) rather than a

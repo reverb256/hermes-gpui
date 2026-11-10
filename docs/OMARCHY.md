@@ -14,7 +14,7 @@ plugins inside that process. Hyprland configuration is Lua under
 
 | Capability | Mechanism used today | Where |
 | --- | --- | --- |
-| Theme | Reads `~/.local/state/omarchy/current/theme/colors.toml` (fallback `~/.config/omarchy/current/theme/`), re-reads at most every 2 s, maps to semantic tokens; `HERMES_OMARCHY_THEME` overrides | `crates/hermes-desktop/src/theme.rs` |
+| Theme | Reads Omarchy's `~/.local/state/omarchy/current/theme/colors.toml` only, maps it to semantic tokens, re-reads at most every 2 s | `crates/hermes-desktop/src/theme.rs` |
 | Single instance | Own IPC socket + `--toggle`; second launch forwards Show/Toggle | `ipc.rs`, `main.rs` |
 | Tray | `ksni` tray with Show/Quit; window close hides to tray so turns keep streaming | `tray.rs` |
 | Audio playback | `pw-play` → `paplay` → `aplay`, first on `PATH` | `voice.rs` |
@@ -27,8 +27,7 @@ plugins inside that process. Hyprland configuration is Lua under
 | Surface | Where | Behaviour |
 | --- | --- | --- |
 | Theme palette | `theme.rs` | `colors.toml` mapped onto semantic tokens, checked for contrast |
-| Theme changes | `theme.rs`, `omarchy.rs` | polls `theme.generation`; `--install-omarchy-hooks` drops a `theme-set` hook that touches a marker and forces the next poll to reload |
-| Shell metrics | `theme.rs` | `shell.toml` `[bar] size-horizontal` and `[font] base-size`, reported by `--diagnostics` |
+| Theme changes | `theme.rs`, `omarchy.rs` | 2 s poll of Omarchy's `colors.toml`; `--install-omarchy-hooks` drops a `theme-set` hook that forces an immediate reload |
 | Notifications | `omarchy.rs` | turn completion and approvals via `omarchy-notification-send`, `--replace-id` collapse, click `--toggle`, “Remind in 15” action |
 | Bar widget | `packaging/omarchy-shell-hermes/` | `bar-widget` plugin that reads `hermes-desktop status --json`; click toggles, middle click refreshes |
 | Status channel | `status.rs` | atomic snapshot at `$XDG_CACHE_HOME/hermes-gpui/status.json` (connection, streaming, approvals, last reply) |

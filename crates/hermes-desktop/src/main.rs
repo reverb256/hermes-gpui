@@ -3,6 +3,7 @@ mod backend;
 mod cron;
 mod inspector;
 mod ipc;
+mod kanban;
 mod keys;
 mod mcp;
 mod memory;

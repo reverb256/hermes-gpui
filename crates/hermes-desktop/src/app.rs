@@ -22,6 +22,7 @@ use crate::backend::{
 };
 use crate::cron::{self, Automations};
 use crate::inspector::{self, Field, Inspector, Tab};
+use crate::kanban::Kanban;
 use crate::keys::{self, Action, Chord, Focus};
 use crate::mcp::{self, Mcp};
 use crate::memory::{self, Memory};
@@ -120,29 +121,7 @@ pub struct HermesApp {
     sessions: Sessions,
     skills: Skills,
     mcp: Mcp,
-    kanban: Option<hermes_api::KanbanBoard>,
-    kanban_boards: Vec<hermes_api::KanbanBoardInfo>,
-    kanban_selected: Option<String>,
-    kanban_editing: Option<String>,
-    kanban_delete: Option<String>,
-    kanban_status: Option<String>,
-    kanban_draft: Option<String>,
-    kanban_creating: bool,
-    kanban_board_draft: Option<String>,
-    kanban_board_renaming: Option<String>,
-    kanban_board_saving: bool,
-    /// Board removal awaiting a second click: `(slug, hard_delete)`.
-    kanban_board_remove: Option<(String, bool)>,
-    kanban_detail_target: Option<(String, String)>,
-    kanban_detail: Option<hermes_api::KanbanTaskDetail>,
-    kanban_comment_draft: Option<String>,
-    kanban_comment_saving: bool,
-    kanban_attachment_delete: Option<i64>,
-    kanban_attachment_busy: bool,
-    kanban_body_draft: Option<String>,
-    kanban_assignee_draft: Option<String>,
-    kanban_priority_draft: Option<String>,
-    kanban_detail_saving: bool,
+    kanban: Kanban,
     memory: Memory,
     moa: Moa,
     automations: Automations,
@@ -209,28 +188,7 @@ impl HermesApp {
             sessions: Sessions::default(),
             skills: Skills::default(),
             mcp: Mcp::default(),
-            kanban: None,
-            kanban_boards: Vec::new(),
-            kanban_selected: None,
-            kanban_editing: None,
-            kanban_delete: None,
-            kanban_status: None,
-            kanban_draft: None,
-            kanban_creating: false,
-            kanban_board_draft: None,
-            kanban_board_renaming: None,
-            kanban_board_saving: false,
-            kanban_board_remove: None,
-            kanban_detail_target: None,
-            kanban_detail: None,
-            kanban_comment_draft: None,
-            kanban_comment_saving: false,
-            kanban_attachment_delete: None,
-            kanban_attachment_busy: false,
-            kanban_body_draft: None,
-            kanban_assignee_draft: None,
-            kanban_priority_draft: None,
-            kanban_detail_saving: false,
+            kanban: Kanban::default(),
             memory: Memory::default(),
             moa: Moa::default(),
             automations: Automations::default(),
@@ -548,116 +506,116 @@ impl HermesApp {
             BackendEvent::Mcp(rows) => self.mcp.loaded(rows),
             BackendEvent::McpFailed(message) => self.mcp.failed(message),
             BackendEvent::KanbanBoards(boards) => {
-                self.kanban_boards = boards.boards;
-                if self.kanban_selected.is_none() {
-                    self.kanban_selected = Some(boards.current);
+                self.kanban.boards = boards.boards;
+                if self.kanban.selected.is_none() {
+                    self.kanban.selected = Some(boards.current);
                     self.backend.send(Command::LoadKanban {
-                        board: self.kanban_selected.clone(),
+                        board: self.kanban.selected.clone(),
                     });
                 }
             }
             BackendEvent::Kanban { board, data } => {
-                if board == self.kanban_selected {
-                    self.kanban = Some(data);
-                    self.kanban_status = None;
+                if board == self.kanban.selected {
+                    self.kanban.board = Some(data);
+                    self.kanban.status = None;
                 }
             }
             BackendEvent::KanbanCreated => {
-                self.kanban_creating = false;
-                self.kanban_draft = None;
-                self.kanban_editing = None;
+                self.kanban.creating = false;
+                self.kanban.draft = None;
+                self.kanban.editing = None;
             }
             BackendEvent::KanbanBoardSaved { slug, created } => {
-                self.kanban_board_saving = false;
-                self.kanban_board_draft = None;
-                self.kanban_board_renaming = None;
+                self.kanban.board_saving = false;
+                self.kanban.board_draft = None;
+                self.kanban.board_renaming = None;
                 if created {
-                    self.kanban_selected = Some(slug.clone());
-                    self.kanban = None;
-                    self.kanban_status = Some("Loading board…".into());
+                    self.kanban.selected = Some(slug.clone());
+                    self.kanban.board = None;
+                    self.kanban.status = Some("Loading board…".into());
                     self.backend.send(Command::LoadKanban { board: Some(slug) });
                 } else {
-                    self.kanban_status = Some("Board renamed.".into());
+                    self.kanban.status = Some("Board renamed.".into());
                 }
             }
             BackendEvent::KanbanBoardSaveFailed(message) => {
-                self.kanban_board_saving = false;
-                self.kanban_status = Some(message);
+                self.kanban.board_saving = false;
+                self.kanban.status = Some(message);
             }
             BackendEvent::KanbanBoardRemoved { slug, hard } => {
-                self.kanban_board_remove = None;
-                self.kanban_detail_target = None;
-                self.kanban_detail = None;
-                self.kanban_body_draft = None;
-                self.kanban_assignee_draft = None;
-                self.kanban_priority_draft = None;
-                if self.kanban_selected.as_deref() == Some(slug.as_str()) {
-                    self.kanban_selected = None;
-                    self.kanban = None;
+                self.kanban.board_remove = None;
+                self.kanban.detail_target = None;
+                self.kanban.detail = None;
+                self.kanban.body_draft = None;
+                self.kanban.assignee_draft = None;
+                self.kanban.priority_draft = None;
+                if self.kanban.selected.as_deref() == Some(slug.as_str()) {
+                    self.kanban.selected = None;
+                    self.kanban.board = None;
                 }
-                self.kanban_status = Some(if hard {
+                self.kanban.status = Some(if hard {
                     format!("Board {slug} deleted.")
                 } else {
                     format!("Board {slug} archived.")
                 });
             }
             BackendEvent::KanbanBoardRemoveFailed(message) => {
-                self.kanban_board_remove = None;
-                self.kanban_status = Some(message);
+                self.kanban.board_remove = None;
+                self.kanban.status = Some(message);
             }
             BackendEvent::KanbanDetail { board, id, detail } => {
-                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
-                    self.kanban_detail = Some(detail);
-                    self.kanban_status = None;
+                if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban.detail = Some(detail);
+                    self.kanban.status = None;
                 }
             }
             BackendEvent::KanbanDetailFailed { board, id, message } => {
-                self.kanban_detail_saving = false;
-                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
-                    self.kanban_status = Some(message);
+                self.kanban.detail_saving = false;
+                if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban.status = Some(message);
                 }
             }
             BackendEvent::KanbanDetailSaved { board, id, detail } => {
-                self.kanban_detail_saving = false;
-                self.kanban_body_draft = None;
-                self.kanban_assignee_draft = None;
-                self.kanban_priority_draft = None;
-                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
-                    self.kanban_detail = Some(detail);
-                    self.kanban_status = Some("Task updated.".into());
+                self.kanban.detail_saving = false;
+                self.kanban.body_draft = None;
+                self.kanban.assignee_draft = None;
+                self.kanban.priority_draft = None;
+                if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban.detail = Some(detail);
+                    self.kanban.status = Some("Task updated.".into());
                 }
             }
             BackendEvent::KanbanCommentSaved { board, id } => {
-                self.kanban_comment_saving = false;
-                if self.kanban_detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
-                    self.kanban_comment_draft = None;
-                    self.kanban_status = Some("Comment saved; refreshing…".into());
+                self.kanban.comment_saving = false;
+                if self.kanban.detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
+                    self.kanban.comment_draft = None;
+                    self.kanban.status = Some("Comment saved; refreshing…".into());
                     self.backend.send(Command::LoadKanbanTask { board, id });
                 }
             }
             BackendEvent::KanbanCommentFailed { board, id, message } => {
-                self.kanban_comment_saving = false;
-                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
-                    self.kanban_status = Some(message);
+                self.kanban.comment_saving = false;
+                if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban.status = Some(message);
                 }
             }
             BackendEvent::KanbanAttachmentUploaded { board, id } => {
-                self.kanban_attachment_busy = false;
-                if self.kanban_detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
-                    self.kanban_status = Some("Attachment uploaded; refreshing…".into());
+                self.kanban.attachment_busy = false;
+                if self.kanban.detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
+                    self.kanban.status = Some("Attachment uploaded; refreshing…".into());
                     self.backend.send(Command::LoadKanbanTask { board, id });
                 }
             }
             BackendEvent::KanbanAttachmentDeleted { board, id } => {
-                self.kanban_attachment_busy = false;
-                self.kanban_attachment_delete = None;
-                if self.kanban_detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
-                    self.kanban_status = Some("Attachment removed; refreshing…".into());
+                self.kanban.attachment_busy = false;
+                self.kanban.attachment_delete = None;
+                if self.kanban.detail_target.as_ref() == Some(&(board.clone(), id.clone())) {
+                    self.kanban.status = Some("Attachment removed; refreshing…".into());
                     self.backend.send(Command::LoadKanbanTask { board, id });
                 }
             }
             BackendEvent::KanbanAttachmentDownloaded { filename, bytes } => {
-                self.kanban_attachment_busy = false;
+                self.kanban.attachment_busy = false;
                 cx.spawn(async move |this, cx| {
                     let picked = rfd::AsyncFileDialog::new()
                         .set_file_name(&filename)
@@ -674,7 +632,7 @@ impl HermesApp {
                         None => "Attachment save cancelled.".to_string(),
                     };
                     this.update(cx, |this, cx| {
-                        this.kanban_status = Some(message);
+                        this.kanban.status = Some(message);
                         cx.notify();
                     })
                     .ok();
@@ -682,15 +640,15 @@ impl HermesApp {
                 .detach();
             }
             BackendEvent::KanbanAttachmentFailed { board, id, message } => {
-                self.kanban_attachment_busy = false;
-                self.kanban_attachment_delete = None;
-                if self.kanban_detail_target.as_ref() == Some(&(board, id)) {
-                    self.kanban_status = Some(message);
+                self.kanban.attachment_busy = false;
+                self.kanban.attachment_delete = None;
+                if self.kanban.detail_target.as_ref() == Some(&(board, id)) {
+                    self.kanban.status = Some(message);
                 }
             }
             BackendEvent::KanbanFailed(message) => {
-                self.kanban_creating = false;
-                self.kanban_status = Some(message);
+                self.kanban.creating = false;
+                self.kanban.status = Some(message);
             }
             BackendEvent::McpOAuth(flow) => {
                 self.mcp.oauth_busy = false;
@@ -1781,35 +1739,35 @@ impl HermesApp {
 
     fn open_kanban(&mut self, cx: &mut Context<Self>) {
         self.settings.show(Section::Kanban);
-        self.kanban_status = Some("Loading board…".into());
+        self.kanban.status = Some("Loading board…".into());
         self.backend.send(Command::LoadKanbanBoards);
-        if self.kanban_selected.is_some() {
+        if self.kanban.selected.is_some() {
             self.backend.send(Command::LoadKanban {
-                board: self.kanban_selected.clone(),
+                board: self.kanban.selected.clone(),
             });
         }
         cx.notify();
     }
 
     fn route_kanban_typing(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        if self.kanban_priority_draft.is_some() {
-            if self.kanban_detail_saving {
+        if self.kanban.priority_draft.is_some() {
+            if self.kanban.detail_saving {
                 return true;
             }
             let key = &event.keystroke;
             match key.key.as_str() {
                 "escape" => {
-                    self.kanban_priority_draft = None;
+                    self.kanban.priority_draft = None;
                     cx.notify();
                     return true;
                 }
                 "enter" => self.save_kanban_priority(cx),
                 "backspace" => {
-                    self.kanban_priority_draft.as_mut().unwrap().pop();
+                    self.kanban.priority_draft.as_mut().unwrap().pop();
                 }
                 _ => {
                     if let Some(text) = key.key_char.as_deref()
-                        && let Some(draft) = self.kanban_priority_draft.as_mut()
+                        && let Some(draft) = self.kanban.priority_draft.as_mut()
                         && text.chars().all(|c| c.is_ascii_digit())
                         && draft.len() < 4
                     {
@@ -1820,68 +1778,68 @@ impl HermesApp {
             cx.notify();
             return true;
         }
-        if self.kanban_body_draft.is_some() {
-            if self.kanban_detail_saving {
+        if self.kanban.body_draft.is_some() {
+            if self.kanban.detail_saving {
                 return true;
             }
             let key = &event.keystroke;
             match key.key.as_str() {
                 "escape" => {
-                    self.kanban_body_draft = None;
+                    self.kanban.body_draft = None;
                     cx.notify();
                     return true;
                 }
                 "enter" if key.modifiers.control || key.modifiers.platform => {
                     self.save_kanban_body(cx)
                 }
-                "enter" => self.kanban_body_draft.as_mut().unwrap().push('\n'),
+                "enter" => self.kanban.body_draft.as_mut().unwrap().push('\n'),
                 "backspace" => {
-                    self.kanban_body_draft.as_mut().unwrap().pop();
+                    self.kanban.body_draft.as_mut().unwrap().pop();
                 }
-                "space" => self.kanban_body_draft.as_mut().unwrap().push(' '),
+                "space" => self.kanban.body_draft.as_mut().unwrap().push(' '),
                 _ => {
                     if let Some(text) = key.key_char.as_deref() {
-                        self.kanban_body_draft.as_mut().unwrap().push_str(text);
+                        self.kanban.body_draft.as_mut().unwrap().push_str(text);
                     }
                 }
             }
             cx.notify();
             return true;
         }
-        if self.kanban_assignee_draft.is_some() {
-            if self.kanban_detail_saving {
+        if self.kanban.assignee_draft.is_some() {
+            if self.kanban.detail_saving {
                 return true;
             }
             let key = &event.keystroke;
             match key.key.as_str() {
                 "escape" => {
-                    self.kanban_assignee_draft = None;
+                    self.kanban.assignee_draft = None;
                     cx.notify();
                     return true;
                 }
                 "enter" => self.save_kanban_assignee(cx),
                 "backspace" => {
-                    self.kanban_assignee_draft.as_mut().unwrap().pop();
+                    self.kanban.assignee_draft.as_mut().unwrap().pop();
                 }
-                "space" => self.kanban_assignee_draft.as_mut().unwrap().push(' '),
+                "space" => self.kanban.assignee_draft.as_mut().unwrap().push(' '),
                 _ => {
                     if let Some(text) = key.key_char.as_deref() {
-                        self.kanban_assignee_draft.as_mut().unwrap().push_str(text);
+                        self.kanban.assignee_draft.as_mut().unwrap().push_str(text);
                     }
                 }
             }
             cx.notify();
             return true;
         }
-        if self.kanban_comment_draft.is_some() {
-            if self.kanban_comment_saving {
+        if self.kanban.comment_draft.is_some() {
+            if self.kanban.comment_saving {
                 return true;
             }
             let key = &event.keystroke;
             if key.modifiers.control || key.modifiers.platform {
                 if key.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.kanban_comment_draft.as_mut().unwrap().push_str(&text);
+                        self.kanban.comment_draft.as_mut().unwrap().push_str(&text);
                     }
                     cx.notify();
                     return true;
@@ -1890,31 +1848,32 @@ impl HermesApp {
             }
             match key.key.as_str() {
                 "enter" if key.modifiers.shift => {
-                    self.kanban_comment_draft.as_mut().unwrap().push('\n')
+                    self.kanban.comment_draft.as_mut().unwrap().push('\n')
                 }
                 "enter" => self.submit_kanban_comment(cx),
                 "backspace" => {
-                    self.kanban_comment_draft.as_mut().unwrap().pop();
+                    self.kanban.comment_draft.as_mut().unwrap().pop();
                 }
-                "space" => self.kanban_comment_draft.as_mut().unwrap().push(' '),
+                "space" => self.kanban.comment_draft.as_mut().unwrap().push(' '),
                 _ => {
                     if let Some(text) = key.key_char.as_deref() {
-                        self.kanban_comment_draft.as_mut().unwrap().push_str(text);
+                        self.kanban.comment_draft.as_mut().unwrap().push_str(text);
                     }
                 }
             }
             cx.notify();
             return true;
         }
-        if self.kanban_board_draft.is_some() {
-            if self.kanban_board_saving {
+        if self.kanban.board_draft.is_some() {
+            if self.kanban.board_saving {
                 return true;
             }
             let key = &event.keystroke;
             if key.modifiers.control || key.modifiers.platform {
                 if key.key == "v" {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.kanban_board_draft
+                        self.kanban
+                            .board_draft
                             .as_mut()
                             .unwrap()
                             .push_str(&text.replace(['\n', '\r'], " "));
@@ -1927,22 +1886,22 @@ impl HermesApp {
             match key.key.as_str() {
                 "enter" => self.save_kanban_board(cx),
                 "backspace" => {
-                    self.kanban_board_draft.as_mut().unwrap().pop();
+                    self.kanban.board_draft.as_mut().unwrap().pop();
                 }
-                "space" => self.kanban_board_draft.as_mut().unwrap().push(' '),
+                "space" => self.kanban.board_draft.as_mut().unwrap().push(' '),
                 _ => {
                     if let Some(text) = key.key_char.as_deref() {
-                        self.kanban_board_draft.as_mut().unwrap().push_str(text);
+                        self.kanban.board_draft.as_mut().unwrap().push_str(text);
                     }
                 }
             }
             cx.notify();
             return true;
         }
-        if self.kanban_creating && self.kanban_draft.is_some() {
+        if self.kanban.creating && self.kanban.draft.is_some() {
             return true;
         }
-        let Some(draft) = self.kanban_draft.as_mut() else {
+        let Some(draft) = self.kanban.draft.as_mut() else {
             return false;
         };
         let key = &event.keystroke;
@@ -1973,18 +1932,18 @@ impl HermesApp {
     }
 
     fn save_kanban_body(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_detail_saving {
+        if self.kanban.detail_saving {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
-        let Some(body) = self.kanban_body_draft.as_deref() else {
+        let Some(body) = self.kanban.body_draft.as_deref() else {
             return;
         };
         let body = body.trim().to_string();
-        self.kanban_detail_saving = true;
-        self.kanban_status = Some("Saving description…".into());
+        self.kanban.detail_saving = true;
+        self.kanban.status = Some("Saving description…".into());
         self.backend.send(Command::UpdateKanbanDetail {
             board,
             id,
@@ -1994,19 +1953,19 @@ impl HermesApp {
     }
 
     fn save_kanban_assignee(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_detail_saving {
+        if self.kanban.detail_saving {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
-        let Some(assignee) = self.kanban_assignee_draft.as_deref() else {
+        let Some(assignee) = self.kanban.assignee_draft.as_deref() else {
             return;
         };
         // The host treats an empty assignee as "unassigned".
         let assignee = assignee.trim().to_string();
-        self.kanban_detail_saving = true;
-        self.kanban_status = Some("Saving assignee…".into());
+        self.kanban.detail_saving = true;
+        self.kanban.status = Some("Saving assignee…".into());
         self.backend.send(Command::UpdateKanbanDetail {
             board,
             id,
@@ -2016,22 +1975,22 @@ impl HermesApp {
     }
 
     fn save_kanban_priority(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_detail_saving {
+        if self.kanban.detail_saving {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
-        let Some(draft) = self.kanban_priority_draft.as_deref() else {
+        let Some(draft) = self.kanban.priority_draft.as_deref() else {
             return;
         };
         let Ok(priority) = draft.trim().parse::<i64>() else {
-            self.kanban_status = Some("Priority must be a whole number.".into());
+            self.kanban.status = Some("Priority must be a whole number.".into());
             cx.notify();
             return;
         };
-        self.kanban_detail_saving = true;
-        self.kanban_status = Some("Saving priority…".into());
+        self.kanban.detail_saving = true;
+        self.kanban.status = Some("Saving priority…".into());
         self.backend.send(Command::UpdateKanbanDetail {
             board,
             id,
@@ -2051,15 +2010,15 @@ impl HermesApp {
     }
 
     fn attach_kanban_file(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_attachment_busy {
+        if self.kanban.attachment_busy {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
         let backend = self.backend.clone();
-        self.kanban_attachment_busy = true;
-        self.kanban_status = Some("Choose a file to attach…".into());
+        self.kanban.attachment_busy = true;
+        self.kanban.status = Some("Choose a file to attach…".into());
         cx.spawn(async move |this, cx| {
             let picked = rfd::AsyncFileDialog::new().pick_file().await;
             match picked {
@@ -2070,15 +2029,15 @@ impl HermesApp {
                         path: file.path().to_path_buf(),
                     });
                     this.update(cx, |this, cx| {
-                        this.kanban_status = Some("Uploading attachment…".into());
+                        this.kanban.status = Some("Uploading attachment…".into());
                         cx.notify();
                     })
                     .ok();
                 }
                 None => {
                     this.update(cx, |this, cx| {
-                        this.kanban_attachment_busy = false;
-                        this.kanban_status = None;
+                        this.kanban.attachment_busy = false;
+                        this.kanban.status = None;
                         cx.notify();
                     })
                     .ok();
@@ -2090,14 +2049,14 @@ impl HermesApp {
     }
 
     fn save_kanban_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
-        if self.kanban_attachment_busy {
+        if self.kanban.attachment_busy {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
-        self.kanban_attachment_busy = true;
-        self.kanban_status = Some("Fetching attachment…".into());
+        self.kanban.attachment_busy = true;
+        self.kanban.status = Some("Fetching attachment…".into());
         self.backend.send(Command::DownloadKanbanAttachment {
             board,
             id,
@@ -2107,15 +2066,15 @@ impl HermesApp {
     }
 
     fn delete_kanban_attachment(&mut self, attachment_id: i64, cx: &mut Context<Self>) {
-        if self.kanban_attachment_busy {
+        if self.kanban.attachment_busy {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
-        self.kanban_attachment_busy = true;
-        self.kanban_attachment_delete = None;
-        self.kanban_status = Some("Removing attachment…".into());
+        self.kanban.attachment_busy = true;
+        self.kanban.attachment_delete = None;
+        self.kanban.status = Some("Removing attachment…".into());
         self.backend.send(Command::DeleteKanbanAttachment {
             board,
             id,
@@ -2125,19 +2084,20 @@ impl HermesApp {
     }
 
     fn submit_kanban_comment(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_comment_saving {
+        if self.kanban.comment_saving {
             return;
         }
-        let Some((board, id)) = self.kanban_detail_target.clone() else {
+        let Some((board, id)) = self.kanban.detail_target.clone() else {
             return;
         };
         let Some(body) = self
-            .kanban_comment_draft
+            .kanban
+            .comment_draft
             .as_deref()
             .map(str::trim)
             .filter(|body| !body.is_empty())
         else {
-            self.kanban_status = Some("Enter a comment first.".into());
+            self.kanban.status = Some("Enter a comment first.".into());
             cx.notify();
             return;
         };
@@ -2146,26 +2106,27 @@ impl HermesApp {
             id,
             body: body.to_string(),
         });
-        self.kanban_comment_saving = true;
-        self.kanban_status = Some("Sending comment…".into());
+        self.kanban.comment_saving = true;
+        self.kanban.status = Some("Sending comment…".into());
         cx.notify();
     }
 
     fn save_kanban_board(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_board_saving {
+        if self.kanban.board_saving {
             return;
         }
         let Some(value) = self
-            .kanban_board_draft
+            .kanban
+            .board_draft
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            self.kanban_status = Some("Enter a board name first.".into());
+            self.kanban.status = Some("Enter a board name first.".into());
             cx.notify();
             return;
         };
-        let command = if let Some(slug) = &self.kanban_board_renaming {
+        let command = if let Some(slug) = &self.kanban.board_renaming {
             Command::RenameKanbanBoard {
                 slug: slug.clone(),
                 name: value.to_string(),
@@ -2175,41 +2136,42 @@ impl HermesApp {
                 slug: value.to_string(),
             }
         };
-        self.kanban_board_saving = true;
-        self.kanban_status = Some("Saving board…".into());
+        self.kanban.board_saving = true;
+        self.kanban.status = Some("Saving board…".into());
         self.backend.send(command);
         cx.notify();
     }
 
     fn create_kanban_task(&mut self, cx: &mut Context<Self>) {
-        if self.kanban_creating {
+        if self.kanban.creating {
             return;
         }
         let Some(title) = self
-            .kanban_draft
+            .kanban
+            .draft
             .as_deref()
             .map(str::trim)
             .filter(|title| !title.is_empty())
         else {
-            self.kanban_status = Some("Enter a task title first.".into());
+            self.kanban.status = Some("Enter a task title first.".into());
             cx.notify();
             return;
         };
-        self.kanban_creating = true;
-        if let Some(id) = &self.kanban_editing {
+        self.kanban.creating = true;
+        if let Some(id) = &self.kanban.editing {
             self.backend.send(Command::UpdateKanbanTask {
                 id: id.clone(),
                 patch: serde_json::json!({"title": title}),
-                board: self.kanban_selected.clone(),
+                board: self.kanban.selected.clone(),
                 editing: true,
             });
-            self.kanban_status = Some("Updating task…".into());
+            self.kanban.status = Some("Updating task…".into());
         } else {
             self.backend.send(Command::CreateKanbanTask {
                 title: title.to_string(),
-                board: self.kanban_selected.clone(),
+                board: self.kanban.selected.clone(),
             });
-            self.kanban_status = Some("Creating triage task…".into());
+            self.kanban.status = Some("Creating triage task…".into());
         }
         cx.notify();
     }
@@ -2225,10 +2187,10 @@ impl HermesApp {
             .overflow_y_scroll()
             .px_5()
             .py_3();
-        if let Some(status) = &self.kanban_status {
+        if let Some(status) = &self.kanban.status {
             list = list.child(self.note(status));
         }
-        if let Some(detail) = &self.kanban_detail {
+        if let Some(detail) = &self.kanban.detail {
             let task = &detail.task;
             let mut panel = div()
                 .flex()
@@ -2278,14 +2240,15 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                if !this.kanban.detail_saving && !this.kanban.attachment_busy {
                                     let current = this
-                                        .kanban_detail
+                                        .kanban
+                                        .detail
                                         .as_ref()
                                         .and_then(|detail| detail.task.body.clone())
                                         .unwrap_or_default();
-                                    this.kanban_assignee_draft = None;
-                                    this.kanban_body_draft = Some(current);
+                                    this.kanban.assignee_draft = None;
+                                    this.kanban.body_draft = Some(current);
                                     cx.notify();
                                 }
                             }))
@@ -2298,14 +2261,15 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                if !this.kanban.detail_saving && !this.kanban.attachment_busy {
                                     let current = this
-                                        .kanban_detail
+                                        .kanban
+                                        .detail
                                         .as_ref()
                                         .and_then(|detail| detail.task.assignee.clone())
                                         .unwrap_or_default();
-                                    this.kanban_body_draft = None;
-                                    this.kanban_assignee_draft = Some(current);
+                                    this.kanban.body_draft = None;
+                                    this.kanban.assignee_draft = Some(current);
                                     cx.notify();
                                 }
                             }))
@@ -2318,22 +2282,23 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_detail_saving && !this.kanban_attachment_busy {
+                                if !this.kanban.detail_saving && !this.kanban.attachment_busy {
                                     let current = this
-                                        .kanban_detail
+                                        .kanban
+                                        .detail
                                         .as_ref()
                                         .map(|detail| detail.task.priority.to_string())
                                         .unwrap_or_default();
-                                    this.kanban_body_draft = None;
-                                    this.kanban_assignee_draft = None;
-                                    this.kanban_priority_draft = Some(current);
+                                    this.kanban.body_draft = None;
+                                    this.kanban.assignee_draft = None;
+                                    this.kanban.priority_draft = Some(current);
                                     cx.notify();
                                 }
                             }))
                             .child("Edit priority"),
                     ),
             );
-            if let Some(draft) = &self.kanban_body_draft {
+            if let Some(draft) = &self.kanban.body_draft {
                 panel = panel
                     .child(self.section_label("DESCRIPTION"))
                     .child(
@@ -2365,7 +2330,7 @@ impl HermesApp {
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.save_kanban_body(cx)),
                                     )
-                                    .child(if self.kanban_detail_saving {
+                                    .child(if self.kanban.detail_saving {
                                         "Saving…"
                                     } else {
                                         "Save description"
@@ -2380,8 +2345,8 @@ impl HermesApp {
                                     .text_color(rgb(text_muted()))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if !this.kanban_detail_saving {
-                                            this.kanban_body_draft = None;
+                                        if !this.kanban.detail_saving {
+                                            this.kanban.body_draft = None;
                                             cx.notify();
                                         }
                                     }))
@@ -2389,7 +2354,7 @@ impl HermesApp {
                             ),
                     );
             }
-            if let Some(draft) = &self.kanban_assignee_draft {
+            if let Some(draft) = &self.kanban.assignee_draft {
                 panel = panel
                     .child(self.section_label("ASSIGNEE"))
                     .child(
@@ -2421,7 +2386,7 @@ impl HermesApp {
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.save_kanban_assignee(cx)),
                                     )
-                                    .child(if self.kanban_detail_saving {
+                                    .child(if self.kanban.detail_saving {
                                         "Saving…"
                                     } else {
                                         "Save assignee"
@@ -2436,8 +2401,8 @@ impl HermesApp {
                                     .text_color(rgb(text_muted()))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if !this.kanban_detail_saving {
-                                            this.kanban_assignee_draft = None;
+                                        if !this.kanban.detail_saving {
+                                            this.kanban.assignee_draft = None;
                                             cx.notify();
                                         }
                                     }))
@@ -2445,7 +2410,7 @@ impl HermesApp {
                             ),
                     );
             }
-            if let Some(draft) = &self.kanban_priority_draft {
+            if let Some(draft) = &self.kanban.priority_draft {
                 panel = panel
                     .child(self.section_label("PRIORITY"))
                     .child(
@@ -2477,7 +2442,7 @@ impl HermesApp {
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.save_kanban_priority(cx)),
                                     )
-                                    .child(if self.kanban_detail_saving {
+                                    .child(if self.kanban.detail_saving {
                                         "Saving…"
                                     } else {
                                         "Save priority"
@@ -2492,8 +2457,8 @@ impl HermesApp {
                                     .text_color(rgb(text_muted()))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if !this.kanban_detail_saving {
-                                            this.kanban_priority_draft = None;
+                                        if !this.kanban.detail_saving {
+                                            this.kanban.priority_draft = None;
                                             cx.notify();
                                         }
                                     }))
@@ -2508,7 +2473,7 @@ impl HermesApp {
             }
             for attachment in &detail.attachments {
                 let attachment_id = attachment.id;
-                let removing = self.kanban_attachment_delete == Some(attachment_id);
+                let removing = self.kanban.attachment_delete == Some(attachment_id);
                 let mut row = div()
                     .flex()
                     .items_center()
@@ -2570,7 +2535,7 @@ impl HermesApp {
                                 .text_color(rgb(text_muted()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.kanban_attachment_delete = None;
+                                    this.kanban.attachment_delete = None;
                                     cx.notify();
                                 }))
                                 .child("Cancel"),
@@ -2603,8 +2568,8 @@ impl HermesApp {
                                 .text_color(rgb(danger()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.kanban_attachment_busy {
-                                        this.kanban_attachment_delete = Some(attachment_id);
+                                    if !this.kanban.attachment_busy {
+                                        this.kanban.attachment_delete = Some(attachment_id);
                                         cx.notify();
                                     }
                                 }))
@@ -2620,7 +2585,7 @@ impl HermesApp {
                     .text_color(rgb(accent()))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.attach_kanban_file(cx)))
-                    .child(if self.kanban_attachment_busy {
+                    .child(if self.kanban.attachment_busy {
                         "Attaching…"
                     } else {
                         "Attach file"
@@ -2653,7 +2618,7 @@ impl HermesApp {
                         ),
                 );
             }
-            if let Some(draft) = &self.kanban_comment_draft {
+            if let Some(draft) = &self.kanban.comment_draft {
                 panel = panel
                     .child(
                         div()
@@ -2675,7 +2640,7 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.submit_kanban_comment(cx)))
-                            .child(if self.kanban_comment_saving {
+                            .child(if self.kanban.comment_saving {
                                 "Sending…"
                             } else {
                                 "Send comment"
@@ -2688,8 +2653,8 @@ impl HermesApp {
                             .text_color(rgb(text_muted()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_comment_saving {
-                                    this.kanban_comment_draft = None;
+                                if !this.kanban.comment_saving {
+                                    this.kanban.comment_draft = None;
                                     cx.notify();
                                 }
                             }))
@@ -2703,12 +2668,12 @@ impl HermesApp {
                         .text_color(rgb(accent()))
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.kanban_creating
-                                && !this.kanban_board_saving
-                                && this.kanban_draft.is_none()
-                                && this.kanban_board_draft.is_none()
+                            if !this.kanban.creating
+                                && !this.kanban.board_saving
+                                && this.kanban.draft.is_none()
+                                && this.kanban.board_draft.is_none()
                             {
-                                this.kanban_comment_draft = Some(String::new());
+                                this.kanban.comment_draft = Some(String::new());
                                 cx.notify();
                             }
                         }))
@@ -2722,17 +2687,17 @@ impl HermesApp {
                     .text_color(rgb(text_muted()))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.kanban_comment_saving
-                            && !this.kanban_attachment_busy
-                            && !this.kanban_detail_saving
+                        if !this.kanban.comment_saving
+                            && !this.kanban.attachment_busy
+                            && !this.kanban.detail_saving
                         {
-                            this.kanban_detail_target = None;
-                            this.kanban_detail = None;
-                            this.kanban_comment_draft = None;
-                            this.kanban_attachment_delete = None;
-                            this.kanban_body_draft = None;
-                            this.kanban_assignee_draft = None;
-                            this.kanban_priority_draft = None;
+                            this.kanban.detail_target = None;
+                            this.kanban.detail = None;
+                            this.kanban.comment_draft = None;
+                            this.kanban.attachment_delete = None;
+                            this.kanban.body_draft = None;
+                            this.kanban.assignee_draft = None;
+                            this.kanban.priority_draft = None;
                             cx.notify();
                         }
                     }))
@@ -2740,8 +2705,8 @@ impl HermesApp {
             );
             list = list.child(panel);
         }
-        if let Some(draft) = &self.kanban_board_draft {
-            list = list.child(self.note(if self.kanban_board_renaming.is_some() {
+        if let Some(draft) = &self.kanban.board_draft {
+            list = list.child(self.note(if self.kanban.board_renaming.is_some() {
                 "Board display name (slug stays unchanged)"
             } else {
                 "New board slug (host validates it; existing slugs open the existing board)"
@@ -2775,7 +2740,7 @@ impl HermesApp {
                             .text_color(rgb(bg()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.save_kanban_board(cx)))
-                            .child(if self.kanban_board_saving {
+                            .child(if self.kanban.board_saving {
                                 "Saving…"
                             } else {
                                 "Save"
@@ -2790,9 +2755,9 @@ impl HermesApp {
                             .text_color(rgb(text_muted()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_board_saving {
-                                    this.kanban_board_draft = None;
-                                    this.kanban_board_renaming = None;
+                                if !this.kanban.board_saving {
+                                    this.kanban.board_draft = None;
+                                    this.kanban.board_renaming = None;
                                     cx.notify();
                                 }
                             }))
@@ -2800,7 +2765,7 @@ impl HermesApp {
                     ),
             );
         }
-        if let Some(draft) = &self.kanban_draft {
+        if let Some(draft) = &self.kanban.draft {
             list = list.child(
                 div()
                     .flex()
@@ -2830,7 +2795,7 @@ impl HermesApp {
                             .text_color(rgb(bg()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.create_kanban_task(cx)))
-                            .child(if self.kanban_editing.is_some() {
+                            .child(if self.kanban.editing.is_some() {
                                 "Save"
                             } else {
                                 "Create"
@@ -2845,26 +2810,26 @@ impl HermesApp {
                             .text_color(rgb(text_muted()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_creating {
-                                    this.kanban_draft = None;
-                                    this.kanban_editing = None;
+                                if !this.kanban.creating {
+                                    this.kanban.draft = None;
+                                    this.kanban.editing = None;
                                 }
                                 cx.notify();
                             }))
                             .child("Cancel"),
                     ),
             );
-            if self.kanban_editing.is_none() {
+            if self.kanban.editing.is_none() {
                 list = list.child(
                     self.note("New tasks start in triage; no worker is assigned or dispatched."),
                 );
             }
         }
-        if !self.kanban_boards.is_empty() {
+        if !self.kanban.boards.is_empty() {
             let mut choices = div().flex().flex_wrap().gap_2();
-            for board in &self.kanban_boards {
+            for board in &self.kanban.boards {
                 let slug = board.slug.clone();
-                let selected = self.kanban_selected.as_ref() == Some(&slug);
+                let selected = self.kanban.selected.as_ref() == Some(&slug);
                 choices = choices.child(
                     div()
                         .id(SharedString::from(format!("kanban-board-{slug}")))
@@ -2878,30 +2843,30 @@ impl HermesApp {
                         })
                         .when(!selected, |v| v.bg(rgb(surface())).text_color(rgb(text())))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.kanban_creating
-                                && !this.kanban_board_saving
-                                && this.kanban_board_draft.is_none()
-                                && !this.kanban_comment_saving
-                                && this.kanban_comment_draft.is_none()
-                                && !this.kanban_attachment_busy
-                                && !this.kanban_detail_saving
-                                && this.kanban_body_draft.is_none()
-                                && this.kanban_assignee_draft.is_none()
+                            if !this.kanban.creating
+                                && !this.kanban.board_saving
+                                && this.kanban.board_draft.is_none()
+                                && !this.kanban.comment_saving
+                                && this.kanban.comment_draft.is_none()
+                                && !this.kanban.attachment_busy
+                                && !this.kanban.detail_saving
+                                && this.kanban.body_draft.is_none()
+                                && this.kanban.assignee_draft.is_none()
                             {
-                                this.kanban_selected = Some(slug.clone());
-                                this.kanban_detail_target = None;
-                                this.kanban_detail = None;
-                                this.kanban_attachment_delete = None;
-                                this.kanban_board_remove = None;
-                                this.kanban_body_draft = None;
-                                this.kanban_assignee_draft = None;
-                                this.kanban_priority_draft = None;
-                                this.kanban_comment_draft = None;
-                                this.kanban = None;
-                                this.kanban_draft = None;
-                                this.kanban_editing = None;
-                                this.kanban_delete = None;
-                                this.kanban_status = Some("Loading board…".into());
+                                this.kanban.selected = Some(slug.clone());
+                                this.kanban.detail_target = None;
+                                this.kanban.detail = None;
+                                this.kanban.attachment_delete = None;
+                                this.kanban.board_remove = None;
+                                this.kanban.body_draft = None;
+                                this.kanban.assignee_draft = None;
+                                this.kanban.priority_draft = None;
+                                this.kanban.comment_draft = None;
+                                this.kanban.board = None;
+                                this.kanban.draft = None;
+                                this.kanban.editing = None;
+                                this.kanban.delete = None;
+                                this.kanban.status = Some("Loading board…".into());
                                 this.backend.send(Command::LoadKanban {
                                     board: Some(slug.clone()),
                                 });
@@ -2913,11 +2878,11 @@ impl HermesApp {
             }
             list = list.child(choices);
         }
-        if let Some(selected) = &self.kanban_selected {
+        if let Some(selected) = &self.kanban.selected {
             let archive_pending =
-                self.kanban_board_remove.as_ref() == Some(&(selected.clone(), false));
+                self.kanban.board_remove.as_ref() == Some(&(selected.clone(), false));
             let delete_pending =
-                self.kanban_board_remove.as_ref() == Some(&(selected.clone(), true));
+                self.kanban.board_remove.as_ref() == Some(&(selected.clone(), true));
             let archive_slug = selected.clone();
             let delete_slug = selected.clone();
             let archive_label = if archive_pending {
@@ -2944,26 +2909,26 @@ impl HermesApp {
                             .text_color(rgb(text_muted()))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.kanban_board_saving
-                                    || this.kanban_detail_saving
-                                    || this.kanban_attachment_busy
-                                    || this.kanban_comment_saving
+                                if this.kanban.board_saving
+                                    || this.kanban.detail_saving
+                                    || this.kanban.attachment_busy
+                                    || this.kanban.comment_saving
                                 {
                                     return;
                                 }
-                                if this.kanban_board_remove.as_ref()
+                                if this.kanban.board_remove.as_ref()
                                     == Some(&(archive_slug.clone(), false))
                                 {
-                                    this.kanban_board_remove = None;
-                                    this.kanban_status = Some("Archiving board…".into());
+                                    this.kanban.board_remove = None;
+                                    this.kanban.status = Some("Archiving board…".into());
                                     this.backend.send(Command::RemoveKanbanBoard {
                                         slug: archive_slug.clone(),
                                         hard: false,
                                     });
                                 } else {
-                                    this.kanban_board_remove =
+                                    this.kanban.board_remove =
                                         Some((archive_slug.clone(), false));
-                                    this.kanban_status = Some(
+                                    this.kanban.status = Some(
                                         "Archive this board? Click again to confirm; its tasks stay on disk."
                                             .into(),
                                     );
@@ -2981,25 +2946,25 @@ impl HermesApp {
                             .text_color(rgb(danger()))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.kanban_board_saving
-                                    || this.kanban_detail_saving
-                                    || this.kanban_attachment_busy
-                                    || this.kanban_comment_saving
+                                if this.kanban.board_saving
+                                    || this.kanban.detail_saving
+                                    || this.kanban.attachment_busy
+                                    || this.kanban.comment_saving
                                 {
                                     return;
                                 }
-                                if this.kanban_board_remove.as_ref()
+                                if this.kanban.board_remove.as_ref()
                                     == Some(&(delete_slug.clone(), true))
                                 {
-                                    this.kanban_board_remove = None;
-                                    this.kanban_status = Some("Deleting board…".into());
+                                    this.kanban.board_remove = None;
+                                    this.kanban.status = Some("Deleting board…".into());
                                     this.backend.send(Command::RemoveKanbanBoard {
                                         slug: delete_slug.clone(),
                                         hard: true,
                                     });
                                 } else {
-                                    this.kanban_board_remove = Some((delete_slug.clone(), true));
-                                    this.kanban_status = Some(
+                                    this.kanban.board_remove = Some((delete_slug.clone(), true));
+                                    this.kanban.status = Some(
                                         "Delete this board and its tasks permanently? Click again to confirm."
                                             .into(),
                                     );
@@ -3008,7 +2973,7 @@ impl HermesApp {
                             }))
                             .child(delete_label),
                     )
-                    .when(self.kanban_board_remove.is_some(), |this| {
+                    .when(self.kanban.board_remove.is_some(), |this| {
                         this.child(
                             div()
                                 .id("kanban-board-remove-cancel")
@@ -3018,8 +2983,8 @@ impl HermesApp {
                                 .text_color(rgb(text_muted()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.kanban_board_remove = None;
-                                    this.kanban_status = None;
+                                    this.kanban.board_remove = None;
+                                    this.kanban.status = None;
                                     cx.notify();
                                 }))
                                 .child("Cancel"),
@@ -3027,7 +2992,7 @@ impl HermesApp {
                     }),
             );
         }
-        if let Some(board) = &self.kanban {
+        if let Some(board) = &self.kanban.board {
             for column in &board.columns {
                 let mut section =
                     div()
@@ -3092,11 +3057,11 @@ impl HermesApp {
                                 .text_color(rgb(accent()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.kanban_status = Some(format!("Moving task to {next}…"));
+                                    this.kanban.status = Some(format!("Moving task to {next}…"));
                                     this.backend.send(Command::UpdateKanbanTask {
                                         id: id.clone(),
                                         patch: serde_json::json!({"status": next}),
-                                        board: this.kanban_selected.clone(),
+                                        board: this.kanban.selected.clone(),
                                         editing: false,
                                     });
                                     cx.notify();
@@ -3114,19 +3079,19 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.kanban_comment_saving
-                                    && this.kanban_comment_draft.is_none()
-                                    && this.kanban_board_draft.is_none()
-                                    && this.kanban_draft.is_none()
-                                    && let Some(board) = this.kanban_selected.clone()
+                                if !this.kanban.comment_saving
+                                    && this.kanban.comment_draft.is_none()
+                                    && this.kanban.board_draft.is_none()
+                                    && this.kanban.draft.is_none()
+                                    && let Some(board) = this.kanban.selected.clone()
                                 {
-                                    this.kanban_detail_target =
+                                    this.kanban.detail_target =
                                         Some((board.clone(), detail_id.clone()));
-                                    this.kanban_detail = None;
-                                    this.kanban_attachment_delete = None;
-                                    this.kanban_body_draft = None;
-                                    this.kanban_assignee_draft = None;
-                                    this.kanban_status = Some("Loading task details…".into());
+                                    this.kanban.detail = None;
+                                    this.kanban.attachment_delete = None;
+                                    this.kanban.body_draft = None;
+                                    this.kanban.assignee_draft = None;
+                                    this.kanban.status = Some("Loading task details…".into());
                                     this.backend.send(Command::LoadKanbanTask {
                                         board,
                                         id: detail_id.clone(),
@@ -3139,7 +3104,7 @@ impl HermesApp {
                     let edit_id = task.id.clone();
                     let edit_title = task.title.clone();
                     let delete_id = task.id.clone();
-                    let confirm_delete = self.kanban_delete.as_deref() == Some(task.id.as_str());
+                    let confirm_delete = self.kanban.delete.as_deref() == Some(task.id.as_str());
                     row = row
                         .child(
                             div()
@@ -3150,15 +3115,15 @@ impl HermesApp {
                                 .text_color(rgb(accent()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.kanban_creating
-                                        && !this.kanban_board_saving
-                                        && this.kanban_comment_draft.is_none()
-                                        && !this.kanban_comment_saving
-                                        && this.kanban_board_draft.is_none()
+                                    if !this.kanban.creating
+                                        && !this.kanban.board_saving
+                                        && this.kanban.comment_draft.is_none()
+                                        && !this.kanban.comment_saving
+                                        && this.kanban.board_draft.is_none()
                                     {
-                                        this.kanban_editing = Some(edit_id.clone());
-                                        this.kanban_draft = Some(edit_title.clone());
-                                        this.kanban_delete = None;
+                                        this.kanban.editing = Some(edit_id.clone());
+                                        this.kanban.draft = Some(edit_title.clone());
+                                        this.kanban.delete = None;
                                         cx.notify();
                                     }
                                 }))
@@ -3173,15 +3138,15 @@ impl HermesApp {
                                 .text_color(rgb(danger()))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.kanban_delete.as_deref() == Some(delete_id.as_str()) {
-                                        this.kanban_delete = None;
-                                        this.kanban_status = Some("Deleting task…".into());
+                                    if this.kanban.delete.as_deref() == Some(delete_id.as_str()) {
+                                        this.kanban.delete = None;
+                                        this.kanban.status = Some("Deleting task…".into());
                                         this.backend.send(Command::DeleteKanbanTask {
                                             id: delete_id.clone(),
-                                            board: this.kanban_selected.clone(),
+                                            board: this.kanban.selected.clone(),
                                         });
                                     } else {
-                                        this.kanban_delete = Some(delete_id.clone());
+                                        this.kanban.delete = Some(delete_id.clone());
                                     }
                                     cx.notify();
                                 }))
@@ -3222,14 +3187,14 @@ impl HermesApp {
                             .text_color(rgb(text()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_board_saving
-                                    && !this.kanban_creating
-                                    && this.kanban_draft.is_none()
-                                    && this.kanban_comment_draft.is_none()
-                                    && !this.kanban_comment_saving
+                                if !this.kanban.board_saving
+                                    && !this.kanban.creating
+                                    && this.kanban.draft.is_none()
+                                    && this.kanban.comment_draft.is_none()
+                                    && !this.kanban.comment_saving
                                 {
-                                    this.kanban_board_renaming = None;
-                                    this.kanban_board_draft = Some(String::new());
+                                    this.kanban.board_renaming = None;
+                                    this.kanban.board_draft = Some(String::new());
                                     cx.notify();
                                 }
                             }))
@@ -3246,17 +3211,17 @@ impl HermesApp {
                             .text_color(rgb(text()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.kanban_board_saving
-                                    && !this.kanban_creating
-                                    && this.kanban_draft.is_none()
-                                    && this.kanban_comment_draft.is_none()
-                                    && !this.kanban_comment_saving
-                                    && let Some(board) = this.kanban_boards.iter().find(|board| {
-                                        Some(&board.slug) == this.kanban_selected.as_ref()
+                                if !this.kanban.board_saving
+                                    && !this.kanban.creating
+                                    && this.kanban.draft.is_none()
+                                    && this.kanban.comment_draft.is_none()
+                                    && !this.kanban.comment_saving
+                                    && let Some(board) = this.kanban.boards.iter().find(|board| {
+                                        Some(&board.slug) == this.kanban.selected.as_ref()
                                     })
                                 {
-                                    this.kanban_board_renaming = Some(board.slug.clone());
-                                    this.kanban_board_draft = Some(board.name.clone());
+                                    this.kanban.board_renaming = Some(board.slug.clone());
+                                    this.kanban.board_draft = Some(board.name.clone());
                                     cx.notify();
                                 }
                             }))
@@ -3273,14 +3238,14 @@ impl HermesApp {
                             .text_color(rgb(accent()))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.kanban_draft.is_none()
-                                    && this.kanban_board_draft.is_none()
-                                    && !this.kanban_board_saving
-                                    && this.kanban_comment_draft.is_none()
-                                    && !this.kanban_comment_saving
+                                if this.kanban.draft.is_none()
+                                    && this.kanban.board_draft.is_none()
+                                    && !this.kanban.board_saving
+                                    && this.kanban.comment_draft.is_none()
+                                    && !this.kanban.comment_saving
                                 {
-                                    this.kanban_editing = None;
-                                    this.kanban_draft = Some(String::new());
+                                    this.kanban.editing = None;
+                                    this.kanban.draft = Some(String::new());
                                 }
                                 cx.notify();
                             }))
