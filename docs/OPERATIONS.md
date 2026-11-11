@@ -114,7 +114,11 @@ curl -fsS -X POST http://127.0.0.1:8080/api/v1/enroll \
 `GET /api/v1/nodes` shows presence and capabilities. `DELETE
 /api/v1/nodes/{id}` revokes the node, closes its socket and fails its in-flight
 commands. The same flow with `"kind":"device"` issues a client token; revoke it
-with `DELETE /api/v1/devices/{id}`. `GET /api/v1/audit` is the personal audit;
+with `DELETE /api/v1/devices/{id}`. Revoking a device, or its current socket
+closing, cancels the commands that device submitted: the node hangs up a
+terminal and kills other children. A reconnect that replaces the socket does
+not. Commands submitted with the admin token have no device and are not
+cancelled by a device going away. `GET /api/v1/audit` is the personal audit;
 it never contains a prompt value.
 
 ### Desktop client
@@ -158,7 +162,7 @@ keeps generic defaults. Build and publish a new image to the in-cluster
 registry, then update that digest and let ArgoCD sync:
 
 ```bash
-sudo docker build -f docker/hub.Dockerfile -t localhost:5000/hermes/hub:<tag> .
+sudo docker build -f docker/hermes-hub.Dockerfile -t localhost:5000/hermes/hub:<tag> .
 sudo docker push localhost:5000/hermes/hub:<tag>
 # digest from `sudo docker inspect --format='{{index .RepoDigests 0}}' …`,
 # then edit deploy/argocd/hermes-hub.yaml and push; ArgoCD applies it.
@@ -211,6 +215,9 @@ NoNewPrivileges=true
 WantedBy=default.target
 ```
 
+`hermes-node` exits on SIGTERM and on Ctrl-C. A container runtime's stop
+sends SIGTERM; the process leaves instead of ignoring it until SIGKILL.
+
 The agent clears the child environment: it does not inherit
 `HERMES_NODE_TOKEN`, the hub URL or host secrets. Only `PATH`, `HOME`, `LANG`,
 `TERM`, the request's explicit env and a prompted secret are passed. A command
@@ -224,9 +231,16 @@ Container variant (own filesystem, not the host's):
 docker run --rm --read-only --tmpfs /tmp \
   -e HERMES_HUB_URL=https://hermes \
   -e HERMES_NODE_ID=node-… -e HERMES_NODE_TOKEN=… \
-  -v "$HOME/work:/home/hermes/work" \
+  -v hermes-node-work:/home/hermes/work \
   ghcr.io/reverb256/hermes-node:0.1.0
 ```
+
+The image runs as uid 10001 and allows commands under `/home/hermes/work`.
+A new named volume on that path is created owned by that user. A bind mount of
+a host directory is not: it keeps the host owner, and the node cannot write
+there unless that directory is writable by uid 10001. The container does not
+see the host's files, display, GPU or systemd; those need the agent on the
+host, outside this read-only image.
 
 ### Terminals
 
@@ -345,6 +359,11 @@ The client stores no user data beyond in-memory state and the IPC socket. All
 sessions, profiles, secrets and Kanban data live on the host; back those up with
 the host's own tooling (`/api/ops/backup` and its docs). Theme data belongs to
 Omarchy.
+
+A hub process start marks every node offline and fails queued or running
+commands with `hub restarted`. The node agent cancels children when its socket
+drops, then registers again. Presence in `GET /api/v1/nodes` is the current
+process's sockets, not a flag left from the previous process.
 
 The hub stores its SQLite database on the `/data` PVC (or the compose volume).
 Take a PVC volume snapshot, or run SQLite's `.backup` from a temporary pod that

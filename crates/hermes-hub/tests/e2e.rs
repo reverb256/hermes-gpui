@@ -586,6 +586,225 @@ async fn terminal_input_is_relayed_and_never_stored() {
     server.abort();
 }
 
+async fn command_status(client: &reqwest::Client, base: &str, id: &str) -> String {
+    let body: Value = client
+        .get(format!("{base}/api/v1/commands/{id}"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .expect("command")
+        .error_for_status()
+        .expect("command status")
+        .json()
+        .await
+        .expect("command json");
+    body["status"].as_str().unwrap_or("").to_string()
+}
+
+async fn wait_for_status(client: &reqwest::Client, base: &str, id: &str, want: &str) {
+    let mut last = String::new();
+    for _ in 0..100 {
+        last = command_status(client, base, id).await;
+        if last == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("command {id} stayed {last:?}, wanted {want}");
+}
+
+fn pty_shell(id: &str, key: &str, root: &std::path::Path) -> CommandRequest {
+    CommandRequest {
+        id: id.into(),
+        idempotency_key: key.into(),
+        // An interactive shell, matching a terminal the user left open.
+        argv: vec!["sh".into()],
+        cwd: Some(root.display().to_string()),
+        env: BTreeMap::new(),
+        timeout_ms: 0,
+        pty: Some(PtySpec { cols: 80, rows: 24 }),
+        secret: None,
+    }
+}
+
+struct LiveHub {
+    base: String,
+    client: reqwest::Client,
+    node_id: String,
+    root: std::path::PathBuf,
+    node_task: tokio::task::JoinHandle<()>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn start_live_hub(node_name: &str) -> LiveHub {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let base = format!("http://{address}");
+    let state = HubState::in_memory(hub_config());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, state.router()).await.expect("serve");
+    });
+    let client = reqwest::Client::new();
+    let (node_id, node_token) = enroll(&client, &base, "node", node_name).await;
+    let root = std::env::temp_dir().join(format!("hermes-e2e-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("root");
+    let node = Agent::new(NodeConfig {
+        hub_url: format!("ws://{address}/v1/node"),
+        token: node_token,
+        node_id: node_id.clone(),
+        name: node_name.into(),
+        allowed_roots: vec![root.clone()],
+        allowed_commands: vec!["sh".into()],
+        max_concurrency: 4,
+    });
+    let node_task = tokio::spawn(async move {
+        let _ = node.run().await;
+    });
+    wait_for_node(&client, &base, &node_id).await;
+    LiveHub {
+        base,
+        client,
+        node_id,
+        root,
+        node_task,
+        server,
+    }
+}
+
+impl LiveHub {
+    fn stop(self) {
+        self.node_task.abort();
+        self.server.abort();
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+/// Revoking a device must hang up the terminal it opened, and must not take
+/// anyone else's command with it. Issue: an abandoned shell outlived revoke.
+#[tokio::test]
+async fn revoke_cancels_that_devices_terminal_only() {
+    init_tracing();
+    let hub = start_live_hub("forge-revoke").await;
+    let (device_a, token_a) = enroll(&hub.client, &hub.base, "device", "laptop-a").await;
+    let (device_b, token_b) = enroll(&hub.client, &hub.base, "device", "laptop-b").await;
+    let mut device_a_sock = connect_device(&hub.base, &device_a, &token_a).await;
+    let mut device_b_sock = connect_device(&hub.base, &device_b, &token_b).await;
+
+    send_device(
+        &mut device_a_sock,
+        DeviceToHub::SubmitCommand {
+            node_id: hub.node_id.clone(),
+            command: pty_shell("cmd-a", "idem-a", &hub.root),
+        },
+    )
+    .await;
+    send_device(
+        &mut device_b_sock,
+        DeviceToHub::SubmitCommand {
+            node_id: hub.node_id.clone(),
+            command: pty_shell("cmd-b", "idem-b", &hub.root),
+        },
+    )
+    .await;
+    let owner = hub
+        .client
+        .post(format!("{}/api/v1/commands", hub.base))
+        .bearer_auth(ADMIN)
+        .json(&json!({
+            "node_id": hub.node_id,
+            "id": "cmd-owner",
+            "idempotency_key": "idem-owner",
+            "argv": ["sh", "-c", "sleep 60"],
+            "cwd": hub.root.display().to_string(),
+            "timeout_ms": 60_000
+        }))
+        .send()
+        .await
+        .expect("owner command")
+        .error_for_status()
+        .expect("owner command status");
+    assert!(owner.status().is_success());
+
+    wait_for_status(&hub.client, &hub.base, "cmd-a", "running").await;
+    wait_for_status(&hub.client, &hub.base, "cmd-b", "running").await;
+    wait_for_status(&hub.client, &hub.base, "cmd-owner", "running").await;
+
+    let revoke = hub
+        .client
+        .delete(format!("{}/api/v1/devices/{device_a}", hub.base))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .expect("revoke");
+    assert!(revoke.status().is_success(), "{}", revoke.status());
+
+    wait_for_status(&hub.client, &hub.base, "cmd-a", "cancelled").await;
+    assert_eq!(
+        command_status(&hub.client, &hub.base, "cmd-b").await,
+        "running",
+        "another device's terminal must keep running"
+    );
+    assert_eq!(
+        command_status(&hub.client, &hub.base, "cmd-owner").await,
+        "running",
+        "an owner API command has no device and must keep running"
+    );
+
+    // The revoked token cannot open a new socket.
+    let url = format!("{}/v1/device", hub.base.replacen("http", "ws", 1));
+    let mut request = url.as_str().into_client_request().expect("ws request");
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token_a}")).expect("header"),
+    );
+    let refused = tokio_tungstenite::connect_async(request).await;
+    assert!(
+        refused.is_err(),
+        "a revoked device token must not complete the WebSocket handshake"
+    );
+
+    hub.stop();
+}
+
+/// Closing the current device socket hangs the terminal up. A socket that was
+/// only replaced by a reconnect must not.
+#[tokio::test]
+async fn disconnect_cancels_the_terminal_but_replacement_does_not() {
+    init_tracing();
+    let hub = start_live_hub("forge-disconnect").await;
+    let (device_id, token) = enroll(&hub.client, &hub.base, "device", "laptop-drop").await;
+    let mut first = connect_device(&hub.base, &device_id, &token).await;
+    send_device(
+        &mut first,
+        DeviceToHub::SubmitCommand {
+            node_id: hub.node_id.clone(),
+            command: pty_shell("cmd-live", "idem-live", &hub.root),
+        },
+    )
+    .await;
+    wait_for_status(&hub.client, &hub.base, "cmd-live", "running").await;
+
+    // The second hello replaces the first socket. The shell stays. Wait past
+    // the node's hangup grace so a mistaken cancel would already show.
+    let second = connect_device(&hub.base, &device_id, &token).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        command_status(&hub.client, &hub.base, "cmd-live").await,
+        "running",
+        "replacing the device socket must not kill its terminal"
+    );
+
+    let mut second = second;
+    second.close(None).await.expect("close device socket");
+    drop(second);
+    drop(first);
+    wait_for_status(&hub.client, &hub.base, "cmd-live", "cancelled").await;
+
+    hub.stop();
+}
+
 fn hub_config() -> Config {
     Config {
         admin_token: ADMIN.into(),

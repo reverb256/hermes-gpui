@@ -139,6 +139,8 @@ impl Db {
                 finished_at_ms INTEGER,
                 exit_code      INTEGER,
                 message        TEXT,
+                -- Device that submitted the command. NULL is an owner API request.
+                requester_id   TEXT,
                 UNIQUE(node_id, idempotency_key)
             );
 
@@ -183,7 +185,23 @@ impl Db {
                SET resolved_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000,
                    outcome = 'hub_restarted'
              WHERE resolved_at_ms IS NULL;
+
+            -- Sockets die with the process. A node is offline until it
+            -- registers again, and a command left queued or running was tied
+            -- to a socket that no longer exists.
+            UPDATE nodes SET online = 0;
+            UPDATE commands
+               SET status = 'failed',
+                   message = 'hub restarted',
+                   finished_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000
+             WHERE status IN ('queued','running');
             "#,
+        )?;
+        // Databases created before requester tracking lack the column. CREATE
+        // TABLE IF NOT EXISTS does not add it, so migrate explicitly.
+        ensure_requester_column(&conn)?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS commands_requester ON commands(requester_id, status);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -423,25 +441,30 @@ impl Db {
     }
 
     /// Insert a command, or return the first record for this idempotency key.
+    ///
+    /// `requester_id` is the device that asked, or `None` for an owner API call.
+    /// A retry keeps the first requester; it is not rewritten.
     pub fn create_command(
         &self,
         node_id: &str,
         id: &str,
         request: &CommandRequest,
+        requester_id: Option<&str>,
         now: u64,
     ) -> Result<(CommandRecord, bool)> {
         let argv = serde_json::to_string(&request.argv)?;
         let inserted = self.conn().execute(
             "INSERT OR IGNORE INTO commands(
-                id, node_id, idempotency_key, argv, cwd, status, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+                id, node_id, idempotency_key, argv, cwd, status, created_at_ms, requester_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
             params![
                 id,
                 node_id,
                 request.idempotency_key,
                 argv,
                 request.cwd,
-                now as i64
+                now as i64,
+                requester_id,
             ],
         )?;
         let record = self
@@ -521,6 +544,59 @@ impl Db {
         )?;
         drop(conn);
         self.command(id)
+    }
+
+    /// Unfinished commands submitted by one device. Owner API commands
+    /// (`requester_id` NULL) are never included.
+    pub fn active_commands_for_requester(
+        &self,
+        requester_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, node_id FROM commands
+             WHERE requester_id = ?1 AND status IN ('queued','running')
+             ORDER BY created_at_ms",
+        )?;
+        let rows = statement.query_map(params![requester_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut commands = Vec::new();
+        for row in rows {
+            commands.push(row?);
+        }
+        Ok(commands)
+    }
+
+    /// Commands this device should learn about after it reconnects: anything
+    /// still running, plus commands that finished in `since_ms`. Older history
+    /// stays queryable and is not pushed again.
+    pub fn commands_to_replay(
+        &self,
+        requester_id: &str,
+        since_ms: u64,
+        limit: u32,
+    ) -> Result<Vec<CommandRecord>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, node_id, argv, cwd, status, idempotency_key, created_at_ms,
+                    started_at_ms, finished_at_ms, exit_code, message
+             FROM commands
+             WHERE requester_id = ?1
+               AND (status IN ('queued','running')
+                    OR finished_at_ms >= ?2)
+             ORDER BY created_at_ms DESC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![requester_id, since_ms as i64, limit],
+            command_from_row,
+        )?;
+        let mut commands = Vec::new();
+        for row in rows {
+            commands.push(row??);
+        }
+        Ok(commands)
     }
 
     /// Fail unfinished commands after their node disconnects.
@@ -750,6 +826,25 @@ impl Db {
     }
 }
 
+fn ensure_requester_column(conn: &Connection) -> Result<()> {
+    let exists = {
+        let mut statement = conn.prepare("PRAGMA table_info(commands)")?;
+        let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            if name? == "requester_id" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !exists {
+        conn.execute("ALTER TABLE commands ADD COLUMN requester_id TEXT", [])?;
+    }
+    Ok(())
+}
+
 fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<NodeSummary>> {
     let capabilities: String = row.get(6)?;
     let labels: String = row.get(7)?;
@@ -840,23 +935,31 @@ mod tests {
     fn idempotency_returns_the_first_command() {
         let db = Db::open_memory().expect("db");
         let first = request("same");
-        let (record, created) = db.create_command("n-1", "c-1", &first, 10).expect("insert");
+        let (record, created) = db
+            .create_command("n-1", "c-1", &first, None, 10)
+            .expect("insert");
         assert!(created);
         assert_eq!(record.id, "c-1");
 
         let second = request("same");
         let (again, created) = db
-            .create_command("n-1", "c-2", &second, 20)
+            .create_command("n-1", "c-2", &second, Some("device-later"), 20)
             .expect("insert");
         assert!(!created);
         assert_eq!(again.id, "c-1");
+        // A retry must not adopt the second caller as the requester.
+        assert!(
+            db.active_commands_for_requester("device-later")
+                .expect("active")
+                .is_empty()
+        );
     }
 
     #[test]
     fn terminal_status_is_not_overwritten() {
         let db = Db::open_memory().expect("db");
         let (record, _) = db
-            .create_command("n-1", "c-1", &request("key"), 10)
+            .create_command("n-1", "c-1", &request("key"), None, 10)
             .expect("insert");
         assert_eq!(record.status, CommandStatus::Queued);
         db.finish_command("c-1", CommandStatus::Succeeded, Some(0), None, 20)
@@ -947,9 +1050,9 @@ mod tests {
     #[test]
     fn node_disconnect_fails_unfinished_commands() {
         let db = Db::open_memory().expect("db");
-        db.create_command("n-1", "c-1", &request("one"), 10)
+        db.create_command("n-1", "c-1", &request("one"), None, 10)
             .expect("insert");
-        db.create_command("n-1", "c-2", &request("two"), 10)
+        db.create_command("n-1", "c-2", &request("two"), None, 10)
             .expect("insert");
         db.finish_command("c-2", CommandStatus::Succeeded, Some(0), None, 11)
             .expect("finish");
@@ -972,9 +1075,138 @@ mod tests {
             timeout_ms: 60_000,
         });
         let (record, _) = db
-            .create_command("n-1", "c-1", &request, 10)
+            .create_command("n-1", "c-1", &request, None, 10)
             .expect("insert");
         let json = serde_json::to_string(&record).expect("json");
         assert!(!json.contains("PGPASSWORD"));
+    }
+
+    #[test]
+    fn device_commands_are_scoped_to_their_requester() {
+        let db = Db::open_memory().expect("db");
+        db.create_command("n-1", "c-a", &request("a"), Some("device-a"), 10)
+            .expect("insert");
+        db.create_command("n-1", "c-b", &request("b"), Some("device-b"), 10)
+            .expect("insert");
+        db.create_command("n-1", "c-owner", &request("owner"), None, 10)
+            .expect("insert");
+        db.finish_command("c-b", CommandStatus::Succeeded, Some(0), None, 11)
+            .expect("finish");
+        db.create_command("n-1", "c-a-done", &request("a-done"), Some("device-a"), 12)
+            .expect("insert");
+        db.finish_command("c-a-done", CommandStatus::Cancelled, None, None, 13)
+            .expect("finish");
+
+        let active = db
+            .active_commands_for_requester("device-a")
+            .expect("active");
+        assert_eq!(active, vec![("c-a".into(), "n-1".into())]);
+        assert!(
+            db.active_commands_for_requester("device-b")
+                .expect("active")
+                .is_empty()
+        );
+        assert!(
+            db.active_commands_for_requester("missing")
+                .expect("active")
+                .is_empty()
+        );
+
+        let replay = db.commands_to_replay("device-a", 13, 10).expect("replay");
+        let ids: Vec<_> = replay.iter().map(|command| command.id.as_str()).collect();
+        assert!(ids.contains(&"c-a"), "{ids:?}");
+        assert!(ids.contains(&"c-a-done"), "{ids:?}");
+        assert!(!ids.iter().any(|id| *id == "c-owner" || *id == "c-b"));
+    }
+
+    #[test]
+    fn old_database_gains_requester_column() {
+        let dir = std::env::temp_dir().join(format!("hermes-db-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hub.db");
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE commands (
+                    id TEXT PRIMARY KEY,
+                    node_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    argv TEXT NOT NULL,
+                    cwd TEXT,
+                    status TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    started_at_ms INTEGER,
+                    finished_at_ms INTEGER,
+                    exit_code INTEGER,
+                    message TEXT,
+                    UNIQUE(node_id, idempotency_key)
+                );
+                INSERT INTO commands(id, node_id, idempotency_key, argv, status, created_at_ms)
+                VALUES ('c-old', 'n-1', 'old', '[\"true\"]', 'running', 1);",
+            )
+            .expect("legacy schema");
+        }
+        let db = Db::open(&path).expect("migrate");
+        let old = db.command("c-old").expect("get").expect("exists");
+        // Opening the database is a process start: the previous process's
+        // running command cannot still be running.
+        assert_eq!(old.status, CommandStatus::Failed);
+        assert_eq!(old.message.as_deref(), Some("hub restarted"));
+        db.create_command("n-1", "c-new", &request("new"), Some("device-1"), 2)
+            .expect("insert");
+        let active = db
+            .active_commands_for_requester("device-1")
+            .expect("active");
+        assert_eq!(active, vec![("c-new".into(), "n-1".into())]);
+        assert!(
+            !db.active_commands_for_requester("device-1")
+                .expect("active")
+                .iter()
+                .any(|(id, _)| id == "c-old")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restart_fails_unfinished_commands_and_clears_presence() {
+        let dir = std::env::temp_dir().join(format!("hermes-db-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("hub.db");
+        {
+            let db = Db::open(&path).expect("db");
+            db.create_command("n-1", "c-live", &request("live"), Some("device-1"), 10)
+                .expect("insert");
+            db.mark_command_running("c-live", 11).expect("running");
+            db.create_command("n-1", "c-done", &request("done"), None, 10)
+                .expect("insert");
+            db.finish_command("c-done", CommandStatus::Succeeded, Some(0), None, 12)
+                .expect("finish");
+            db.upsert_node(
+                "n-1",
+                "synthetic",
+                &HostInfo {
+                    hostname: "synthetic".into(),
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    agent_version: "0.1.0".into(),
+                },
+                &Capabilities::baseline(),
+                &BTreeMap::new(),
+                12,
+            )
+            .expect("node");
+            assert!(db.node("n-1").expect("get").expect("node").online);
+        }
+        let db = Db::open(&path).expect("reopen");
+        let live = db.command("c-live").expect("get").expect("exists");
+        assert_eq!(live.status, CommandStatus::Failed);
+        assert_eq!(live.message.as_deref(), Some("hub restarted"));
+        let done = db.command("c-done").expect("get").expect("exists");
+        assert_eq!(done.status, CommandStatus::Succeeded);
+        assert!(
+            !db.node("n-1").expect("get").expect("node").online,
+            "presence does not survive the process that held the socket"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
