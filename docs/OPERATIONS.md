@@ -15,14 +15,53 @@ troubleshooting. Omarchy-specific integration is in
 - Optional: the Kanban plugin for the Kanban surface, a `voice-models` TTS
   service for **Speak**, and Superwhisper for dictation.
 
-The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
+The client defaults to `http://127.0.0.1:9119` (loopback dashboard), which is
+only right for a throwaway local host. In this fleet the backend is the
+`hermes-crew` pod — see **Deployed backend: hermes-crew** below.
+
+## Deployed backend: hermes-crew
+
+In this fleet the host is not a laptop process: it is the `hermes-crew` pod in
+namespace `hermes-crew` (one gateway, every profile, state on the `hermes-data`
+PVC, memory in the in-cluster OpenRecall store). This client is its frontend.
+
+| | |
+| --- | --- |
+| Endpoint on a k3s node | `http://10.43.29.77:9119` (Service VIP, pinned) |
+| Endpoint off-cluster | `https://hermes-crew.tigris-ule.ts.net` (tailnet ingress) |
+| Auth | `HERMES_TOKEN` = deployment session token, else basic login → cookie |
+| Token source | BSM `hermes-crew-session-token` → Secret `hermes-crew/hermes-dashboard` key `session-token` → `HERMES_DASHBOARD_SESSION_TOKEN` |
+
+**Status 2026-11-12:** the value exists in BSM, the Deployment reads it as an
+optional key, but External Secrets has not delivered it — it fails with a 400
+from the Bitwarden API while listing organization secrets (`GET
+/rest/api/1/secrets` through `bitwarden-sdk-server`). Until that clears, the
+gateway mints a random token per start and rejects the stored one, so the helper
+probes `/api/profiles` with the bearer and falls back to password login when it
+is refused.
+
+```bash
+source scripts/hermes-crew-env.sh   # resolves URL + credentials, exports env
+```
+
+The token is a deployment session token, not an OIDC/cookie credential: it is a
+bearer on REST and a `?token=` on the WebSocket, so it is the only auth that
+survives a gateway restart. `HERMES_BASIC` still works because the client
+performs `/auth/password-login` (provider `basic`) itself, but the resulting
+cookie dies with the gateway process.
+
+The VIP is only routable from cluster nodes. The ingress is the path for any
+other machine, and it is gated by the tailnet ACL — when the caller is not
+admitted the ingress proxy logs `no rules matched` and the connection is
+dropped, which looks like a dead backend from the client side. Check the ACL
+before blaming the gateway.
 
 ## Environment variables
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `HERMES_URL` | `http://127.0.0.1:9119` | host origin; scheme/host/port only |
-| `HERMES_TOKEN` | unset | bearer token for every REST call and WS query |
+| `HERMES_TOKEN` | unset | bearer token for every REST call and WS query; on hermes-crew use the deployment session token |
 | `HERMES_BASIC` | unset | `user:pass`; gated hosts trade it for a cookie + WS ticket |
 | `HERMES_COOKIE` | unset | ready-made `__Host-hermes_session_at=…`; skips login |
 | `HERMES_PROFILE` | host active profile | profile the chat is scoped to |
@@ -38,7 +77,7 @@ The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
 | `HERMES_OPEN_SETTINGS` | unset | open the sheet: `vault`, `model`, `assignments`, `skills`, `mcp`, `sessions`, `computers`, `usage` |
 | `HERMES_DEMO` | unset | seed a short local transcript for screenshots |
 | `RUST_LOG` | `hermes_desktop=info,hermes_api=info,hermes_rpc=info` | tracing filter |
-| `HERMES_GPUI_LIVE_HOST` / `_TOKEN` | unset | only for `--ignored` live tests; never production |
+| `HERMES_GPUI_LIVE_HOST` / `_TOKEN` / `_BASIC` / `_PROFILE` | unset | only for `--ignored` live tests; never production. `_BASIC` is `user:pass` for a host that authenticates with a password login instead of a bearer token |
 
 Credentials are never written to disk by the client. Debug output redacts
 tokens, cookies and query strings.
@@ -309,6 +348,7 @@ only covers crashes, not a closed window (closing hides to tray).
 | Tests | `cargo test --workspace --all-targets --locked` | unit + contract behaviour |
 | Host probe | `hermes-desktop --probe` | REST, WS handshake, session creation |
 | Live plugin | `HERMES_GPUI_LIVE_HOST=… HERMES_GPUI_LIVE_TOKEN=… cargo test -p hermes-api -- --ignored live_kanban` | real Kanban detail/comment/attachment/board behaviour and board isolation |
+| Live turn | `HERMES_GPUI_LIVE_HOST=… HERMES_GPUI_LIVE_BASIC=user:pass cargo test -p hermes-api -- --ignored --nocapture live_prompt_turn` | one real session created, prompted and deleted through the client stack (`HERMES_GPUI_LIVE_PROFILE` picks the profile) |
 | Protocol | `cargo test -p hermes-protocol` | frame versioning, validation and secret redaction |
 | Hub/node e2e | `cargo test -p hermes-hub --test e2e` | real enrollment, node execution, streams, prompt answer, audit and revoke |
 | Chart | `helm lint charts/hermes-hub && helm template hermes-hub charts/hermes-hub --namespace hermes` | chart schema and rendered objects |

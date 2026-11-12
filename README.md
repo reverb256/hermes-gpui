@@ -5,12 +5,50 @@
 
 A native GPUI desktop client for a Hermes host — no Electron, no Chromium.
 
+In this fleet the host is the **`hermes-crew` pod** (namespace `hermes-crew`):
+one gateway process serving every profile, with profile state on the Hermes PVC
+and memory in the in-cluster OpenRecall store. This client is the frontend for
+that pod; it does not run its own gateway.
+
+## Running against hermes-crew
+
+```bash
+source scripts/hermes-crew-env.sh   # HERMES_URL + HERMES_BASIC
+cargo run -p hermes-desktop
+```
+
+The helper defaults to the Service VIP `http://10.43.29.77:9119`, which is
+correct on a host that is itself a k3s node. Set `HERMES_CREW_URL` for anything
+else — the tailnet ingress is `https://hermes-crew.tigris-ule.ts.net`, subject
+to the tailnet ACL. Credentials come from `HERMES_CREW_USER`/`HERMES_CREW_PASS`
+or the `hermes-dashboard` Secret; nothing is written to disk.
+
+The helper exports `HERMES_TOKEN` when it can read the deployment session token
+from BSM (key `hermes-crew-session-token`, needs `BWS_ACCESS_TOKEN`) **and** the
+gateway accepts it — that is the preferred path, since a bearer is also the
+`?token=` the WebSocket uses and it survives gateway restarts. Otherwise it falls
+back to `HERMES_BASIC`, and the client POSTs `/auth/password-login` (provider
+`basic`) itself and keeps the session cookie.
+
+The token only works once the gateway has been started with
+`HERMES_DASHBOARD_SESSION_TOKEN` set to the same value; without it the server
+mints a random token per start. As of 2026-11-12 the value is in BSM but the
+cluster's Secret is not carrying it yet, because External Secrets is getting a
+400 from the Bitwarden API when it lists organization secrets. So the login path
+is what works today.
+
 It talks to the same two surfaces the official desktop app does:
 
 | Surface | Endpoint | Used for |
 | --- | --- | --- |
 | REST | `GET /api/profiles`, `/api/profiles/active`, `/api/mcp/servers`, `/api/cron/jobs`, `/api/status`, `GET/PUT/DELETE /api/env` | profile roster, tool inventory, cron, host telemetry, secrets |
 | JSON-RPC over WebSocket | `ws(s)://host:9119/api/ws` | sessions, `prompt.submit`, streaming `message.delta`, approvals |
+
+Session writes are fenced: `PATCH`/`DELETE /api/sessions/{id}` first read
+`GET /api/sessions/{id}/mutation-snapshot` and forward its `runtime_revision`
+and `runtime_generation` with a fresh `request_id`. The owner store commits no
+unfenced write, and answers one with `409 client_upgrade_required`, so a client
+that skips the snapshot cannot rename, pin, archive or delete a conversation.
 
 The RPC layer is a Rust port of the gateway client Hermes ships in
 `hermes-agent/apps/shared/src/json-rpc-channel.ts`: request ids, per-call

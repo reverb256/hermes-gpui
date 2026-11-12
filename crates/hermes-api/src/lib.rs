@@ -329,6 +329,21 @@ pub struct MemoryProviderConfig {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// `GET /api/sessions/{id}/mutation-snapshot` — the revision fence a session
+/// write has to carry. The owner store commits nothing unfenced: a client that
+/// skips this gets `409 client_upgrade_required` on every edit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMutationSnapshot {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub exists: bool,
+    #[serde(default)]
+    pub runtime_revision: u64,
+    #[serde(default)]
+    pub runtime_generation: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryProviderField {
     #[serde(default)]
@@ -2065,11 +2080,24 @@ impl RestClient {
     }
 
     /// `PATCH /api/sessions/{id}` — rename, pin, archive or mark read.
+    /// The fence is merged into `patch`, which keeps its own fields.
     pub async fn update_session(&self, id: &str, patch: Value) -> Result<Value, ApiError> {
         let path = format!("/api/sessions/{id}");
+        let challenge = self.session_mutation_snapshot(id).await?;
+        let mut body = patch;
+        if let Some(fields) = body.as_object_mut() {
+            fields.insert("request_id".into(), Value::String(new_request_id()));
+            fields.insert(
+                "expected_revision".into(),
+                challenge.runtime_revision.into(),
+            );
+            if let Some(generation) = challenge.runtime_generation {
+                fields.insert("expected_generation".into(), generation.into());
+            }
+        }
         let response = self
             .authed(reqwest::Method::PATCH, &path)
-            .json(&patch)
+            .json(&body)
             .send()
             .await
             .map_err(|source| ApiError::Transport {
@@ -2077,6 +2105,18 @@ impl RestClient {
                 source,
             })?;
         self.decode_response(&path, response).await
+    }
+
+    /// `GET /api/sessions/{id}/mutation-snapshot` — the fence for one session.
+    pub async fn session_mutation_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<SessionMutationSnapshot, ApiError> {
+        self.get(&format!(
+            "/api/sessions/{}/mutation-snapshot",
+            percent_encode(id)
+        ))
+        .await
     }
 
     /// `GET /api/providers/oauth` — every OAuth-capable provider and status.
@@ -2156,9 +2196,19 @@ impl RestClient {
     }
 
     /// `DELETE /api/sessions/{id}` — removes one stored conversation.
+    /// Fenced with the snapshot revision, like every other session write.
     pub async fn delete_session(&self, id: &str) -> Result<Value, ApiError> {
         const PATH: &str = "/api/sessions";
-        let path = format!("{PATH}/{id}");
+        let challenge = self.session_mutation_snapshot(id).await?;
+        let mut path = format!(
+            "{PATH}/{}?request_id={}&expected_revision={}",
+            percent_encode(id),
+            percent_encode(&new_request_id()),
+            challenge.runtime_revision
+        );
+        if let Some(generation) = challenge.runtime_generation {
+            path.push_str(&format!("&expected_generation={generation}"));
+        }
         let response = self
             .authed(reqwest::Method::DELETE, &path)
             .send()
@@ -2469,6 +2519,12 @@ impl RestClient {
 }
 
 /// Percent-encode for a query value (tickets are base64url, but stay safe).
+/// Idempotency id for one session mutation. The owner replays the receipt of a
+/// repeated `request_id`, so it must be fresh per attempt.
+fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -2970,6 +3026,185 @@ mod tests {
             requests[2]
                 .starts_with("DELETE /api/plugins/kanban/attachments/7?board=work%20%26%20ops ")
         );
+    }
+
+    /// Every session write is fenced: the client reads the mutation snapshot
+    /// first and forwards its revision, because the owner store rejects
+    /// unfenced mutations with `409 client_upgrade_required`.
+    #[tokio::test]
+    async fn session_mutations_carry_the_revision_fence() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                r#"{"session_id":"abc","exists":true,"runtime_revision":7,"runtime_generation":3}"#,
+                r#"{"ok":true}"#,
+                r#"{"session_id":"abc","exists":true,"runtime_revision":9,"runtime_generation":4}"#,
+                r#"{"ok":true,"revision":10}"#,
+            ];
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    data.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|n| n.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&data).into_owned());
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let host = HostConfig {
+            base_url: format!("http://{address}"),
+            token: Some("test-token".into()),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+
+        client.delete_session("abc").await.unwrap();
+        client
+            .update_session("abc", serde_json::json!({ "title": "renamed" }))
+            .await
+            .unwrap();
+
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /api/sessions/abc/mutation-snapshot "));
+        assert!(
+            requests[1].starts_with("DELETE /api/sessions/abc?request_id="),
+            "unfenced delete: {}",
+            requests[1]
+        );
+        assert!(requests[1].contains("&expected_revision=7&expected_generation=3 "));
+        assert!(requests[2].starts_with("GET /api/sessions/abc/mutation-snapshot "));
+        assert!(requests[3].starts_with("PATCH /api/sessions/abc "));
+        for key in [
+            r#""title":"renamed""#,
+            r#""request_id":""#,
+            r#""expected_revision":9"#,
+            r#""expected_generation":4"#,
+        ] {
+            assert!(requests[3].contains(key), "missing {key}: {}", requests[3]);
+        }
+    }
+
+    /// One real turn through the client stack: authenticate, create a session,
+    /// submit a prompt and wait for the streamed reply, then delete that
+    /// session. It never touches an existing conversation.
+    ///
+    /// `HERMES_GPUI_LIVE_HOST=http://host:9119 HERMES_GPUI_LIVE_BASIC=user:pass \
+    ///  cargo test -p hermes-api -- --ignored --nocapture live_prompt_turn`
+    #[tokio::test]
+    #[ignore = "requires a reachable Hermes host via HERMES_GPUI_LIVE_HOST"]
+    async fn live_prompt_turn_streams_a_reply() {
+        let Ok(base) = std::env::var("HERMES_GPUI_LIVE_HOST") else {
+            return;
+        };
+        let mut host = HostConfig {
+            base_url: base,
+            token: std::env::var("HERMES_GPUI_LIVE_TOKEN").ok(),
+            ..HostConfig::local()
+        };
+        if let Ok(basic) = std::env::var("HERMES_GPUI_LIVE_BASIC")
+            && let Some((user, pass)) = basic.split_once(':')
+        {
+            host.basic = Some((user.to_string(), pass.to_string()));
+        }
+        host.profile = std::env::var("HERMES_GPUI_LIVE_PROFILE")
+            .ok()
+            .filter(|profile| !profile.is_empty());
+
+        let (host, notes) = authenticate(&host).await;
+        assert!(notes.is_empty(), "auth notes: {notes:?}");
+        assert!(
+            host.cookie.is_some() || host.token.is_some(),
+            "no credential was acquired"
+        );
+
+        let client = GatewayClient::connect(host.connection_config())
+            .await
+            .expect("gateway ws");
+        let mut events = client.subscribe();
+
+        let created = gateway::create_session(&client, host.profile.as_deref())
+            .await
+            .expect("session.create");
+        assert!(!created.session_id.is_empty(), "empty session id");
+
+        gateway::submit_prompt(&client, &created.session_id, "Reply with exactly: pong")
+            .await
+            .expect("prompt.submit");
+
+        let mut reply = String::new();
+        let mut tools = 0_u32;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "turn never completed; reply so far: {reply}"
+            );
+            let Ok(event) = tokio::time::timeout(remaining, events.recv()).await else {
+                panic!("turn never completed; reply so far: {reply}");
+            };
+            let Ok(event) = event else { continue };
+            if event
+                .session_id
+                .as_deref()
+                .is_some_and(|id| id != created.session_id)
+            {
+                continue; // another session's traffic on the shared socket
+            }
+            if let Some(text) = event.text_delta() {
+                reply.push_str(text);
+            }
+            match event.kind.as_str() {
+                "tool.start" => tools += 1,
+                "message.complete" => break,
+                "error" => panic!("gateway error: {}", event.payload),
+                _ => {}
+            }
+        }
+        assert!(
+            !reply.trim().is_empty(),
+            "the turn completed without any assistant text"
+        );
+        println!("reply: {reply:?} ({tools} tool start(s))");
+
+        // Leave no trace: this session existed only for the check.
+        let rest = RestClient::new(&host);
+        let id = created
+            .stored_session_id
+            .clone()
+            .unwrap_or_else(|| created.session_id.clone());
+        rest.delete_session(&id).await.expect("session cleanup");
+        client.close();
     }
 
     /// Exercises the real plugin routes end to end. Point it at a *disposable*
