@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 // ---- surfaces ----------------------------------------------------------
 const DEFAULT_BG: u32 = 0x0b0d12;
 const DEFAULT_BG_ELEV: u32 = 0x11141b;
+const DEFAULT_BG_DEEP: u32 = 0x06070a;
 const DEFAULT_SURFACE: u32 = 0x171b25;
 const DEFAULT_SURFACE_HI: u32 = 0x1f2532;
 const DEFAULT_BORDER: u32 = 0x262c3a;
@@ -33,19 +34,26 @@ const DEFAULT_BORDER_HI: u32 = 0x39415a;
 const DEFAULT_TEXT: u32 = 0xe6e9f2;
 const DEFAULT_TEXT_MUTED: u32 = 0x9aa3b8;
 const DEFAULT_TEXT_DIM: u32 = 0x6f788d;
+const DEFAULT_TEXT_BRIGHT: u32 = 0xffffff;
 
 // ---- meaning -----------------------------------------------------------
 const DEFAULT_ACCENT: u32 = 0x7aa2f7;
 const DEFAULT_ACCENT_HI: u32 = 0x93b4ff;
 const DEFAULT_ACCENT_SOFT: u32 = 0x1b2740;
+const DEFAULT_ORANGE: u32 = 0xeb8b54;
 const DEFAULT_USER: u32 = 0x9ed072;
+const DEFAULT_USER_HI: u32 = 0xc4cfc4;
 const DEFAULT_REASONING: u32 = 0xb48ef5;
+const DEFAULT_REASONING_HI: u32 = 0xead7e7;
 const DEFAULT_REASONING_SOFT: u32 = 0x2a2340;
 const DEFAULT_WARN: u32 = 0xe0af68;
+const DEFAULT_WARN_HI: u32 = 0xf7dc9c;
 const DEFAULT_WARN_SOFT: u32 = 0x2b2417;
 const DEFAULT_DANGER: u32 = 0xf7768e;
-const DEFAULT_BOT_ACCENT_CYAN: u32 = 0x7dcfff;
+const DEFAULT_DANGER_HI: u32 = 0xfaaaa9;
 const DEFAULT_DANGER_SOFT: u32 = 0x2e1a20;
+const DEFAULT_BOT_ACCENT_CYAN: u32 = 0x7dcfff;
+const DEFAULT_BOT_ACCENT_CYAN_HI: u32 = 0xdfeaf0;
 
 // ---- layout geometry ---------------------------------------------------
 /// Fixed bot rail.
@@ -69,24 +77,32 @@ pub const SHEET_H: f32 = 560.;
 pub struct Palette {
     pub bg: u32,
     pub bg_elev: u32,
+    pub bg_deep: u32,
     pub surface: u32,
     pub surface_hi: u32,
     pub border: u32,
     pub border_hi: u32,
     pub text: u32,
+    pub text_bright: u32,
     pub text_muted: u32,
     pub text_dim: u32,
     pub accent: u32,
     pub accent_hi: u32,
     pub accent_soft: u32,
+    pub orange: u32,
     pub user: u32,
+    pub user_hi: u32,
     pub reasoning: u32,
+    pub reasoning_hi: u32,
     pub reasoning_soft: u32,
     pub warn: u32,
+    pub warn_hi: u32,
     pub warn_soft: u32,
     pub danger: u32,
+    pub danger_hi: u32,
     pub danger_soft: u32,
     pub bot_accent_cyan: u32,
+    pub bot_accent_cyan_hi: u32,
     pub scrim: u32,
 }
 
@@ -94,24 +110,32 @@ impl Palette {
     pub const DEFAULT: Self = Self {
         bg: DEFAULT_BG,
         bg_elev: DEFAULT_BG_ELEV,
+        bg_deep: DEFAULT_BG_DEEP,
         surface: DEFAULT_SURFACE,
         surface_hi: DEFAULT_SURFACE_HI,
         border: DEFAULT_BORDER,
         border_hi: DEFAULT_BORDER_HI,
         text: DEFAULT_TEXT,
+        text_bright: DEFAULT_TEXT_BRIGHT,
         text_muted: DEFAULT_TEXT_MUTED,
         text_dim: DEFAULT_TEXT_DIM,
         accent: DEFAULT_ACCENT,
         accent_hi: DEFAULT_ACCENT_HI,
         accent_soft: DEFAULT_ACCENT_SOFT,
+        orange: DEFAULT_ORANGE,
         user: DEFAULT_USER,
+        user_hi: DEFAULT_USER_HI,
         reasoning: DEFAULT_REASONING,
+        reasoning_hi: DEFAULT_REASONING_HI,
         reasoning_soft: DEFAULT_REASONING_SOFT,
         warn: DEFAULT_WARN,
+        warn_hi: DEFAULT_WARN_HI,
         warn_soft: DEFAULT_WARN_SOFT,
         danger: DEFAULT_DANGER,
+        danger_hi: DEFAULT_DANGER_HI,
         danger_soft: DEFAULT_DANGER_SOFT,
         bot_accent_cyan: DEFAULT_BOT_ACCENT_CYAN,
+        bot_accent_cyan_hi: DEFAULT_BOT_ACCENT_CYAN_HI,
         scrim: 0xcc05070b,
     };
 }
@@ -203,6 +227,31 @@ pub fn scrim() -> u32 {
     value(|p| p.scrim)
 }
 
+pub fn bg_deep() -> u32 {
+    value(|p| p.bg_deep)
+}
+pub fn text_bright() -> u32 {
+    value(|p| p.text_bright)
+}
+pub fn orange() -> u32 {
+    value(|p| p.orange)
+}
+pub fn user_hi() -> u32 {
+    value(|p| p.user_hi)
+}
+pub fn reasoning_hi() -> u32 {
+    value(|p| p.reasoning_hi)
+}
+pub fn warn_hi() -> u32 {
+    value(|p| p.warn_hi)
+}
+pub fn danger_hi() -> u32 {
+    value(|p| p.danger_hi)
+}
+pub fn bot_accent_cyan_hi() -> u32 {
+    value(|p| p.bot_accent_cyan_hi)
+}
+
 /// Re-read the active Omarchy theme, at most once every two seconds.
 /// Returns true when the palette changed, so the caller can repaint.
 /// The `theme-set` hook marker bypasses the throttle for one reload.
@@ -278,14 +327,24 @@ fn palette_from_str(text: &str) -> Palette {
     let bg = get("background").unwrap_or(DEFAULT_BG);
     let text = get("foreground").unwrap_or(DEFAULT_TEXT);
     let lighter = get("lighter_background").unwrap_or_else(|| mix(bg, text, 0.08));
+    let bg_deep = get("darker_background").unwrap_or_else(|| mix(bg, 0x000000, 0.5));
+    let text_bright = get("bright_foreground")
+        .or_else(|| get("light_foreground"))
+        .unwrap_or(text);
     let accent = get("accent")
         .or_else(|| get("blue"))
         .unwrap_or(DEFAULT_ACCENT);
     let user = get("green").unwrap_or(DEFAULT_USER);
+    let user_hi = get("bright_green").unwrap_or_else(|| mix(user, text, 0.20));
     let reasoning = get("magenta").unwrap_or(DEFAULT_REASONING);
+    let reasoning_hi = get("bright_magenta").unwrap_or_else(|| mix(reasoning, text, 0.20));
     let warn = get("yellow").unwrap_or(DEFAULT_WARN);
+    let warn_hi = get("bright_yellow").unwrap_or_else(|| mix(warn, text, 0.20));
     let danger = get("red").unwrap_or(DEFAULT_DANGER);
+    let danger_hi = get("bright_red").unwrap_or_else(|| mix(danger, text, 0.20));
     let cyan = get("cyan").unwrap_or(DEFAULT_BOT_ACCENT_CYAN);
+    let cyan_hi = get("bright_cyan").unwrap_or_else(|| mix(cyan, text, 0.20));
+    let orange = get("orange").unwrap_or(DEFAULT_ORANGE);
 
     let bg_elev = mix(bg, lighter, 0.55);
     let surface_hi = mix(lighter, text, 0.08);
@@ -307,24 +366,32 @@ fn palette_from_str(text: &str) -> Palette {
     Palette {
         bg,
         bg_elev,
+        bg_deep,
         surface: lighter,
         surface_hi,
         border: mix(bg, text, 0.18),
         border_hi: mix(bg, text, 0.30),
         text,
+        text_bright,
         text_muted: muted,
         text_dim: dim,
         accent,
         accent_hi: get("bright_blue").unwrap_or_else(|| mix(accent, text, 0.20)),
         accent_soft,
+        orange,
         user,
+        user_hi,
         reasoning,
+        reasoning_hi,
         reasoning_soft: mix(bg, reasoning, 0.16),
         warn,
+        warn_hi,
         warn_soft: mix(bg, warn, 0.16),
         danger,
+        danger_hi,
         danger_soft: mix(bg, danger, 0.16),
         bot_accent_cyan: cyan,
+        bot_accent_cyan_hi: cyan_hi,
         scrim: 0xcc00_0000 | (bg & 0x00ff_ffff),
     }
 }
