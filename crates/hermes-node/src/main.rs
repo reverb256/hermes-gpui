@@ -41,9 +41,33 @@ async fn main() -> Result<()> {
     let agent = Agent::new(config);
     tokio::select! {
         result = agent.run() => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
+            // Docker and systemd stop the agent with SIGTERM. Ctrl-C is the
+            // terminal equivalent. Exiting lets kill-on-drop reap children
+            // instead of waiting out a container runtime's kill timeout.
             tracing::info!("shutdown signal received");
             Ok(())
         }
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = std::pin::pin!(async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    #[cfg(unix)]
+    let terminate = std::pin::pin!(async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => tracing::warn!(error = %err, "failed to listen for SIGTERM"),
+        }
+    });
+    #[cfg(not(unix))]
+    let terminate = std::pin::pin!(std::future::pending::<()>());
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }

@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `hermes-node` exits on SIGTERM, so a container or service stop does not
+  wait for the runtime's kill timeout. Child processes are marked
+  kill-on-drop.
+- A hub process start marks nodes offline and fails queued or running
+  commands with `hub restarted`. The previous process's sockets are gone, so
+  those commands are not still running.
+- A device revoke or disconnect cancels the commands that device started,
+  including a PTY. The node hangs the terminal up instead of leaving the
+  shell running. Replacing the socket on reconnect does not cancel, and an
+  owner API command is not tied to a device. The device is sent command
+  states from the last two minutes when it connects again.
 - Hub, node and desktop install the rustls `ring` provider explicitly, so a
   `wss://` connection no longer panics with "could not automatically determine
   the process-level CryptoProvider".

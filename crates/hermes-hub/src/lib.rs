@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::routing::{delete, get, post};
 use hermes_protocol::{
-    AuditEntry, CommandRecord, HubToDevice, HubToNode, NodeSummary, SecretPrompt,
+    AuditEntry, CommandRecord, CommandStatus, HubToDevice, HubToNode, NodeSummary, SecretPrompt,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -297,6 +297,57 @@ impl HubState {
         }
     }
 
+    /// Stop commands a device started. The node hangs up a PTY (SIGHUP, then
+    /// kill) when it receives `cancel`. If the node is already gone, the
+    /// record is closed here so it cannot stay `running` with no requester.
+    /// Owner API commands have no requester and are left alone. A replacement
+    /// socket is not a disconnect: callers must only use this when the device
+    /// is actually gone.
+    fn cancel_commands_for_device(&self, device_id: &str, reason: &'static str) {
+        let active = match self.db.active_commands_for_requester(device_id) {
+            Ok(active) => active,
+            Err(err) => {
+                warn!(error = %err, "failed to list commands for a device");
+                return;
+            }
+        };
+        for (command_id, node_id) in active {
+            let delivered = self.send_node(
+                &node_id,
+                HubToNode::Cancel {
+                    command_id: command_id.clone(),
+                },
+            );
+            if !delivered {
+                match self.db.finish_command(
+                    &command_id,
+                    CommandStatus::Cancelled,
+                    None,
+                    Some(reason),
+                    now_ms(),
+                ) {
+                    Ok(Some(command)) => {
+                        self.broadcast_device(HubToDevice::CommandState { command });
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        warn!(error = %err, "failed to cancel a command whose node is offline");
+                    }
+                }
+            }
+            self.audit(
+                "hub",
+                "command.cancel_requested",
+                json!({
+                    "device_id": device_id,
+                    "command_id": command_id,
+                    "reason": reason,
+                    "delivered": delivered,
+                }),
+            );
+        }
+    }
+
     /// Remove this connection only if it is still the current one. Returns
     /// false when a newer socket has already replaced it, so the old task does
     /// not mark the node offline or fail the new socket's commands.
@@ -362,7 +413,10 @@ impl HubState {
         }
     }
 
-    fn unregister_device(&self, device_id: &str, conn_id: &str) {
+    /// Returns true when this socket was still the current one. A newer socket
+    /// or an earlier revoke already owns the device, and must not have its
+    /// commands cancelled by the socket that lost the race.
+    fn unregister_device(&self, device_id: &str, conn_id: &str) -> bool {
         let mut devices = self
             .devices
             .write()
@@ -372,6 +426,9 @@ impl HubState {
             .is_some_and(|connection| connection.conn_id == conn_id)
         {
             devices.remove(device_id);
+            true
+        } else {
+            false
         }
     }
 
