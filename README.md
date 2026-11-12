@@ -5,6 +5,31 @@
 
 A native GPUI desktop client for a Hermes host — no Electron, no Chromium.
 
+In this fleet the host is the **`hermes-crew` pod** (namespace `hermes-crew`):
+one gateway process serving every profile, with profile state on the Hermes PVC
+and memory in the in-cluster OpenRecall store. This client is the frontend for
+that pod; it does not run its own gateway.
+
+## Running against hermes-crew
+
+```bash
+source scripts/hermes-crew-env.sh   # HERMES_URL + HERMES_BASIC
+cargo run -p hermes-desktop
+```
+
+The helper defaults to the Service VIP `http://10.43.29.77:9119`, which is
+correct on a host that is itself a k3s node. Set `HERMES_CREW_URL` for anything
+else — the tailnet ingress is `https://hermes-crew.tigris-ule.ts.net`, subject
+to the tailnet ACL. Credentials come from `HERMES_CREW_USER`/`HERMES_CREW_PASS`
+or the `hermes-dashboard` Secret; nothing is written to disk.
+
+The helper exports `HERMES_TOKEN` when it can read the deployment session token
+from BSM (key `hermes-crew-session-token`, needs `BWS_ACCESS_TOKEN`), which is
+the preferred path: it is a bearer on REST and a `?token=` on the WebSocket, and
+it survives gateway restarts. Without it the helper falls back to
+`HERMES_BASIC`, and the client POSTs `/auth/password-login` (provider `basic`)
+itself and keeps the session cookie.
+
 It talks to the same two surfaces the official desktop app does:
 
 | Surface | Endpoint | Used for |

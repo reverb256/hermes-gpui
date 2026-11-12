@@ -17,12 +17,41 @@ troubleshooting. Omarchy-specific integration is in
 
 The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
 
+## Deployed backend: hermes-crew
+
+In this fleet the host is not a laptop process: it is the `hermes-crew` pod in
+namespace `hermes-crew` (one gateway, every profile, state on the `hermes-data`
+PVC, memory in the in-cluster OpenRecall store). This client is its frontend.
+
+| | |
+| --- | --- |
+| Endpoint on a k3s node | `http://10.43.29.77:9119` (Service VIP, pinned) |
+| Endpoint off-cluster | `https://hermes-crew.tigris-ule.ts.net` (tailnet ingress) |
+| Auth | `HERMES_TOKEN` = deployment session token, else basic login → cookie |
+| Token source | BSM `hermes-crew-session-token` → Secret `hermes-crew/hermes-dashboard` key `session-token` → `HERMES_DASHBOARD_SESSION_TOKEN` |
+
+```bash
+source scripts/hermes-crew-env.sh   # resolves URL + credentials, exports env
+```
+
+The token is a deployment session token, not an OIDC/cookie credential: it is a
+bearer on REST and a `?token=` on the WebSocket, so it is the only auth that
+survives a gateway restart. `HERMES_BASIC` still works because the client
+performs `/auth/password-login` (provider `basic`) itself, but the resulting
+cookie dies with the gateway process.
+
+The VIP is only routable from cluster nodes. The ingress is the path for any
+other machine, and it is gated by the tailnet ACL — when the caller is not
+admitted the ingress proxy logs `no rules matched` and the connection is
+dropped, which looks like a dead backend from the client side. Check the ACL
+before blaming the gateway.
+
 ## Environment variables
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `HERMES_URL` | `http://127.0.0.1:9119` | host origin; scheme/host/port only |
-| `HERMES_TOKEN` | unset | bearer token for every REST call and WS query |
+| `HERMES_TOKEN` | unset | bearer token for every REST call and WS query; on hermes-crew use the deployment session token |
 | `HERMES_BASIC` | unset | `user:pass`; gated hosts trade it for a cookie + WS ticket |
 | `HERMES_COOKIE` | unset | ready-made `__Host-hermes_session_at=…`; skips login |
 | `HERMES_PROFILE` | host active profile | profile the chat is scoped to |

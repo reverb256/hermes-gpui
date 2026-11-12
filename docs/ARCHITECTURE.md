@@ -1,6 +1,6 @@
 # Architecture
 
-**Last updated:** 2026-11-10.
+**Last updated:** 2026-11-12.
 
 ## Three layers
 
@@ -13,9 +13,10 @@
 └──────────────┬──────────────┘
                │ REST + ws(s)://…/api/ws
 ┌──────────────▼──────────────┐
-│ hermes-agent (sibling repo) │  FastAPI host + agent runtime + plugins
+│ hermes-crew pod (k3s)       │  FastAPI host + agent runtime + plugins
 │  /api/*  +  JSON-RPC gateway│  sessions, tools, MCP, cron, memory, voice,
 │  plugins: kanban, memory, … │  browser, computer_use, PTY, Kanban
+│  ns hermes-crew, PVC data   │  one gateway, every profile
 └─────────────────────────────┘
 
 ┌─────────────────────────────┐
@@ -29,6 +30,15 @@
 │  crates/hermes-node         │  local policy, execution and streams
 └─────────────────────────────┘
 ```
+
+The host in the middle diagram is deployed as the `hermes-crew` pod
+(`media-k8s/cluster/addons/hermes-crew`): one gateway for every profile, state on
+a Longhorn PVC, memory in the in-cluster OpenRecall store, reachable on the
+Service VIP `10.43.29.77:9119` from cluster nodes and on
+`hermes-crew.tigris-ule.ts.net` through the tailnet ingress. Frontends
+authenticate with the deployment session token (BSM
+`hermes-crew-session-token`) as `HERMES_TOKEN`; password login works too but the
+cookie it yields expires with the gateway process.
 
 The hub is not a replacement for `hermes-agent`. It is the personal control
 plane that connects the computers and gives the GPUI client a stable roster and
