@@ -15,7 +15,9 @@ troubleshooting. Omarchy-specific integration is in
 - Optional: the Kanban plugin for the Kanban surface, a `voice-models` TTS
   service for **Speak**, and Superwhisper for dictation.
 
-The client defaults to `http://127.0.0.1:9119` (loopback dashboard).
+The client defaults to `http://127.0.0.1:9119` (loopback dashboard), which is
+only right for a throwaway local host. In this fleet the backend is the
+`hermes-crew` pod — see **Deployed backend: hermes-crew** below.
 
 ## Deployed backend: hermes-crew
 
