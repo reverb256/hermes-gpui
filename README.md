@@ -44,6 +44,12 @@ It talks to the same two surfaces the official desktop app does:
 | REST | `GET /api/profiles`, `/api/profiles/active`, `/api/mcp/servers`, `/api/cron/jobs`, `/api/status`, `GET/PUT/DELETE /api/env` | profile roster, tool inventory, cron, host telemetry, secrets |
 | JSON-RPC over WebSocket | `ws(s)://host:9119/api/ws` | sessions, `prompt.submit`, streaming `message.delta`, approvals |
 
+Session writes are fenced: `PATCH`/`DELETE /api/sessions/{id}` first read
+`GET /api/sessions/{id}/mutation-snapshot` and forward its `runtime_revision`
+and `runtime_generation` with a fresh `request_id`. The owner store commits no
+unfenced write, and answers one with `409 client_upgrade_required`, so a client
+that skips the snapshot cannot rename, pin, archive or delete a conversation.
+
 The RPC layer is a Rust port of the gateway client Hermes ships in
 `hermes-agent/apps/shared/src/json-rpc-channel.ts`: request ids, per-call
 timeouts, `gateway.ping` keepalive with a 45 s liveness deadline,

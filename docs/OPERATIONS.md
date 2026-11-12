@@ -77,7 +77,7 @@ before blaming the gateway.
 | `HERMES_OPEN_SETTINGS` | unset | open the sheet: `vault`, `model`, `assignments`, `skills`, `mcp`, `sessions`, `computers`, `usage` |
 | `HERMES_DEMO` | unset | seed a short local transcript for screenshots |
 | `RUST_LOG` | `hermes_desktop=info,hermes_api=info,hermes_rpc=info` | tracing filter |
-| `HERMES_GPUI_LIVE_HOST` / `_TOKEN` | unset | only for `--ignored` live tests; never production |
+| `HERMES_GPUI_LIVE_HOST` / `_TOKEN` / `_BASIC` / `_PROFILE` | unset | only for `--ignored` live tests; never production. `_BASIC` is `user:pass` for a host that authenticates with a password login instead of a bearer token |
 
 Credentials are never written to disk by the client. Debug output redacts
 tokens, cookies and query strings.
@@ -348,6 +348,7 @@ only covers crashes, not a closed window (closing hides to tray).
 | Tests | `cargo test --workspace --all-targets --locked` | unit + contract behaviour |
 | Host probe | `hermes-desktop --probe` | REST, WS handshake, session creation |
 | Live plugin | `HERMES_GPUI_LIVE_HOST=… HERMES_GPUI_LIVE_TOKEN=… cargo test -p hermes-api -- --ignored live_kanban` | real Kanban detail/comment/attachment/board behaviour and board isolation |
+| Live turn | `HERMES_GPUI_LIVE_HOST=… HERMES_GPUI_LIVE_BASIC=user:pass cargo test -p hermes-api -- --ignored --nocapture live_prompt_turn` | one real session created, prompted and deleted through the client stack (`HERMES_GPUI_LIVE_PROFILE` picks the profile) |
 | Protocol | `cargo test -p hermes-protocol` | frame versioning, validation and secret redaction |
 | Hub/node e2e | `cargo test -p hermes-hub --test e2e` | real enrollment, node execution, streams, prompt answer, audit and revoke |
 | Chart | `helm lint charts/hermes-hub && helm template hermes-hub charts/hermes-hub --namespace hermes` | chart schema and rendered objects |
