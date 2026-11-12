@@ -30,6 +30,14 @@ PVC, memory in the in-cluster OpenRecall store). This client is its frontend.
 | Auth | `HERMES_TOKEN` = deployment session token, else basic login → cookie |
 | Token source | BSM `hermes-crew-session-token` → Secret `hermes-crew/hermes-dashboard` key `session-token` → `HERMES_DASHBOARD_SESSION_TOKEN` |
 
+**Status 2026-11-12:** the value exists in BSM, the Deployment reads it as an
+optional key, but External Secrets has not delivered it — it fails with a 400
+from the Bitwarden API while listing organization secrets (`GET
+/rest/api/1/secrets` through `bitwarden-sdk-server`). Until that clears, the
+gateway mints a random token per start and rejects the stored one, so the helper
+probes `/api/profiles` with the bearer and falls back to password login when it
+is refused.
+
 ```bash
 source scripts/hermes-crew-env.sh   # resolves URL + credentials, exports env
 ```

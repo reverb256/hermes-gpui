@@ -24,11 +24,18 @@ to the tailnet ACL. Credentials come from `HERMES_CREW_USER`/`HERMES_CREW_PASS`
 or the `hermes-dashboard` Secret; nothing is written to disk.
 
 The helper exports `HERMES_TOKEN` when it can read the deployment session token
-from BSM (key `hermes-crew-session-token`, needs `BWS_ACCESS_TOKEN`), which is
-the preferred path: it is a bearer on REST and a `?token=` on the WebSocket, and
-it survives gateway restarts. Without it the helper falls back to
-`HERMES_BASIC`, and the client POSTs `/auth/password-login` (provider `basic`)
-itself and keeps the session cookie.
+from BSM (key `hermes-crew-session-token`, needs `BWS_ACCESS_TOKEN`) **and** the
+gateway accepts it — that is the preferred path, since a bearer is also the
+`?token=` the WebSocket uses and it survives gateway restarts. Otherwise it falls
+back to `HERMES_BASIC`, and the client POSTs `/auth/password-login` (provider
+`basic`) itself and keeps the session cookie.
+
+The token only works once the gateway has been started with
+`HERMES_DASHBOARD_SESSION_TOKEN` set to the same value; without it the server
+mints a random token per start. As of 2026-11-12 the value is in BSM but the
+cluster's Secret is not carrying it yet, because External Secrets is getting a
+400 from the Bitwarden API when it lists organization secrets. So the login path
+is what works today.
 
 It talks to the same two surfaces the official desktop app does:
 

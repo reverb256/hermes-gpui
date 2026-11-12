@@ -8,6 +8,9 @@
 #   1. HERMES_CREW_TOKEN      explicit deployment session token
 #   2. bws                    read key hermes-crew-session-token from BSM
 #                             (needs BWS_ACCESS_TOKEN in the environment)
+# A token is only used if the gateway accepts it; otherwise the helper falls
+# back, because a gateway started without HERMES_DASHBOARD_SESSION_TOKEN mints
+# a random one per start and rejects the stored value.
 #   3. HERMES_CREW_USER/PASS  or the hermes-dashboard Secret; the client then
 #                             POSTs /auth/password-login itself and keeps the
 #                             session cookie
@@ -37,13 +40,22 @@ elif command -v bws >/dev/null 2>&1 && [ -n "${BWS_ACCESS_TOKEN:-}" ]; then
     -o json 2>/dev/null | jq -r '.value // empty')"
 fi
 
+# The token is only useful if the gateway was started with that same value.
+# When it was not, the server mints a random one per start and a bearer gets
+# rejected, so verify before exporting and fall back to the login path.
 if [ -n "$_token" ]; then
-  export HERMES_URL="$HERMES_CREW_URL"
-  export HERMES_TOKEN="$_token"
-  unset HERMES_BASIC HERMES_COOKIE
-  echo "hermes-crew-env: HERMES_URL=$HERMES_URL (session token exported, not shown)"
-  unset _token
-  return 0 2>/dev/null || exit 0
+  _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    -H "Authorization: Bearer $_token" "$HERMES_CREW_URL/api/profiles" 2>/dev/null)"
+  if [ "$_code" = "200" ]; then
+    export HERMES_URL="$HERMES_CREW_URL"
+    export HERMES_TOKEN="$_token"
+    unset HERMES_BASIC HERMES_COOKIE
+    echo "hermes-crew-env: HERMES_URL=$HERMES_URL (session token exported, not shown)"
+    unset _token _code
+    return 0 2>/dev/null || exit 0
+  fi
+  echo "hermes-crew-env: stored token rejected (HTTP ${_code:-none}); using password login" >&2
+  unset _token _code
 fi
 
 if [ -z "${HERMES_CREW_USER:-}" ] || [ -z "${HERMES_CREW_PASS:-}" ]; then
