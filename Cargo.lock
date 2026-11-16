@@ -2799,7 +2799,7 @@ name = "hermes-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "gpui-ce",
  "gpui_ce_elements",
@@ -2827,7 +2827,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "hermes-node",
  "hermes-protocol",
@@ -2851,7 +2851,7 @@ name = "hermes-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "hermes-protocol",
  "hostname",

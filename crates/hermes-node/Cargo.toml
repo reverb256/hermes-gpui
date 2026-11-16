@@ -10,7 +10,7 @@ description = "Hermes node agent: outbound connection, local execution and secre
 [dependencies]
 hermes-protocol.workspace = true
 anyhow.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 futures-util.workspace = true
 hostname = "0.4"
 rand = "0.9"
