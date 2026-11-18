@@ -227,27 +227,62 @@ pub fn scrim() -> u32 {
     value(|p| p.scrim)
 }
 
+/// Hover, emphasis and unused-surface counterparts for the full palette.
+/// Loaded from the Omarchy theme so view code can stay on tokens; views use
+/// a subset today, so clippy would otherwise flag these on the binary crate.
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn bg_deep() -> u32 {
     value(|p| p.bg_deep)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn text_bright() -> u32 {
     value(|p| p.text_bright)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn orange() -> u32 {
     value(|p| p.orange)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn user_hi() -> u32 {
     value(|p| p.user_hi)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn reasoning_hi() -> u32 {
     value(|p| p.reasoning_hi)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn warn_hi() -> u32 {
     value(|p| p.warn_hi)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn danger_hi() -> u32 {
     value(|p| p.danger_hi)
 }
+#[allow(
+    dead_code,
+    reason = "public palette token accessors; views use a subset today"
+)]
 pub fn bot_accent_cyan_hi() -> u32 {
     value(|p| p.bot_accent_cyan_hi)
 }
