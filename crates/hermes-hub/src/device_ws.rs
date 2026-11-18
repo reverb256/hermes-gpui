@@ -100,6 +100,16 @@ async fn run_device(
     let _ = tx.send(HubToDevice::NodeList {
         nodes: state.db.nodes()?,
     });
+    // A reconnect needs the commands this device still owns, including one
+    // that finished while the socket was down. Two minutes covers the
+    // client's backoff without replaying the whole history.
+    let replay_since = now_ms().saturating_sub(120_000);
+    for command in state
+        .db
+        .commands_to_replay(&principal.id, replay_since, 32)?
+    {
+        let _ = tx.send(HubToDevice::CommandState { command });
+    }
     for prompt in state.db.pending_prompts()? {
         let _ = tx.send(HubToDevice::PromptRequest { prompt });
     }
@@ -158,9 +168,16 @@ async fn run_device(
         }
     }
 
-    state.unregister_device(&principal.id, &conn_id);
+    let was_current = state.unregister_device(&principal.id, &conn_id);
     drop(tx);
     let _ = writer.await;
+    if was_current {
+        // Revoke removes the map entry first and cancels there immediately.
+        // A socket that simply closed may be a network blip: wait the
+        // configured grace window and cancel only if the device does not
+        // reattach. A replacement socket already cleared any lease.
+        state.schedule_disconnect_cancel(&principal.id);
+    }
     state.audit(
         "device",
         "device.disconnected",
@@ -201,10 +218,13 @@ fn handle_device_message(
             }
             // Insert before presence is checked so an idempotent retry still
             // finds the first record if the node has gone offline.
-            let (record, created) =
-                state
-                    .db
-                    .create_command(&node_id, &command.id, &command, now_ms())?;
+            let (record, created) = state.db.create_command(
+                &node_id,
+                &command.id,
+                &command,
+                Some(&principal.id),
+                now_ms(),
+            )?;
             if created {
                 state.dispatch_command(record.clone(), command)?;
             } else {
