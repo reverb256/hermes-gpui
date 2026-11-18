@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Hub, node and desktop install the rustls `ring` provider explicitly, so a
   `wss://` connection no longer panics with "could not automatically determine
   the process-level CryptoProvider".
+- `scripts/hermes-crew-env.sh` defaults to the in-cluster Service DNS name
+  instead of a pinned ClusterIP. Session writes retry a stale mutation fence
+  by re-reading the snapshot and sending again with backoff.
 
 ### Added
 
