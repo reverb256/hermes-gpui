@@ -34,8 +34,8 @@
 The host in the middle diagram is deployed as the `hermes-crew` pod
 (`media-k8s/cluster/addons/hermes-crew`): one gateway for every profile, state on
 a Longhorn PVC, memory in the in-cluster OpenRecall store, reachable on the
-Service VIP `10.43.29.77:9119` from cluster nodes and on
-`hermes-crew.tigris-ule.ts.net` through the tailnet ingress. Frontends
+Service DNS name `hermes-crew.hermes-crew.svc:9119` from cluster nodes, or on
+whatever origin `HERMES_CREW_URL` is set to. Frontends
 authenticate with the deployment session token (BSM
 `hermes-crew-session-token`) as `HERMES_TOKEN`; password login works too but the
 cookie it yields expires with the gateway process.

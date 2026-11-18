@@ -27,10 +27,11 @@ PVC, memory in the in-cluster OpenRecall store). This client is its frontend.
 
 | | |
 | --- | --- |
-| Endpoint on a k3s node | `http://10.43.29.77:9119` (Service VIP, pinned) |
-| Endpoint off-cluster | `https://hermes-crew.tigris-ule.ts.net` (tailnet ingress) |
+| Endpoint on a k3s node | `http://hermes-crew.hermes-crew.svc:9119` (Service DNS) |
+| Endpoint off-cluster | set `HERMES_CREW_URL` to a reachable ingress or origin |
 | Auth | `HERMES_TOKEN` = deployment session token, else basic login → cookie |
 | Token source | BSM `hermes-crew-session-token` → Secret `hermes-crew/hermes-dashboard` key `session-token` → `HERMES_DASHBOARD_SESSION_TOKEN` |
+| Password fallback | `HERMES_CREW_USER`/`HERMES_CREW_PASS`, or `kubectl -n hermes-crew get secret hermes-dashboard` (keys `username` and `password`) |
 
 **Status 2026-11-12:** the value exists in BSM, the Deployment reads it as an
 optional key, but External Secrets has not delivered it — it fails with a 400
@@ -50,11 +51,15 @@ survives a gateway restart. `HERMES_BASIC` still works because the client
 performs `/auth/password-login` (provider `basic`) itself, but the resulting
 cookie dies with the gateway process.
 
-The VIP is only routable from cluster nodes. The ingress is the path for any
-other machine, and it is gated by the tailnet ACL — when the caller is not
-admitted the ingress proxy logs `no rules matched` and the connection is
-dropped, which looks like a dead backend from the client side. Check the ACL
-before blaming the gateway.
+The Service DNS name is only resolvable from inside the cluster. From anywhere
+else, set `HERMES_CREW_URL` to an origin the client can reach.
+
+If `HERMES_CREW_USER` and `HERMES_CREW_PASS` are unset, `scripts/hermes-crew-env.sh`
+reads the username and password from the `hermes-dashboard` Secret:
+
+```bash
+kubectl -n hermes-crew get secret hermes-dashboard
+```
 
 ## Environment variables
 

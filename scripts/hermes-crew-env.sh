@@ -20,15 +20,18 @@
 # a login cookie it does not expire with the gateway process.
 #
 # Endpoint choice:
-#   - default: the Service VIP. Correct on a host that is itself a k3s node
-#     (zephyr, forge, sentry, nexus), where kube-proxy serves the VIP locally.
-#   - HERMES_CREW_URL: override it. The tailnet ingress is
-#     https://hermes-crew.tigris-ule.ts.net, subject to the tailnet ACL, so it
-#     only works once the ACL admits the caller to the ingress proxy.
+#   - default: the in-cluster Service DNS name
+#     http://hermes-crew.hermes-crew.svc:9119, reachable from a cluster node
+#     where CoreDNS can resolve the Service.
+#   - HERMES_CREW_URL: override it for ingress or any other reachable origin.
+#
+# If HERMES_CREW_USER/HERMES_CREW_PASS are unset, the helper reads username
+# and password from the hermes-dashboard Secret in namespace hermes-crew
+# (kubectl -n hermes-crew get secret hermes-dashboard).
 #
 # Nothing is written to disk and no secret value is echoed.
 
-HERMES_CREW_URL="${HERMES_CREW_URL:-http://10.43.29.77:9119}"
+HERMES_CREW_URL="${HERMES_CREW_URL:-http://hermes-crew.hermes-crew.svc:9119}"
 HERMES_CREW_BSM_KEY="${HERMES_CREW_BSM_KEY:-hermes-crew-session-token}"
 
 _token=""

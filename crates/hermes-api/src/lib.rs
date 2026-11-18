@@ -1250,6 +1250,8 @@ pub enum ApiError {
     },
     #[error("missing `{field}` in response from {path}")]
     Missing { field: String, path: String },
+    #[error("session patch for {path} must be a JSON object")]
+    InvalidSessionPatch { path: String },
     #[error(transparent)]
     Rpc(#[from] hermes_rpc::RpcError),
 }
@@ -2080,31 +2082,37 @@ impl RestClient {
     }
 
     /// `PATCH /api/sessions/{id}` — rename, pin, archive or mark read.
-    /// The fence is merged into `patch`, which keeps its own fields.
+    /// The fence is merged into `patch`, which keeps its own fields. `patch`
+    /// must be a JSON object; otherwise the call returns
+    /// `InvalidSessionPatch` without contacting the host. A stale fence is
+    /// retried: re-read the snapshot, then send again, with backoff.
     pub async fn update_session(&self, id: &str, patch: Value) -> Result<Value, ApiError> {
         let path = format!("/api/sessions/{id}");
-        let challenge = self.session_mutation_snapshot(id).await?;
-        let mut body = patch;
-        if let Some(fields) = body.as_object_mut() {
-            fields.insert("request_id".into(), Value::String(new_request_id()));
-            fields.insert(
-                "expected_revision".into(),
-                challenge.runtime_revision.into(),
-            );
-            if let Some(generation) = challenge.runtime_generation {
-                fields.insert("expected_generation".into(), generation.into());
-            }
+        if !patch.is_object() {
+            return Err(ApiError::InvalidSessionPatch { path });
         }
-        let response = self
-            .authed(reqwest::Method::PATCH, &path)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|source| ApiError::Transport {
-                path: path.clone(),
-                source,
-            })?;
-        self.decode_response(&path, response).await
+        self.with_session_fence(id, |challenge| {
+            let mut body = patch.clone();
+            apply_session_fence(
+                body.as_object_mut()
+                    .expect("update_session patch was checked to be an object"),
+                &challenge,
+            );
+            let path = path.clone();
+            async move {
+                let response = self
+                    .authed(reqwest::Method::PATCH, &path)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|source| ApiError::Transport {
+                        path: path.clone(),
+                        source,
+                    })?;
+                self.decode_response(&path, response).await
+            }
+        })
+        .await
     }
 
     /// `GET /api/sessions/{id}/mutation-snapshot` — the fence for one session.
@@ -2197,27 +2205,57 @@ impl RestClient {
 
     /// `DELETE /api/sessions/{id}` — removes one stored conversation.
     /// Fenced with the snapshot revision, like every other session write.
+    /// A stale fence is retried: re-read the snapshot, then send again.
     pub async fn delete_session(&self, id: &str) -> Result<Value, ApiError> {
         const PATH: &str = "/api/sessions";
-        let challenge = self.session_mutation_snapshot(id).await?;
-        let mut path = format!(
-            "{PATH}/{}?request_id={}&expected_revision={}",
-            percent_encode(id),
-            percent_encode(&new_request_id()),
-            challenge.runtime_revision
-        );
-        if let Some(generation) = challenge.runtime_generation {
-            path.push_str(&format!("&expected_generation={generation}"));
+        self.with_session_fence(id, |challenge| {
+            let mut path = format!(
+                "{PATH}/{}?request_id={}&expected_revision={}",
+                percent_encode(id),
+                percent_encode(&new_request_id()),
+                challenge.runtime_revision
+            );
+            if let Some(generation) = challenge.runtime_generation {
+                path.push_str(&format!("&expected_generation={generation}"));
+            }
+            async move {
+                let response = self
+                    .authed(reqwest::Method::DELETE, &path)
+                    .send()
+                    .await
+                    .map_err(|source| ApiError::Transport {
+                        path: path.clone(),
+                        source,
+                    })?;
+                self.decode_response(&path, response).await
+            }
+        })
+        .await
+    }
+
+    /// Re-read the mutation snapshot and retry when the fence is stale.
+    async fn with_session_fence<T, F, Fut>(&self, id: &str, mut attempt: F) -> Result<T, ApiError>
+    where
+        F: FnMut(SessionMutationSnapshot) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ApiError>>,
+    {
+        let mut delay = std::time::Duration::from_millis(SESSION_FENCE_RETRY_MS);
+        let mut last_error = None;
+        for attempt_no in 0..SESSION_FENCE_ATTEMPTS {
+            let challenge = self.session_mutation_snapshot(id).await?;
+            match attempt(challenge).await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if is_stale_mutation_fence(&err) && attempt_no + 1 < SESSION_FENCE_ATTEMPTS =>
+                {
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                    last_error = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
         }
-        let response = self
-            .authed(reqwest::Method::DELETE, &path)
-            .send()
-            .await
-            .map_err(|source| ApiError::Transport {
-                path: path.clone(),
-                source,
-            })?;
-        self.decode_response(&path, response).await
+        Err(last_error.expect("stale fence retry exhausted"))
     }
 
     /// `GET /api/model/auxiliary` — the helper-task assignments.
@@ -2518,13 +2556,41 @@ impl RestClient {
     }
 }
 
-/// Percent-encode for a query value (tickets are base64url, but stay safe).
 /// Idempotency id for one session mutation. The owner replays the receipt of a
 /// repeated `request_id`, so it must be fresh per attempt.
 fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+const SESSION_FENCE_ATTEMPTS: u32 = 3;
+const SESSION_FENCE_RETRY_MS: u64 = 50;
+
+fn apply_session_fence(
+    fields: &mut serde_json::Map<String, Value>,
+    challenge: &SessionMutationSnapshot,
+) {
+    fields.insert("request_id".into(), Value::String(new_request_id()));
+    fields.insert(
+        "expected_revision".into(),
+        challenge.runtime_revision.into(),
+    );
+    if let Some(generation) = challenge.runtime_generation {
+        fields.insert("expected_generation".into(), generation.into());
+    }
+}
+
+fn is_stale_mutation_fence(err: &ApiError) -> bool {
+    match err {
+        ApiError::Status {
+            status: 409, body, ..
+        } => !body
+            .to_ascii_lowercase()
+            .contains("client_upgrade_required"),
+        _ => false,
+    }
+}
+
+/// Percent-encode for a query value (tickets are base64url, but stay safe).
 fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -3111,6 +3177,137 @@ mod tests {
             r#""expected_generation":4"#,
         ] {
             assert!(requests[3].contains(key), "missing {key}: {}", requests[3]);
+        }
+    }
+
+    /// A stale fence is not fatal: the client re-reads the snapshot, waits,
+    /// and retries with the fresh revision and a new request id.
+    #[tokio::test]
+    async fn session_mutations_retry_a_stale_fence() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                (
+                    200,
+                    r#"{"session_id":"abc","exists":true,"runtime_revision":7,"runtime_generation":3}"#,
+                ),
+                (
+                    409,
+                    r#"{"detail":{"error":"stale_revision","message":"fence is stale"}}"#,
+                ),
+                (
+                    200,
+                    r#"{"session_id":"abc","exists":true,"runtime_revision":8,"runtime_generation":4}"#,
+                ),
+                (200, r#"{"ok":true,"revision":9}"#),
+            ];
+            let mut requests = Vec::new();
+            for (status, reply) in replies {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut data = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    data.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|n| n.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&data).into_owned());
+                let reason = if status == 409 { "Conflict" } else { "OK" };
+                write!(
+                    socket,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let host = HostConfig {
+            base_url: format!("http://{address}"),
+            token: Some("test-token".into()),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+        client
+            .update_session("abc", serde_json::json!({ "title": "renamed" }))
+            .await
+            .unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("GET /api/sessions/abc/mutation-snapshot "));
+        assert!(requests[1].starts_with("PATCH /api/sessions/abc "));
+        assert!(
+            requests[1].contains(r#""expected_revision":7"#),
+            "first attempt uses the stale fence: {}",
+            requests[1]
+        );
+        assert!(requests[2].starts_with("GET /api/sessions/abc/mutation-snapshot "));
+        assert!(requests[3].starts_with("PATCH /api/sessions/abc "));
+        assert!(
+            requests[3].contains(r#""expected_revision":8"#),
+            "retry must use the re-read revision: {}",
+            requests[3]
+        );
+        assert!(
+            requests[3].contains(r#""expected_generation":4"#),
+            "retry must use the re-read generation: {}",
+            requests[3]
+        );
+        let first_id = request_id_from(&requests[1]);
+        let retry_id = request_id_from(&requests[3]);
+        assert_ne!(
+            first_id, retry_id,
+            "each attempt must use a fresh request_id"
+        );
+    }
+
+    fn request_id_from(request: &str) -> String {
+        let Some(start) = request.find(r#""request_id":""#) else {
+            panic!("missing request_id: {request}");
+        };
+        let rest = &request[start + r#""request_id":""#.len()..];
+        let end = rest.find('"').expect("unterminated request_id");
+        rest[..end].to_string()
+    }
+
+    #[tokio::test]
+    async fn session_update_rejects_a_non_object_patch() {
+        let host = HostConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            token: Some("test-token".into()),
+            ..HostConfig::local()
+        };
+        let client = RestClient::new(&host);
+        let err = client
+            .update_session("abc", serde_json::json!(["not", "an", "object"]))
+            .await
+            .expect_err("non-object patch must not be sent");
+        match err {
+            ApiError::InvalidSessionPatch { path } => {
+                assert_eq!(path, "/api/sessions/abc");
+            }
+            other => panic!("expected InvalidSessionPatch, got {other:?}"),
         }
     }
 
