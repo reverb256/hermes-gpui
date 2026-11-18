@@ -134,6 +134,9 @@ async fn run_node(
         heartbeat_ms: state.config.heartbeat_ms,
         max_command_timeout_ms: state.config.max_command_timeout_ms,
     });
+    // A hub restart leaves never-started commands queued. Deliver them
+    // again now that this node is on a live socket, using the same ids.
+    state.redispatch_queued_for_node(&principal.id);
 
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {

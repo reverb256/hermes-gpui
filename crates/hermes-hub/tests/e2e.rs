@@ -768,12 +768,13 @@ async fn revoke_cancels_that_devices_terminal_only() {
     hub.stop();
 }
 
-/// Closing the current device socket hangs the terminal up. A socket that was
-/// only replaced by a reconnect must not.
+/// Closing the current device socket hangs the terminal up only after the
+/// reconnect grace window expires. A socket that was only replaced by a
+/// reconnect must not start that window.
 #[tokio::test]
-async fn disconnect_cancels_the_terminal_but_replacement_does_not() {
+async fn disconnect_cancels_after_grace_but_replacement_does_not() {
     init_tracing();
-    let hub = start_live_hub("forge-disconnect").await;
+    let hub = start_live_hub("drop-disconnect").await;
     let (device_id, token) = enroll(&hub.client, &hub.base, "device", "laptop-drop").await;
     let mut first = connect_device(&hub.base, &device_id, &token).await;
     send_device(
@@ -787,9 +788,9 @@ async fn disconnect_cancels_the_terminal_but_replacement_does_not() {
     wait_for_status(&hub.client, &hub.base, "cmd-live", "running").await;
 
     // The second hello replaces the first socket. The shell stays. Wait past
-    // the node's hangup grace so a mistaken cancel would already show.
+    // the test grace window so a mistaken cancel would already show.
     let second = connect_device(&hub.base, &device_id, &token).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
     assert_eq!(
         command_status(&hub.client, &hub.base, "cmd-live").await,
         "running",
@@ -805,9 +806,53 @@ async fn disconnect_cancels_the_terminal_but_replacement_does_not() {
     hub.stop();
 }
 
+/// A dropped socket is a blip until the grace window expires. Reattaching
+/// inside the window keeps the PTY; cancel runs only after a later expiry.
+#[tokio::test]
+async fn reconnect_within_grace_keeps_the_terminal() {
+    init_tracing();
+    let hub = start_live_hub("drop-reconnect").await;
+    let (device_id, token) = enroll(&hub.client, &hub.base, "device", "laptop-blip").await;
+    let mut first = connect_device(&hub.base, &device_id, &token).await;
+    send_device(
+        &mut first,
+        DeviceToHub::SubmitCommand {
+            node_id: hub.node_id.clone(),
+            command: pty_shell("cmd-blip", "idem-blip", &hub.root),
+        },
+    )
+    .await;
+    wait_for_status(&hub.client, &hub.base, "cmd-blip", "running").await;
+
+    first.close(None).await.expect("close first socket");
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        command_status(&hub.client, &hub.base, "cmd-blip").await,
+        "running",
+        "a short disconnect must not hang up the PTY"
+    );
+
+    let mut second = connect_device(&hub.base, &device_id, &token).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(
+        command_status(&hub.client, &hub.base, "cmd-blip").await,
+        "running",
+        "reattaching inside the grace window must keep the PTY"
+    );
+
+    second.close(None).await.expect("close second socket");
+    drop(second);
+    wait_for_status(&hub.client, &hub.base, "cmd-blip", "cancelled").await;
+
+    hub.stop();
+}
+
 fn hub_config() -> Config {
     Config {
         admin_token: ADMIN.into(),
+        // Short enough for tests, long enough to observe a blip.
+        disconnect_grace_ms: 400,
         ..Config::for_test()
     }
 }

@@ -141,6 +141,9 @@ impl Db {
                 message        TEXT,
                 -- Device that submitted the command. NULL is an owner API request.
                 requester_id   TEXT,
+                -- Full CommandRequest JSON, so a queued command can be
+                -- redispatched after a hub restart with the same id.
+                request_json   TEXT,
                 UNIQUE(node_id, idempotency_key)
             );
 
@@ -187,19 +190,22 @@ impl Db {
              WHERE resolved_at_ms IS NULL;
 
             -- Sockets die with the process. A node is offline until it
-            -- registers again, and a command left queued or running was tied
-            -- to a socket that no longer exists.
+            -- registers again. A command that was mid-run lost its socket
+            -- and cannot still be running. A command that never started
+            -- stays queued so it can be redispatched by id when the node
+            -- reconnects.
             UPDATE nodes SET online = 0;
             UPDATE commands
                SET status = 'failed',
                    message = 'hub restarted',
                    finished_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000
-             WHERE status IN ('queued','running');
+             WHERE status = 'running';
             "#,
         )?;
         // Databases created before requester tracking lack the column. CREATE
         // TABLE IF NOT EXISTS does not add it, so migrate explicitly.
         ensure_requester_column(&conn)?;
+        ensure_request_json_column(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS commands_requester ON commands(requester_id, status);",
         )?;
@@ -453,10 +459,12 @@ impl Db {
         now: u64,
     ) -> Result<(CommandRecord, bool)> {
         let argv = serde_json::to_string(&request.argv)?;
+        let request_json = serde_json::to_string(request)?;
         let inserted = self.conn().execute(
             "INSERT OR IGNORE INTO commands(
-                id, node_id, idempotency_key, argv, cwd, status, created_at_ms, requester_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
+                id, node_id, idempotency_key, argv, cwd, status, created_at_ms, requester_id,
+                request_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8)",
             params![
                 id,
                 node_id,
@@ -465,6 +473,7 @@ impl Db {
                 request.cwd,
                 now as i64,
                 requester_id,
+                request_json,
             ],
         )?;
         let record = self
@@ -595,6 +604,34 @@ impl Db {
         let mut commands = Vec::new();
         for row in rows {
             commands.push(row??);
+        }
+        Ok(commands)
+    }
+
+    /// Commands that were accepted but never started on this node, with the
+    /// original request so a later process can redispatch them by id.
+    pub fn queued_commands_for_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<(CommandRecord, CommandRequest)>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, node_id, argv, cwd, status, idempotency_key, created_at_ms,
+                    started_at_ms, finished_at_ms, exit_code, message, request_json
+             FROM commands
+             WHERE node_id = ?1 AND status = 'queued'
+             ORDER BY created_at_ms",
+        )?;
+        let rows = statement.query_map(params![node_id], |row| {
+            let request_json: Option<String> = row.get(11)?;
+            Ok((command_from_row_values(row)?, request_json))
+        })?;
+        let mut commands = Vec::new();
+        for row in rows {
+            let (record, request_json) = row?;
+            let record = record?;
+            let request = request_from_stored(&record, request_json.as_deref());
+            commands.push((record, request));
         }
         Ok(commands)
     }
@@ -845,6 +882,25 @@ fn ensure_requester_column(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_request_json_column(conn: &Connection) -> Result<()> {
+    let exists = {
+        let mut statement = conn.prepare("PRAGMA table_info(commands)")?;
+        let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            if name? == "request_json" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !exists {
+        conn.execute("ALTER TABLE commands ADD COLUMN request_json TEXT", [])?;
+    }
+    Ok(())
+}
+
 fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<NodeSummary>> {
     let capabilities: String = row.get(6)?;
     let labels: String = row.get(7)?;
@@ -864,6 +920,10 @@ fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<NodeSummary
 }
 
 fn command_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CommandRecord>> {
+    command_from_row_values(row)
+}
+
+fn command_from_row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CommandRecord>> {
     let argv: String = row.get(2)?;
     let status: String = row.get(4)?;
     Ok((|| {
@@ -882,6 +942,25 @@ fn command_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CommandR
             message: row.get(10)?,
         })
     })())
+}
+
+fn request_from_stored(record: &CommandRecord, request_json: Option<&str>) -> CommandRequest {
+    if let Some(json) = request_json
+        && let Ok(mut request) = serde_json::from_str::<CommandRequest>(json)
+    {
+        request.id = record.id.clone();
+        return request;
+    }
+    CommandRequest {
+        id: record.id.clone(),
+        idempotency_key: record.idempotency_key.clone(),
+        argv: record.argv.clone(),
+        cwd: record.cwd.clone(),
+        env: BTreeMap::new(),
+        timeout_ms: 0,
+        secret: None,
+        pty: None,
+    }
 }
 
 #[cfg(test)]
@@ -1168,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_fails_unfinished_commands_and_clears_presence() {
+    fn restart_fails_running_commands_and_leaves_queued() {
         let dir = std::env::temp_dir().join(format!("hermes-db-restart-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("hub.db");
@@ -1177,6 +1256,8 @@ mod tests {
             db.create_command("n-1", "c-live", &request("live"), Some("device-1"), 10)
                 .expect("insert");
             db.mark_command_running("c-live", 11).expect("running");
+            db.create_command("n-1", "c-queued", &request("queued"), Some("device-1"), 10)
+                .expect("queued");
             db.create_command("n-1", "c-done", &request("done"), None, 10)
                 .expect("insert");
             db.finish_command("c-done", CommandStatus::Succeeded, Some(0), None, 12)
@@ -1201,6 +1282,13 @@ mod tests {
         let live = db.command("c-live").expect("get").expect("exists");
         assert_eq!(live.status, CommandStatus::Failed);
         assert_eq!(live.message.as_deref(), Some("hub restarted"));
+        let queued = db.command("c-queued").expect("get").expect("exists");
+        assert_eq!(queued.status, CommandStatus::Queued);
+        assert_eq!(queued.id, "c-queued");
+        let pending = db.queued_commands_for_node("n-1").expect("queued");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0.id, "c-queued");
+        assert_eq!(pending[0].1.idempotency_key, "queued");
         let done = db.command("c-done").expect("get").expect("exists");
         assert_eq!(done.status, CommandStatus::Succeeded);
         assert!(

@@ -172,10 +172,11 @@ async fn run_device(
     drop(tx);
     let _ = writer.await;
     if was_current {
-        // Revoke removes the map entry first and cancels there. This path is
-        // the socket that simply closed, including a client that will
-        // reconnect: the shell must not outlive the device that started it.
-        state.cancel_commands_for_device(&principal.id, "device disconnected");
+        // Revoke removes the map entry first and cancels there immediately.
+        // A socket that simply closed may be a network blip: wait the
+        // configured grace window and cancel only if the device does not
+        // reattach. A replacement socket already cleared any lease.
+        state.schedule_disconnect_cancel(&principal.id);
     }
     state.audit(
         "device",

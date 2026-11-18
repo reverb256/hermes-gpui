@@ -97,6 +97,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 | `HERMES_HUB_ADMIN_TOKEN` | required | owner credential, at least 32 characters; never logged |
 | `HERMES_HUB_HEARTBEAT_MS` | `15000` | heartbeat period advertised to nodes |
 | `HERMES_HUB_MAX_COMMAND_TIMEOUT_MS` | `900000` | upper bound accepted by the API |
+| `HERMES_HUB_DISCONNECT_GRACE_MS` | `30000` | wait after a device socket drop before cancelling that device's commands; a reconnect inside the window keeps the PTY; `0` cancels immediately |
 
 Mint an enrollment code, then exchange it once (the node token is printed only
 by the second call):
