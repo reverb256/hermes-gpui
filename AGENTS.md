@@ -22,7 +22,7 @@ make check              # cargo fmt --check, clippy -D warnings, cargo test (wha
 - Never push to `main`. Work on a branch and open a PR.
 - There is no label gate here: the owner squash-merges after CI is green. Agents never run `gh pr merge` and never add labels.
 - No force-push, rebase, amend or `--no-verify`. If a PR is behind, merge `main` into the branch.
-- Builds and tests run in CI or on zephyr (niced, CPU only). Never on sentry or forge.
+- Builds and tests run in CI or on the designated build host (niced, CPU only), never on the git-only or miner hosts.
 
 ## Secrets and personal details
 
