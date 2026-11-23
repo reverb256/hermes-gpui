@@ -19,7 +19,7 @@ use hermes_protocol::{
     Capabilities, CommandRequest, CommandStatus, Frame, HostInfo, HubToNode, MAX_PTY_INPUT_BYTES,
     NodeToHub, PromptAnswer, PromptDecision, PtySpec, SecretPrompt, SecretSpec, StreamChannel,
 };
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, watch};
