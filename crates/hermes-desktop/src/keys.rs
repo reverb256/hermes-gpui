@@ -122,6 +122,28 @@ pub fn resolve(chord: Chord<'_>, focus: Focus) -> Action {
     }
 }
 
+/// Whether a composer keystroke is claimed by the app instead of the text
+/// input. The UI gate and `resolve` have to agree: a chord that is mapped here
+/// but not claimed by the gate is swallowed by the input and never dispatched.
+/// Keeping the rule next to the map makes that mismatch testable without a
+/// window.
+pub fn is_app_chord(chord: Chord<'_>) -> bool {
+    if !chord.primary {
+        return false;
+    }
+    match chord.key {
+        // These are app commands with or without Shift.
+        "k" | "n" | "r" | "f" | "o" | "," | "comma" => true,
+        // Shift selects the app command; bare Ctrl/Cmd stays with the editor
+        // (paste/cut) or a section's own search field.
+        "v" | "m" | "a" | "s" | "u" | "x" | "h" => chord.shift,
+        digit => digit
+            .parse::<usize>()
+            .map(|index| (1..=9).contains(&index))
+            .unwrap_or(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +295,84 @@ mod tests {
             resolve(chord("m", Some("m")), Focus::Mention),
             Action::Insert("m".into())
         );
+    }
+
+    #[test]
+    fn every_claimed_chord_reaches_a_composer_action() {
+        // The gate and the map are one contract: if a chord is claimed here it
+        // must produce a real action, otherwise it is just stolen from the
+        // text input for nothing.
+        for (key, shift) in [
+            ("k", false),
+            ("k", true),
+            ("n", false),
+            ("r", false),
+            ("f", false),
+            ("o", false),
+            (",", false),
+            ("comma", false),
+            ("1", false),
+            ("9", true),
+            ("v", true),
+            ("m", true),
+            ("a", true),
+            ("s", true),
+            ("u", true),
+            ("x", true),
+            ("h", true),
+        ] {
+            let chord = Chord {
+                key,
+                primary: true,
+                shift,
+                alt: false,
+                text: None,
+            };
+            assert!(is_app_chord(chord), "{key} shift={shift} is not claimed");
+            assert_ne!(
+                resolve(chord, Focus::Composer),
+                Action::Nothing,
+                "{key} shift={shift} is claimed but unmapped"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_chords_stay_with_the_text_input() {
+        // Bare Ctrl/Cmd + these keys is editing (paste/cut) or a section's own
+        // search field; only the shifted form is an app command.
+        for key in ["v", "x", "m", "a", "s", "u", "h", "z"] {
+            let chord = Chord {
+                key,
+                primary: true,
+                shift: false,
+                alt: false,
+                text: None,
+            };
+            assert!(!is_app_chord(chord), "bare {key} must stay in the input");
+        }
+        assert!(!is_app_chord(chord("k", None)));
+        assert!(!is_app_chord(Chord {
+            key: "0",
+            primary: true,
+            shift: false,
+            alt: false,
+            text: None,
+        }));
+    }
+
+    #[test]
+    fn shift_k_is_owned_by_the_app_not_the_composer() {
+        // Ctrl+Shift+K maps to ToggleSkills and is dispatched; keep the gate
+        // claiming it or the focused text input swallows the chord first.
+        let chord = Chord {
+            key: "k",
+            primary: true,
+            shift: true,
+            alt: false,
+            text: Some("K"),
+        };
+        assert!(is_app_chord(chord));
+        assert_eq!(resolve(chord, Focus::Composer), Action::ToggleSkills);
     }
 }

@@ -128,6 +128,23 @@ enum PaletteAction {
     NewChat,
     Refresh,
     Interrupt,
+    Find,
+    Attach,
+    ToggleInspector,
+    ToggleSessions,
+    ToggleSkills,
+    ToggleMcp,
+    ToggleModels,
+    ToggleAssignments,
+    ToggleVault,
+    ToggleUsage,
+    ToggleComputers,
+    OpenMemory,
+    OpenAutomations,
+    OpenAccounts,
+    OpenMoa,
+    OpenKanban,
+    OpenTerminal,
     SwitchProfile(String),
     Quit,
 }
@@ -1078,31 +1095,16 @@ impl HermesApp {
         let keystroke = &event.keystroke;
         if self.composer_input.focus_handle(cx).is_focused(window) && !self.palette.open {
             let primary = keystroke.modifiers.control || keystroke.modifiers.platform;
-            let app_shortcut = primary
-                && matches!(
-                    keystroke.key.as_str(),
-                    "k" | "n"
-                        | "r"
-                        | "f"
-                        | "o"
-                        | ","
-                        | "comma"
-                        | "1"
-                        | "2"
-                        | "3"
-                        | "4"
-                        | "5"
-                        | "6"
-                        | "7"
-                        | "8"
-                        | "9"
-                )
-                || primary
-                    && keystroke.modifiers.shift
-                    && matches!(
-                        keystroke.key.as_str(),
-                        "v" | "m" | "a" | "s" | "u" | "x" | "h"
-                    );
+            // Ask the pure map which chords it owns instead of keeping a
+            // second, hand-maintained list here: a mapped chord the gate
+            // forgets is swallowed by the text input before dispatch.
+            let app_shortcut = keys::is_app_chord(Chord {
+                key: &keystroke.key,
+                primary,
+                shift: keystroke.modifiers.shift,
+                alt: keystroke.modifiers.alt,
+                text: keystroke.key_char.as_deref(),
+            });
             let mention_key = self.mention.open
                 && matches!(
                     keystroke.key.as_str(),
@@ -7944,6 +7946,96 @@ impl HermesApp {
                 action: PaletteAction::Interrupt,
             });
         }
+        // Every command with a chord belongs in the palette too, so the map
+        // and the palette stay in step. The last group is reachable through
+        // the settings sheet or a header button but has no chord of its own.
+        items.extend([
+            PaletteItem {
+                label: "Find in transcript".into(),
+                hint: "Ctrl+F".into(),
+                action: PaletteAction::Find,
+            },
+            PaletteItem {
+                label: "Attach file".into(),
+                hint: "Ctrl+O".into(),
+                action: PaletteAction::Attach,
+            },
+            PaletteItem {
+                label: "Toggle inspector".into(),
+                hint: "Ctrl+,".into(),
+                action: PaletteAction::ToggleInspector,
+            },
+            PaletteItem {
+                label: "Toggle sessions".into(),
+                hint: "Ctrl+Shift+S".into(),
+                action: PaletteAction::ToggleSessions,
+            },
+            PaletteItem {
+                label: "Toggle skills".into(),
+                hint: "Ctrl+Shift+K".into(),
+                action: PaletteAction::ToggleSkills,
+            },
+            PaletteItem {
+                label: "Toggle MCP".into(),
+                hint: "Ctrl+Shift+X".into(),
+                action: PaletteAction::ToggleMcp,
+            },
+            PaletteItem {
+                label: "Toggle model".into(),
+                hint: "Ctrl+Shift+M".into(),
+                action: PaletteAction::ToggleModels,
+            },
+            PaletteItem {
+                label: "Toggle assignments".into(),
+                hint: "Ctrl+Shift+A".into(),
+                action: PaletteAction::ToggleAssignments,
+            },
+            PaletteItem {
+                label: "Toggle vault".into(),
+                hint: "Ctrl+Shift+V".into(),
+                action: PaletteAction::ToggleVault,
+            },
+            PaletteItem {
+                label: "Toggle usage & billing".into(),
+                hint: "Ctrl+Shift+U".into(),
+                action: PaletteAction::ToggleUsage,
+            },
+            PaletteItem {
+                label: "Toggle computers".into(),
+                hint: "Ctrl+Shift+H".into(),
+                action: PaletteAction::ToggleComputers,
+            },
+            PaletteItem {
+                label: "Open memory".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenMemory,
+            },
+            PaletteItem {
+                label: "Open automations".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenAutomations,
+            },
+            PaletteItem {
+                label: "Open accounts".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenAccounts,
+            },
+            PaletteItem {
+                label: "Open MoA".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenMoa,
+            },
+            PaletteItem {
+                label: "Open kanban".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenKanban,
+            },
+            PaletteItem {
+                label: "Open terminal on selected computer".into(),
+                hint: String::new(),
+                action: PaletteAction::OpenTerminal,
+            },
+        ]);
         for (index, profile) in self.profiles.iter().enumerate() {
             items.push(PaletteItem {
                 label: format!("Switch to {}", profile.label()),
@@ -7978,9 +8070,26 @@ impl HermesApp {
         };
         self.palette = Palette::default();
         match item.action {
-            PaletteAction::NewChat => self.new_chat(cx),
-            PaletteAction::Refresh => self.refresh(cx),
-            PaletteAction::Interrupt => self.backend.send(Command::Interrupt),
+            PaletteAction::NewChat => self.dispatch(Action::NewChat, cx),
+            PaletteAction::Refresh => self.dispatch(Action::Refresh, cx),
+            PaletteAction::Interrupt => self.dispatch(Action::Interrupt, cx),
+            PaletteAction::Find => self.dispatch(Action::Find, cx),
+            PaletteAction::Attach => self.dispatch(Action::Attach, cx),
+            PaletteAction::ToggleInspector => self.dispatch(Action::ToggleInspector, cx),
+            PaletteAction::ToggleSessions => self.dispatch(Action::ToggleSessions, cx),
+            PaletteAction::ToggleSkills => self.dispatch(Action::ToggleSkills, cx),
+            PaletteAction::ToggleMcp => self.dispatch(Action::ToggleMcp, cx),
+            PaletteAction::ToggleModels => self.dispatch(Action::ToggleModels, cx),
+            PaletteAction::ToggleAssignments => self.dispatch(Action::ToggleAssignments, cx),
+            PaletteAction::ToggleVault => self.dispatch(Action::ToggleVault, cx),
+            PaletteAction::ToggleUsage => self.dispatch(Action::ToggleUsage, cx),
+            PaletteAction::ToggleComputers => self.dispatch(Action::ToggleComputers, cx),
+            PaletteAction::OpenMemory => self.open_memory(cx),
+            PaletteAction::OpenAutomations => self.open_cron(cx),
+            PaletteAction::OpenAccounts => self.open_accounts(cx),
+            PaletteAction::OpenMoa => self.open_moa(cx),
+            PaletteAction::OpenKanban => self.open_kanban(cx),
+            PaletteAction::OpenTerminal => self.open_terminal(cx),
             PaletteAction::SwitchProfile(name) => self.select_profile(name, cx),
             PaletteAction::Quit => cx.quit(),
         }
