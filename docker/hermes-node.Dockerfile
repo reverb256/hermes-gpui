@@ -12,10 +12,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates coreutils procps \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 hermes \
-    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash hermes
+    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash hermes \
+    && install -d -o 10001 -g 10001 /home/hermes/work
 COPY --from=build /src/target/release/hermes-node /usr/local/bin/hermes-node
 USER 10001:10001
 WORKDIR /home/hermes
-ENV HERMES_NODE_ALLOWED_ROOTS=/home/hermes \
+# /home/hermes/work is created owned by uid 10001 so a new named volume mounted
+# there is initialized writable by the node. A host bind mount must already be
+# writable by that uid. The rest of the image can stay read-only.
+ENV HERMES_NODE_ALLOWED_ROOTS=/home/hermes/work \
     RUST_LOG=hermes_node=info,warn
 ENTRYPOINT ["/usr/local/bin/hermes-node"]

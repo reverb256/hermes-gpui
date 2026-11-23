@@ -288,6 +288,9 @@ pub async fn revoke_device(
     }
     state.db.revoke_principal(&id, now_ms())?;
     state.disconnect_device(&id);
+    // The socket task sees the map entry already gone, so it will not cancel.
+    // Do it here, while the node can still receive the hangup.
+    state.cancel_commands_for_device(&id, "device revoked");
     state.audit(
         "owner",
         "device.revoked",
@@ -338,7 +341,7 @@ pub async fn submit_command(
     let (record, created) =
         state
             .db
-            .create_command(&body.node_id, &request.id, &request, now_ms())?;
+            .create_command(&body.node_id, &request.id, &request, None, now_ms())?;
     if created {
         state.dispatch_command(record.clone(), request)?;
     }

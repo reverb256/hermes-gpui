@@ -37,7 +37,7 @@ Connector for direct SSH); it is not what connects nodes.
 | `GET` | `/api/v1/nodes` | admin | node registry and presence |
 | `DELETE` | `/api/v1/nodes/{id}` | admin | revoke node, close socket, fail its commands |
 | `GET` | `/api/v1/devices` | admin | device principals and presence |
-| `DELETE` | `/api/v1/devices/{id}` | admin | revoke device immediately |
+| `DELETE` | `/api/v1/devices/{id}` | admin | revoke device, close its socket, cancel commands it started |
 | `POST` | `/api/v1/commands` | admin | submit a command by HTTP |
 | `GET` | `/api/v1/commands/{id}` | admin | command record |
 | `GET` | `/api/v1/commands/{id}/events?after=N&limit=M` | admin | replay stream events by sequence |
@@ -234,14 +234,14 @@ node                       hub                         device
 
 | Event | Behaviour |
 | --- | --- |
-| Device socket drops | reconnect, receive node list + pending prompts, replay events with `after` |
+| Device socket drops | hub cancels that device's queued and running commands (a PTY is hung up). A newer socket for the same device does not: it replaces the old one. On reconnect the device receives the node list, pending prompts, command states from the last two minutes, and can replay events with `after` |
 | Node socket drops | hub marks it offline and fails its queued/running commands; node cancels local children |
 | Node reconnects | registers again, gets a fresh `hello_ack`; old socket is closed with `replaced` |
 | Duplicate node socket | newest wins; older is told `replaced` and closed, and its unfinished commands fail rather than hanging |
 | Duplicate command submission | first record returned, no second execution |
 | Prompt expiry | hub resolves it, broadcasts `prompt_closed`, sends `cancel` to the node |
-| Hub restarted | nodes reconnect and SQLite restores registry/history; unresolved prompts close as `hub_restarted` because their one-time challenges are gone |
-| Revoked token | WebSocket handshake fails; existing socket is closed by the hub |
+| Hub restarted | nodes reconnect and SQLite restores registry/history; nodes are offline until they register again; unresolved prompts close as `hub_restarted`; queued and running commands fail as `hub restarted` because the previous process's sockets are gone |
+| Revoked token | WebSocket handshake fails; existing socket is closed by the hub; commands that device started are cancelled |
 
 Version 1 does **not** buffer a running command across a node reconnect: the
 hub fails in-flight commands and the node kills them. Resumable execution is a
