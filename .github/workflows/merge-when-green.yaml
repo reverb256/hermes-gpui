@@ -40,6 +40,7 @@
 name: merge-when-green
 
 on:
+  workflow_dispatch:
   pull_request_target:
     types: [labeled, synchronize, reopened, ready_for_review]
   workflow_run:
@@ -62,6 +63,7 @@ jobs:
   merge:
     name: merge
     if: >-
+      (github.event_name == 'workflow_dispatch') ||
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_run' &&
@@ -114,6 +116,10 @@ jobs:
           SELF_PATH=$(sed -E 's|^[^/]+/[^/]+/||; s|@.*$||' <<<"$SELF_WORKFLOW")   # .github/workflows/merge-when-green.yaml
 
           PR="$PR_FROM_EVENT"
+          if [[ -z "$PR" && "$EVENT" == workflow_dispatch ]]; then
+            PR=$(gh pr list --repo "$GH_REPO" --state open --label "$LABEL" --json number --jq '.[0].number // empty')
+            [[ -z "$PR" ]] && { note "workflow_dispatch: no open PR carries '$LABEL'; nothing to do."; exit 0; }
+          fi
           if [[ -z "$PR" ]]; then
             PR=$(gh api "repos/$GH_REPO/commits/$RUN_SHA/pulls" \
                    --jq '[.[] | select(.state == "open")][0].number // empty')
@@ -122,7 +128,7 @@ jobs:
 
           # Settle: on a fresh push/label, sibling workflow runs can take a few
           # seconds to be created. Their completion re-runs this gate anyway.
-          [[ "$EVENT" == pull_request_target ]] && sleep 20
+          if [[ "$EVENT" == pull_request_target ]]; then sleep 20; fi
 
           # mergeable can read UNKNOWN on a fresh PR while GitHub computes it:
           # retry with backoff (5 tries, ~2 min) instead of closing the gate.
