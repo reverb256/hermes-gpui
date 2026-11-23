@@ -1,0 +1,332 @@
+# merge-when-green — label-gated squash-merge for hermes-gpui.
+#
+# Fleet label gate: the reviewing agent reviews, posts evidence, and attaches
+# ready-to-merge. This workflow is the only actor that merges. Never bypass it.
+# Trigger list, runner and required checks are the repo-specific values.
+#
+# THE GATE: the `ready-to-merge` label, one deliberate human act after reading
+# the diff. This workflow never approves and never judges safety. It merges a
+# labelled PR only when ALL of these hold for the PR's CURRENT head SHA:
+#   - every workflow run on that SHA (other than this one) is `completed` and
+#     concluded success / skipped / neutral. Workflow runs are checked as well
+#     as check runs because a run that is queued or waiting on a concurrency
+#     group has NO check runs yet. That gap let media-k8s#125 merge on
+#     2026-10-28 while `lint` and `netpol-check` were still pending;
+#   - every check run on that SHA (latest per name, excluding this workflow's
+#     own check suites) is completed and success / skipped / neutral;
+#   - every commit status is `success` (pending means wait, anything else is a refusal);
+#   - any REQUIRED_CHECKS names exist and passed;
+#   - the PR is open, not a draft, from this repo (no forks), MERGEABLE, and
+#     not behind its base;
+#   - the merge is `--match-head-commit <sha>`, so a push in between is refused.
+#
+# NO POLLING. Event-driven, exits in seconds, so it never holds a runner that
+# the checks it waits for need:
+#   - pull_request_target labeled / synchronize / reopened / ready_for_review:
+#     judge now (after a short settle so just-created runs are visible);
+#   - workflow_run completed for EVERY other workflow in this repo: judge
+#     again, so the PR merges as soon as the LAST check finishes. When you add a
+#     workflow, add its `name:` to the list below.
+#
+# Exit codes: 0 for every "not ready" posture (no label, pending, not green,
+# behind, mergeable!=MERGEABLE, closed). 1 only for post-merge audit failure
+# (gate bug — a merge landed before checks finished).
+#
+# Security: pull_request_target / workflow_run carry a write token, so this job
+# never checks out or runs PR code. It only calls the GitHub API.
+#
+# These triggers read the workflow from the DEFAULT branch, so a PR that changes
+# this file is judged by the copy already on main.
+name: merge-when-green
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: merge-when-green-${{ github.event.pull_request.head.ref || github.event.workflow_run.head_branch || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  merge:
+    name: merge
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_run' &&
+       (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.head_branch == 'main') &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The ARC runner image ships curl and jq but not gh. Pinned, no sudo.
+      - name: Install gh
+        env:
+          GH_VERSION: "2.103.2"
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then gh --version | head -1; exit 0; fi
+          dest="$RUNNER_TEMP/gh"
+          mkdir -p "$dest"
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$dest" --strip-components=1
+          echo "$dest/bin" >> "$GITHUB_PATH"
+          "$dest/bin/gh" --version | head -1
+
+      # Short-lived fleet-merge-gate App token so the gate can merge PRs that
+      # edit .github/workflows (GITHUB_TOKEN never can). Falls back to
+      # GITHUB_TOKEN when the var is unset or minting fails.
+      - name: Mint merge-gate app token
+        id: gate
+        if: ${{ vars.MERGE_GATE_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.MERGE_GATE_APP_ID }}
+          private-key: ${{ secrets.MERGE_GATE_APP_PRIVATE_KEY }}
+
+      - name: Judge the gate and squash-merge if everything is green
+        id: judge
+        env:
+          GATE_TOKEN: ${{ steps.gate.outputs.token }}  # fleet-merge-gate App token (merge + update-branch); empty = GITHUB_TOKEN
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_FROM_EVENT: ${{ github.event.pull_request.number }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          SELF_WORKFLOW: ${{ github.workflow_ref }}
+          LABEL: ready-to-merge
+          REQUIRED_CHECKS: "format, lint, test"
+        run: |
+          set -euo pipefail
+          note() { echo "::notice::$*"; }
+          SELF_PATH=$(sed -E 's|^[^/]+/[^/]+/||; s|@.*$||' <<<"$SELF_WORKFLOW")   # .github/workflows/merge-when-green.yaml
+
+          PR="$PR_FROM_EVENT"
+          if [[ -z "$PR" ]]; then
+            PR=$(gh api "repos/$GH_REPO/commits/$RUN_SHA/pulls" \
+                   --jq '[.[] | select(.state == "open")][0].number // empty')
+            if [[ -z "$PR" ]]; then note "no open PR for $RUN_SHA; nothing to do."; exit 0; fi
+          fi
+
+          # Settle: on a fresh push/label, sibling workflow runs can take a few
+          # seconds to be created. Their completion re-runs this gate anyway.
+          [[ "$EVENT" == pull_request_target ]] && sleep 20
+
+          # mergeable can read UNKNOWN on a fresh PR while GitHub computes it:
+          # retry with backoff (5 tries, ~2 min) instead of closing the gate.
+          for try in 1 2 3 4 5; do
+            META=$(gh pr view "$PR" --repo "$GH_REPO" \
+                     --json state,isDraft,mergeable,labels,title,headRefOid,baseRefName,body)
+            [[ "$(jq -r '.mergeable // "UNKNOWN"' <<<"$META")" != UNKNOWN ]] && break
+            [[ "$try" -lt 5 ]] && { note "#$PR mergeable=UNKNOWN (try $try/5); retrying."; sleep $((try * 10)); }
+          done
+          if [[ "$(jq -r .state <<<"$META")" != OPEN ]]; then note "#$PR is not open; nothing to do."; exit 0; fi
+          if [[ "$(jq -r --arg l "$LABEL" 'any(.labels[]; .name == $l)' <<<"$META")" != true ]]; then
+            note "#$PR has no '$LABEL' label; gate closed."; exit 0
+          fi
+          if [[ "$(jq -r .isDraft <<<"$META")" == true ]]; then note "#$PR is a draft; gate closed."; exit 0; fi
+          SHA=$(jq -r .headRefOid <<<"$META")
+          BASE=$(jq -r .baseRefName <<<"$META")
+          if [[ -n "$RUN_SHA" && "$RUN_SHA" != "$SHA" ]]; then
+            note "a workflow finished for $RUN_SHA but #$PR head is now $SHA; the newer runs decide."; exit 0
+          fi
+          echo "Gate open on #$PR at $SHA (base $BASE); self=$SELF_PATH."
+
+          # 1. Workflow runs on the head SHA: latest attempt per workflow, minus this one.
+          WRUNS=$(gh api --paginate "repos/$GH_REPO/actions/runs?head_sha=$SHA&per_page=100" --jq '.workflow_runs[]' | jq -s .)
+          SELF_SUITES=$(jq -c --arg p "$SELF_PATH" '[.[] | select(.path == $p) | .check_suite_id]' <<<"$WRUNS")
+          OTHER=$(jq --arg p "$SELF_PATH" '[.[] | select(.path != $p)] | group_by(.workflow_id) | map(max_by(.id))' <<<"$WRUNS")
+          W_PENDING=$(jq -r '[.[] | select(.status != "completed") | "\(.name)=\(.status)"] | join(", ")' <<<"$OTHER")
+          W_FAILED=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not)) | "\(.name)=\(.conclusion)"] | join(", ")' <<<"$OTHER")
+
+          # 2. Check runs on the head SHA: latest per name, minus this workflow's suites.
+          RUNS=$(gh api --paginate "repos/$GH_REPO/commits/$SHA/check-runs?per_page=100" --jq '.check_runs[]' | jq -s .)
+          LATEST=$(jq --argjson self "$SELF_SUITES" '[.[] | select((.check_suite.id | IN($self[])) | not)] | group_by(.name) | map(max_by(.id))' <<<"$RUNS")
+          C_PENDING=$(jq -r '[.[] | select(.status != "completed") | "\(.name)=\(.status)"] | join(", ")' <<<"$LATEST")
+          C_FAILED=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not)) | "\(.name)=\(.conclusion)"] | join(", ")' <<<"$LATEST")
+
+          # 3. Commit statuses (latest per context).
+          STATUSES=$(gh api "repos/$GH_REPO/commits/$SHA/status" --jq '.statuses')
+          S_PENDING=$(jq -r '[.[] | select(.state == "pending") | .context] | join(", ")' <<<"$STATUSES")
+          S_FAILED=$(jq -r '[.[] | select(.state == "failure" or .state == "error") | "\(.context)=\(.state)"] | join(", ")' <<<"$STATUSES")
+
+          echo "workflow runs: $(jq -r 'map("\(.name)=\(.status)/\(.conclusion)") | join(", ")' <<<"$OTHER")"
+          echo "check runs:    $(jq -r 'map("\(.name)=\(.status)/\(.conclusion)") | join(", ")' <<<"$LATEST")"
+
+          FAILED=$(printf '%s\n' "$W_FAILED" "$C_FAILED" "$S_FAILED" | grep -v '^$' | paste -sd'; ' - || true)
+          PENDING=$(printf '%s\n' "$W_PENDING" "$C_PENDING" "$S_PENDING" | grep -v '^$' | paste -sd'; ' - || true)
+          # Soft-fail (exit 0) when not green: exit 1 was painting main red on every
+          # workflow_run that judged a labeled PR whose checks had failed (same
+          # class of bug as "behind" before #136). Gate still refuses to merge.
+          if [[ -n "$FAILED" ]]; then
+            note "not green on $SHA: $FAILED; gate closed (no merge). Fix checks; label stays."
+            exit 0
+          fi
+          if [[ -n "$PENDING" ]]; then note "still pending on $SHA: $PENDING; the last completion re-runs the gate."; exit 0; fi
+
+          for REQUIRED_CHECK in $REQUIRED_CHECKS; do
+            REQ=$(jq -r --arg n "$REQUIRED_CHECK" '.[] | select(.name == $n) | "\(.status)/\(.conclusion)"' <<<"$LATEST")
+            if [[ "$REQ" != completed/success ]]; then
+              note "required check '$REQUIRED_CHECK' is '${REQ:-missing}' on $SHA; waiting for its workflow."; exit 0
+            fi
+          done
+
+          BEHIND=$(gh api "repos/$GH_REPO/compare/$BASE...$SHA" --jq .behind_by)
+          if [[ "$BEHIND" != 0 ]]; then
+            # Soft-fail: same posture as pending. Exit 1 was painting main red on every
+            # workflow_run while a labeled PR waited for update-branch.
+            note "#$PR is $BEHIND commit(s) behind $BASE; updating branch once via API, then exit."
+            if GH_TOKEN="${GATE_TOKEN:-$GH_TOKEN}" gh api -X PUT "repos/$GH_REPO/pulls/$PR/update-branch" -f expected_head_sha="$SHA"; then
+              note "updated #$PR onto $BASE; checks will re-run and re-arm the gate."
+            else
+              note "update-branch failed for #$PR; resolve manually; label stays."
+            fi
+            exit 0
+          fi
+          MERGEABLE=$(jq -r .mergeable <<<"$META")
+          if [[ "$MERGEABLE" != MERGEABLE ]]; then
+            # UNKNOWN / CONFLICTING: wait posture. Do not paint main red.
+            note "#$PR mergeable=$MERGEABLE; gate closed (no merge). Resolve or wait; label stays."
+            exit 0
+          fi
+
+          TITLE=$(jq -r .title <<<"$META")
+          # The PR body is the squash body. Without --body, GitHub composes it from
+          # the branch's commits as an indented bulleted list, and a `Closes #N`
+          # inside a bullet is not a standalone keyword: the issue is never linked.
+          # Same defect fixed in blog#292 and homelab-ops#175 (2026-11-11).
+          PR_BODY=$(jq -r '.body // ""' <<<"$META")
+          echo "Everything green on $SHA; squash-merging #$PR."
+          # --- gate-merge-retry begin ---
+          # Treat 'Base branch was modified' like the behind path
+          # (update-branch, merge-style, never rebase). After a successful
+          # merge, a --delete-branch 404 'Reference does not exist' is success.
+          # Other merge failures still fail the job.
+          if [[ -n "$PR_BODY" ]]; then
+            set +e
+            MERGE_OUT=$(GH_TOKEN="${GATE_TOKEN:-$GH_TOKEN}" gh pr merge "$PR" --repo "$GH_REPO" --squash --delete-branch \
+              --match-head-commit "$SHA" --subject "$TITLE (#$PR)" --body "$PR_BODY" 2>&1)
+            MERGE_RC=$?
+            set -e
+          else
+            set +e
+            MERGE_OUT=$(GH_TOKEN="${GATE_TOKEN:-$GH_TOKEN}" gh pr merge "$PR" --repo "$GH_REPO" --squash --delete-branch \
+              --match-head-commit "$SHA" --subject "$TITLE (#$PR)" 2>&1)
+            MERGE_RC=$?
+            set -e
+          fi
+          if [[ -n "$MERGE_OUT" ]]; then
+            printf '%s\n' "$MERGE_OUT"
+          fi
+          if [[ "$MERGE_RC" -ne 0 ]]; then
+            if grep -qiF 'Base branch was modified' <<<"$MERGE_OUT"; then
+              note "base branch was modified while merging #$PR; updating branch once so the next check completion re-arms the gate."
+              if GH_TOKEN="${GATE_TOKEN:-$GH_TOKEN}" gh api -X PUT "repos/$GH_REPO/pulls/$PR/update-branch" -f expected_head_sha="$SHA"; then
+                note "updated #$PR onto $BASE; checks will re-run and re-arm the gate."
+              else
+                note "update-branch failed for #$PR; resolve manually; label stays."
+              fi
+              exit 0
+            fi
+            if grep -qiF 'Reference does not exist' <<<"$MERGE_OUT"; then
+              MERGED_AT=$(GH_TOKEN="${GATE_TOKEN:-$GH_TOKEN}" gh pr view "$PR" --repo "$GH_REPO" --json mergedAt --jq '.mergedAt // empty' || true)
+              if [[ -n "${MERGED_AT:-}" ]]; then
+                note "merged #$PR; head ref already deleted (delete-branch 404)."
+              else
+                echo "::error::gh pr merge failed for #$PR (not a post-merge delete-branch 404)."; exit 1
+              fi
+            else
+              echo "::error::gh pr merge failed for #$PR."; exit 1
+            fi
+          fi
+          # --- gate-merge-retry end ---
+          note "merged #$PR at $SHA via the '$LABEL' gate."
+          { echo "pr=$PR"; echo "sha=$SHA"; } >> "$GITHUB_OUTPUT"
+
+      # Failure-rule 2026-10-28 (media-k8s#125): flag any merge where some other
+      # workflow run or check run on the head SHA was not complete at merge time.
+      # A red run here means the gate itself is broken: revert and investigate.
+      - name: Post-merge audit (every check finished before the merge)
+        if: steps.judge.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.judge.outputs.pr }}
+          SHA: ${{ steps.judge.outputs.sha }}
+          SELF_WORKFLOW: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          SELF_PATH=$(sed -E 's|^[^/]+/[^/]+/||; s|@.*$||' <<<"$SELF_WORKFLOW")
+          MERGED_AT=$(gh pr view "$PR" --repo "$GH_REPO" --json mergedAt --jq .mergedAt)
+          WR=$(gh api --paginate "repos/$GH_REPO/actions/runs?head_sha=$SHA&per_page=100" --jq '.workflow_runs[]' | jq -s .)
+          SELF_SUITES=$(jq -c --arg p "$SELF_PATH" '[.[] | select(.path == $p) | .check_suite_id]' <<<"$WR")
+          LATE_W=$(jq -r --arg p "$SELF_PATH" --arg m "$MERGED_AT" '[.[] | select(.path != $p and .created_at <= $m and .status != "completed") | .name] | unique | join(", ")' <<<"$WR")
+          LATE_C=$(gh api --paginate "repos/$GH_REPO/commits/$SHA/check-runs?per_page=100" --jq '.check_runs[]' | jq -s -r --argjson self "$SELF_SUITES" --arg m "$MERGED_AT" \
+            '[.[] | select((.check_suite.id | IN($self[])) | not) | select(.started_at <= $m and (.completed_at == null or .completed_at > $m)) | .name] | unique | join(", ")')
+          if [[ -n "$LATE_W$LATE_C" ]]; then
+            echo "::error::#$PR merged at $MERGED_AT before these finished: ${LATE_W} ${LATE_C}. The merge gate is broken; revert #$PR and fix merge-when-green."
+            exit 1
+          fi
+          echo "::notice::audit ok: every check on $SHA finished before #$PR merged at $MERGED_AT."
+
+      # GITHUB_TOKEN squash-merge does not fire `push` workflows on main
+      # (GitHub docs). workflow_dispatch from GITHUB_TOKEN DOES run, and needs
+      # actions: write. Kick the same CI workflows the gate watches so main
+      # always gets a post-merge signal (failure-rule: quill 40cd6de, 2026-10-28).
+      - name: Kick main CI after merge
+        if: steps.judge.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.judge.outputs.pr }}
+          MAIN_CI: "CI"
+        run: |
+          set -euo pipefail
+          for wf in $MAIN_CI; do
+            echo "Dispatching workflow '$wf' on main…"
+            if gh workflow run "$wf" --repo "$GH_REPO" --ref main; then
+              echo "::notice::dispatched $wf on main after #$PR merge"
+            else
+              # Soft-fail: never abort the gate job after a successful merge —
+              # later steps (e.g. quill issue-closure) must still run.
+              echo "::warning::failed to dispatch $wf on main — check workflow_dispatch + actions:write"
+            fi
+          done
+
+      - name: Close linked issues
+        if: steps.judge.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.judge.outputs.pr }}
+        run: |
+          set -euo pipefail
+          BODY=$(gh api "repos/$GH_REPO/pulls/$PR" --jq '.body // ""')
+          CLOSE_REFS=$(printf '%s\n' "$BODY" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*(GH)?#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)
+          echo "Close-loop refs: ${CLOSE_REFS:-<none>}"
+          for n in $CLOSE_REFS; do
+            state=$(gh issue view "$n" --repo "$GH_REPO" --json state -q .state 2>&1 || true)
+            case "$state" in
+              OPEN)
+                if gh issue close "$n" --repo "$GH_REPO" --reason completed --comment "Closed by the merge gate when #$PR merged."; then
+                  echo "::notice::Close-loop closed #$n."
+                else
+                  echo "::warning::could not close issue #$n"
+                fi
+                ;;
+              CLOSED) echo "Close-loop: #$n already closed." ;;
+              *) echo "::warning::close-loop could not read state of #$n: $state" ;;
+            esac
+          done
