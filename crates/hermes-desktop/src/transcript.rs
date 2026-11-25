@@ -77,6 +77,29 @@ pub struct MarkdownSpan {
     pub italic: bool,
     pub code: bool,
     pub link: bool,
+    /// Allowlisted destination for an activatable link. `None` when the link is
+    /// styled but its scheme is not safe to hand to the OS opener.
+    pub url: Option<String>,
+}
+
+/// Schemes a transcript link may hand to the external opener. `mailto` is not
+/// included: nothing else in this client handles it. Dangerous schemes
+/// (`javascript:`, `file:`, `data:`, …) and relative references are never
+/// activatable.
+const ALLOWED_LINK_SCHEMES: [&str; 2] = ["http", "https"];
+
+/// Classify a Markdown link destination for activation.
+///
+/// Returns the normalized URL only when its scheme is on the allowlist, so a
+/// caller can pass the result straight to `xdg-open`. Anything else —
+/// `javascript:`, `file:`, `data:`, unknown schemes, or relative references —
+/// returns `None`. Parsing is delegated to `reqwest::Url`, matching the
+/// convention already used for OAuth URLs in this client.
+pub fn allowed_link_url(raw: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
+    ALLOWED_LINK_SCHEMES
+        .contains(&parsed.scheme())
+        .then(|| parsed.as_str().to_string())
 }
 
 /// Renderable Markdown blocks. Links remain text; remote content is never fetched.
@@ -118,6 +141,7 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
     let mut bold = 0usize;
     let mut italic = 0usize;
     let mut link = 0usize;
+    let mut link_url: Option<String> = None;
     let mut kind = Kind::Paragraph;
     let mut quote = false;
     let mut item = false;
@@ -151,8 +175,14 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
             Event::End(TagEnd::Strong) => bold = bold.saturating_sub(1),
             Event::Start(Tag::Emphasis) => italic += 1,
             Event::End(TagEnd::Emphasis) => italic = italic.saturating_sub(1),
-            Event::Start(Tag::Link { .. }) => link += 1,
-            Event::End(TagEnd::Link) => link = link.saturating_sub(1),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link += 1;
+                link_url = allowed_link_url(&dest_url);
+            }
+            Event::End(TagEnd::Link) => {
+                link = link.saturating_sub(1);
+                link_url = None;
+            }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 image = Some(dest_url.to_string());
             }
@@ -188,6 +218,7 @@ pub fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
                         italic: italic > 0,
                         code,
                         link: link > 0,
+                        url: link_url.clone(),
                     });
                 }
             }
@@ -258,7 +289,8 @@ mod tests {
                         bold: true,
                         italic: false,
                         code: false,
-                        link: false
+                        link: false,
+                        url: None
                     }]
                 }),
                 MarkdownBlock::Code("let x = 1;\n".into()),
@@ -314,6 +346,74 @@ mod tests {
             text.spans
                 .iter()
                 .any(|span| span.link && &text.text[span.range.clone()] == "link")
+        );
+    }
+
+    #[test]
+    fn link_allowlist_accepts_only_http_and_https() {
+        for url in [
+            "https://example.com",
+            "http://example.com/path?q=1#frag",
+            "HTTPS://EXAMPLE.COM",
+            " https://example.com ",
+            "https://user:pass@example.com",
+        ] {
+            assert!(
+                allowed_link_url(url).is_some(),
+                "expected activatable: {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_allowlist_blocks_dangerous_and_unknown_schemes() {
+        for url in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "java\nscript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "ftp://example.com",
+            "tel:+123456789",
+            // No mailto support exists elsewhere in this client.
+            "mailto:someone@example.com",
+            "/relative/path",
+            "//example.com",
+            "example.com",
+            "",
+            "   ",
+            "http://",
+        ] {
+            assert!(allowed_link_url(url).is_none(), "expected blocked: {url:?}");
+        }
+    }
+
+    #[test]
+    fn link_allowlist_returns_a_normalized_destination() {
+        let url = allowed_link_url("https://exa\nmple.com/a").expect("https is allowed");
+        assert!(url.starts_with("https://"));
+        assert!(!url.contains('\n'));
+    }
+
+    #[test]
+    fn markdown_carries_allowlisted_url_but_not_denied_scheme() {
+        let blocks = markdown_blocks("[safe](https://example.com) [bad](javascript:alert(1))");
+        let MarkdownBlock::Paragraph(text) = &blocks[0] else {
+            panic!("expected paragraph")
+        };
+        let urls = text
+            .spans
+            .iter()
+            .filter(|span| span.link)
+            .map(|span| (text.text[span.range.clone()].to_string(), span.url.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            urls,
+            vec![
+                ("safe".into(), Some("https://example.com/".into())),
+                ("bad".into(), None),
+            ]
         );
     }
 
