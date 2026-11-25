@@ -835,17 +835,55 @@ impl HermesApp {
                 stored_id,
                 session_id,
                 messages,
+                messages_omitted,
+                prompts,
+                execution_generation,
             } => {
                 self.session_id = Some(session_id);
                 self.viewing_history = None;
-                self.lines = sessions::lines_from_messages(&messages);
+                if !messages_omitted {
+                    self.lines = sessions::lines_from_messages(&messages);
+                }
+                // replace cards from prompts
                 self.cards.clear();
+                if let Some(sid) = self.session_id.clone() {
+                    let fallback = execution_generation;
+                    for prompt in &prompts {
+                        let kind = prompt.kind.to_lowercase();
+                        if kind.contains("approval") {
+                            if let Some(req) =
+                                crate::backend::ApprovalRequest::from_canonical_prompt(
+                                    &sid, fallback, prompt,
+                                )
+                            {
+                                self.cards.push(Card {
+                                    id: req.id.clone(),
+                                    kind: CardKind::Approval(req),
+                                });
+                            }
+                        } else if kind.contains("clarify")
+                            && let Some(req) = crate::backend::ClarifyRequest::from_canonical_prompt(
+                                &sid, fallback, prompt,
+                            )
+                        {
+                            self.cards.push(Card {
+                                id: req.id.clone(),
+                                kind: CardKind::Clarify(req),
+                            });
+                        }
+                    }
+                }
                 self.error = None;
                 self.busy = false;
                 self.sessions.open = false;
                 self.sessions.focus = false;
                 self.sessions.status = Some(format!("resumed {stored_id}"));
-                self.scroll.scroll_to_bottom();
+                if !messages_omitted {
+                    self.scroll.scroll_to_bottom();
+                }
+            }
+            BackendEvent::CardResolved(id) => {
+                self.cards.retain(|card| card.id != id);
             }
             BackendEvent::SessionDeleted(id) => {
                 self.sessions.rows.retain(|row| row.id != id);
@@ -7908,6 +7946,19 @@ impl HermesApp {
     }
 
     fn dismiss_card(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(card) = self.cards.iter().find(|card| card.id == id) {
+            match &card.kind {
+                CardKind::Approval(request) if request.prompt_id.is_some() => {
+                    self.approve(id, ApprovalChoice::Deny, cx);
+                    return;
+                }
+                CardKind::Clarify(request) if request.prompt_id.is_some() => {
+                    self.resolve_card(id, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let session_id = self
             .cards
             .iter()
@@ -9656,6 +9707,7 @@ impl HermesApp {
         let id_once = id.clone();
         let id_always = id.clone();
         let id_deny = id.clone();
+        let id_session = id.clone();
 
         div()
             .id(SharedString::from(format!("approval-{id}")))
@@ -9752,6 +9804,25 @@ impl HermesApp {
                                     this.approve(&id_always, ApprovalChoice::Always, cx)
                                 }))
                                 .child("Always allow"),
+                        )
+                    })
+                    .when(request.choices.iter().any(|c| c == "session"), |this| {
+                        let id_session = id_session.clone();
+                        this.child(
+                            div()
+                                .id(SharedString::from(format!("allow-session-{id}")))
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(surface_hi()))
+                                .text_xs()
+                                .text_color(rgb(user()))
+                                .cursor_pointer()
+                                .hover(|this| this.bg(rgb(border_hi())))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.approve(&id_session, ApprovalChoice::Session, cx)
+                                }))
+                                .child("Allow session"),
                         )
                     })
                     .child(

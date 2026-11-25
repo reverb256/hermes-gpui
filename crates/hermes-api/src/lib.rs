@@ -2666,6 +2666,56 @@ pub mod gateway {
     /// `session.resume` answer. The runtime `session_id` is the id prompts must
     /// target; `resumed` is the durable transcript id that was reopened.
     #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct CanonicalPendingPrompt {
+        #[serde(default)]
+        pub kind: String,
+        #[serde(default)]
+        pub prompt_id: String,
+        #[serde(default)]
+        pub execution_generation: Option<i64>,
+        #[serde(default)]
+        pub command: Option<String>,
+        #[serde(default)]
+        pub description: Option<String>,
+        #[serde(default)]
+        pub choices: Vec<String>,
+        #[serde(default)]
+        pub question: Option<String>,
+        #[serde(default)]
+        pub options: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct PromptResponseResult {
+        #[serde(default)]
+        pub status: String,
+        #[serde(default)]
+        pub prompt_id: Option<String>,
+        #[serde(default)]
+        pub reason: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct SessionEventsSinceResult {
+        #[serde(default)]
+        pub events: Vec<Value>,
+        #[serde(default)]
+        pub last_sequence: Option<u64>,
+        #[serde(default)]
+        pub latest_seq: Option<u64>,
+        #[serde(default)]
+        pub replay_epoch: Option<String>,
+        #[serde(default)]
+        pub epoch: Option<String>,
+        #[serde(default)]
+        pub snapshot_required: bool,
+        #[serde(default)]
+        pub truncated: bool,
+        #[serde(default)]
+        pub count: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
     pub struct ResumedSession {
         #[serde(default)]
         pub session_id: String,
@@ -2679,26 +2729,215 @@ pub mod gateway {
         pub running: bool,
         #[serde(default)]
         pub info: Value,
+        #[serde(default)]
+        pub stored_session_id: Option<String>,
+        #[serde(default)]
+        pub messages_omitted: bool,
+        #[serde(default)]
+        pub replay_epoch: Option<String>,
+        #[serde(default)]
+        pub last_sequence: Option<i64>,
+        #[serde(default)]
+        pub execution_generation: Option<i64>,
+        #[serde(default)]
+        pub prompts: Vec<CanonicalPendingPrompt>,
+        #[serde(default)]
+        pub pending: Vec<Value>,
     }
 
-    /// Reopen a stored conversation and bind it to a live gateway runtime.
-    /// The host hydrates the transcript and lazily builds the agent, so this is
-    /// safe to call from the UI thread's async worker.
+    impl ResumedSession {
+        /// Durable transcript identifier: `resumed` when present, else `stored_session_id`,
+        /// falling back to `session_id`.
+        pub fn durable_id(&self) -> &str {
+            if !self.resumed.is_empty() {
+                &self.resumed
+            } else if let Some(stored) = self
+                .stored_session_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+            {
+                stored
+            } else {
+                &self.session_id
+            }
+        }
+    }
+
     pub async fn resume_session(
         client: &GatewayClient,
         id: &str,
         profile: Option<&str>,
     ) -> Result<ResumedSession, hermes_rpc::RpcError> {
+        resume_session_with_options(client, id, profile, false).await
+    }
+
+    pub async fn resume_session_with_options(
+        client: &GatewayClient,
+        id: &str,
+        profile: Option<&str>,
+        omit_messages: bool,
+    ) -> Result<ResumedSession, hermes_rpc::RpcError> {
         let mut params = serde_json::Map::new();
         params.insert("session_id".into(), Value::String(id.to_string()));
         params.insert("cols".into(), Value::from(120));
-        params.insert("omit_messages".into(), Value::Bool(false));
+        params.insert("omit_messages".into(), Value::Bool(omit_messages));
         if let Some(profile) = profile {
             params.insert("profile".into(), Value::String(profile.to_string()));
         }
         client
             .request("session.resume", Value::Object(params))
             .await
+    }
+
+    pub fn session_events_since_params(
+        session_id: &str,
+        last_sequence: u64,
+        replay_epoch: &str,
+    ) -> Result<Value, hermes_rpc::RpcError> {
+        if replay_epoch.trim().is_empty() {
+            return Err(hermes_rpc::RpcError::Decode(
+                "replay_epoch is required for session.events.since".into(),
+            ));
+        }
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "last_sequence": last_sequence,
+            "replay_epoch": replay_epoch,
+        }))
+    }
+
+    pub async fn session_events_since(
+        client: &GatewayClient,
+        session_id: &str,
+        last_sequence: u64,
+        replay_epoch: &str,
+    ) -> Result<SessionEventsSinceResult, hermes_rpc::RpcError> {
+        let params = session_events_since_params(session_id, last_sequence, replay_epoch)?;
+        client.request("session.events.since", params).await
+    }
+
+    pub fn approval_respond_canonical_params(
+        session_id: &str,
+        execution_generation: i64,
+        prompt_id: &str,
+        choice: &str,
+    ) -> Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "execution_generation": execution_generation,
+            "prompt_id": prompt_id,
+            "choice": choice,
+        })
+    }
+
+    pub async fn approval_respond_canonical(
+        client: &GatewayClient,
+        session_id: &str,
+        execution_generation: i64,
+        prompt_id: &str,
+        choice: &str,
+    ) -> Result<PromptResponseResult, hermes_rpc::RpcError> {
+        client
+            .request(
+                "approval.respond",
+                approval_respond_canonical_params(
+                    session_id,
+                    execution_generation,
+                    prompt_id,
+                    choice,
+                ),
+            )
+            .await
+    }
+
+    pub fn clarify_respond_canonical_params(
+        session_id: &str,
+        execution_generation: i64,
+        prompt_id: &str,
+        answer: &str,
+    ) -> Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "execution_generation": execution_generation,
+            "prompt_id": prompt_id,
+            "answer": answer,
+        })
+    }
+
+    pub async fn clarify_respond_canonical(
+        client: &GatewayClient,
+        session_id: &str,
+        execution_generation: i64,
+        prompt_id: &str,
+        answer: &str,
+    ) -> Result<PromptResponseResult, hermes_rpc::RpcError> {
+        client
+            .request(
+                "clarify.respond",
+                clarify_respond_canonical_params(
+                    session_id,
+                    execution_generation,
+                    prompt_id,
+                    answer,
+                ),
+            )
+            .await
+    }
+
+    pub fn is_stale_generation_error(err: &hermes_rpc::RpcError) -> bool {
+        match err {
+            hermes_rpc::RpcError::Remote {
+                code,
+                message,
+                data,
+            } => {
+                *code == 4001
+                    || message.contains("stale_generation")
+                    || data.get("reason").and_then(Value::as_str) == Some("stale_generation")
+            }
+            other => other.to_string().contains("stale_generation"),
+        }
+    }
+
+    pub fn is_permission_denied_error(err: &hermes_rpc::RpcError) -> bool {
+        match err {
+            hermes_rpc::RpcError::Remote {
+                code,
+                message,
+                data,
+            } => {
+                *code == 403
+                    || message.to_lowercase().contains("permission denied")
+                    || message.to_lowercase().contains("permission_denied")
+                    || data.get("reason").and_then(Value::as_str) == Some("permission_denied")
+            }
+            other => {
+                let s = other.to_string().to_lowercase();
+                s.contains("permission denied") || s.contains("permission_denied")
+            }
+        }
+    }
+
+    pub fn decode_since_event(raw: &Value) -> Option<(GatewayEvent, Option<String>)> {
+        let kind = raw.get("type").and_then(Value::as_str)?.to_string();
+        let session_id = raw
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let seq = raw.get("seq").and_then(Value::as_u64);
+        let payload = raw.get("payload").cloned().unwrap_or(Value::Null);
+        let replay_epoch = raw
+            .get("replay_epoch")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let event = GatewayEvent {
+            kind,
+            session_id,
+            seq,
+            payload,
+            raw: raw.clone(),
+        };
+        Some((event, replay_epoch))
     }
 
     /// Send a user turn. The answer streams back as `message.delta` events on
@@ -3742,5 +3981,180 @@ mod tests {
         assert_eq!(scan.policy, "ask");
         assert_eq!(scan.findings[0].line, Some(12));
         assert_eq!(scan.severity_counts["medium"], 1);
+    }
+
+    #[test]
+    fn canonical_resume_decodes_prompts_and_ignores_pending_admissions() {
+        let raw = serde_json::json!({
+            "session_id": "synth-session-0000000000000001",
+            "stored_session_id": "synth-stored-0000000000000001",
+            "messages": [],
+            "message_count": 0,
+            "running": true,
+            "replay_epoch": "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "last_sequence": 12,
+            "execution_generation": 3,
+            "messages_omitted": false,
+            "pending": [
+                {
+                    "admission_id": "synth-admission-0001",
+                    "input_id": "synthinputid00000000000000000001",
+                    "status": "queued",
+                    "text": "SYNTHETIC queued turn text"
+                }
+            ],
+            "prompts": [
+                {
+                    "kind": "approval",
+                    "prompt_id": "synthapprovalid000000000000000001",
+                    "execution_generation": 3,
+                    "command": "SYNTHETIC redacted command only",
+                    "description": "SYNTHETIC approval description only",
+                    "choices": ["once", "deny", "session", "always"]
+                }
+            ],
+            "open_requests": [
+                {
+                    "id": "srq-synth-sudo",
+                    "method": "sudo",
+                    "params": {}
+                }
+            ]
+        });
+        let resumed: gateway::ResumedSession = serde_json::from_value(raw).unwrap();
+        assert_eq!(resumed.durable_id(), "synth-stored-0000000000000001");
+        assert_eq!(resumed.execution_generation, Some(3));
+        assert_eq!(resumed.last_sequence, Some(12));
+        assert_eq!(resumed.pending.len(), 1);
+        assert_eq!(resumed.prompts.len(), 1);
+        assert_eq!(
+            resumed.prompts[0].prompt_id,
+            "synthapprovalid000000000000000001"
+        );
+        assert!(resumed.prompts[0].choices.iter().any(|c| c == "session"));
+    }
+
+    #[test]
+    fn canonical_since_hit_miss_and_decode_event() {
+        let hit_raw = serde_json::json!({
+            "events": [
+                {
+                    "type": "tool.complete",
+                    "session_id": "synth-session-0000000000000001",
+                    "payload": {
+                        "tool_name": "read_file",
+                        "result": "SYNTHETIC fixture body only."
+                    },
+                    "replay_epoch": "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "seq": 12
+                }
+            ],
+            "latest_seq": 12,
+            "last_sequence": 12,
+            "replay_epoch": "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "truncated": false,
+            "snapshot_required": false,
+            "count": 1
+        });
+        let hit: gateway::SessionEventsSinceResult = serde_json::from_value(hit_raw).unwrap();
+        assert!(!hit.snapshot_required);
+        assert!(!hit.truncated);
+        assert_eq!(hit.events.len(), 1);
+        let (ev, epoch) = gateway::decode_since_event(&hit.events[0]).unwrap();
+        assert_eq!(ev.kind, "tool.complete");
+        assert_eq!(ev.seq, Some(12));
+        assert_eq!(
+            ev.payload.get("result").and_then(serde_json::Value::as_str),
+            Some("SYNTHETIC fixture body only.")
+        );
+        assert_eq!(
+            epoch.as_deref(),
+            Some("synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+
+        let miss_raw = serde_json::json!({
+            "events": [],
+            "latest_seq": 12,
+            "last_sequence": 12,
+            "replay_epoch": "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "truncated": true,
+            "snapshot_required": true,
+            "count": 0
+        });
+        let miss: gateway::SessionEventsSinceResult = serde_json::from_value(miss_raw).unwrap();
+        assert!(miss.snapshot_required);
+        assert!(miss.truncated);
+        assert!(miss.events.is_empty());
+    }
+
+    #[test]
+    fn canonical_param_builders_enforce_wire_contract() {
+        let err = gateway::session_events_since_params("synth-session-0000000000000001", 11, "");
+        assert!(err.is_err());
+        let ok = gateway::session_events_since_params(
+            "synth-session-0000000000000001",
+            11,
+            "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        assert_eq!(
+            ok["replay_epoch"],
+            "synth-replay-epoch-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(ok["last_sequence"], 11);
+
+        let appr = gateway::approval_respond_canonical_params(
+            "synth-session-0000000000000001",
+            3,
+            "synthapprovalid000000000000000001",
+            "once",
+        );
+        let obj = appr.as_object().unwrap();
+        assert_eq!(obj.len(), 4);
+        assert!(obj.get("request_id").is_none());
+        assert!(obj.get("all").is_none());
+        assert_eq!(obj["prompt_id"], "synthapprovalid000000000000000001");
+        assert_eq!(obj["execution_generation"], 3);
+
+        let clar = gateway::clarify_respond_canonical_params(
+            "synth-session-0000000000000001",
+            3,
+            "synthclarifyid0000000000000000001",
+            "yes",
+        );
+        assert_eq!(clar["prompt_id"], "synthclarifyid0000000000000000001");
+        assert_eq!(clar["answer"], "yes");
+    }
+
+    #[test]
+    fn prompt_response_and_error_classification() {
+        let resolved: gateway::PromptResponseResult = serde_json::from_value(serde_json::json!({
+            "status": "already_resolved",
+            "prompt_id": "synthapprovalid000000000000000001"
+        }))
+        .unwrap();
+        assert_eq!(resolved.status, "already_resolved");
+
+        let stale = hermes_rpc::RpcError::Remote {
+            code: 4001,
+            message: "stale_generation".into(),
+            data: serde_json::json!({ "reason": "stale_generation" }),
+        };
+        assert!(gateway::is_stale_generation_error(&stale));
+        assert!(!gateway::is_permission_denied_error(&stale));
+
+        let stale_reason_only = hermes_rpc::RpcError::Remote {
+            code: -32000,
+            message: "rejected".into(),
+            data: serde_json::json!({ "reason": "stale_generation" }),
+        };
+        assert!(gateway::is_stale_generation_error(&stale_reason_only));
+
+        let denied = hermes_rpc::RpcError::Remote {
+            code: 403,
+            message: "permission_denied".into(),
+            data: serde_json::json!({ "reason": "permission_denied" }),
+        };
+        assert!(gateway::is_permission_denied_error(&denied));
     }
 }

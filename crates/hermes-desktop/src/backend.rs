@@ -37,6 +37,9 @@ pub struct ApprovalRequest {
     pub command: String,
     pub description: String,
     pub allow_permanent: bool,
+    pub prompt_id: Option<String>,
+    pub execution_generation: Option<i64>,
+    pub choices: Vec<String>,
 }
 
 impl ApprovalRequest {
@@ -48,6 +51,16 @@ impl ApprovalRequest {
                 .unwrap_or_default()
                 .to_string()
         };
+        let choices = params
+            .get("choices")
+            .and_then(Value::as_array)
+            .map(|c| {
+                c.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             id,
             session_id: params
@@ -65,7 +78,39 @@ impl ApprovalRequest {
                 .get("allow_permanent")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            prompt_id: params
+                .get("prompt_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            execution_generation: params.get("execution_generation").and_then(Value::as_i64),
+            choices,
         }
+    }
+
+    pub fn from_canonical_prompt(
+        session_id: &str,
+        fallback_gen: Option<i64>,
+        prompt: &hermes_api::gateway::CanonicalPendingPrompt,
+    ) -> Option<Self> {
+        if prompt.prompt_id.is_empty() {
+            return None;
+        }
+        let choices = if prompt.choices.is_empty() {
+            prompt.options.clone()
+        } else {
+            prompt.choices.clone()
+        };
+        Some(Self {
+            id: prompt.prompt_id.clone(),
+            session_id: Some(session_id.to_string()),
+            request_id: None,
+            command: prompt.command.clone().unwrap_or_default(),
+            description: prompt.description.clone().unwrap_or_default(),
+            allow_permanent: true,
+            prompt_id: Some(prompt.prompt_id.clone()),
+            execution_generation: prompt.execution_generation.or(fallback_gen),
+            choices,
+        })
     }
 }
 
@@ -76,6 +121,8 @@ pub struct ClarifyRequest {
     pub session_id: Option<String>,
     pub question: String,
     pub choices: Vec<String>,
+    pub prompt_id: Option<String>,
+    pub execution_generation: Option<i64>,
 }
 
 impl ClarifyRequest {
@@ -101,6 +148,35 @@ impl ClarifyRequest {
                 .map(str::to_string),
             question,
             choices,
+            prompt_id: params
+                .get("prompt_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            execution_generation: params.get("execution_generation").and_then(Value::as_i64),
+        })
+    }
+
+    pub fn from_canonical_prompt(
+        session_id: &str,
+        fallback_gen: Option<i64>,
+        prompt: &hermes_api::gateway::CanonicalPendingPrompt,
+    ) -> Option<Self> {
+        if prompt.prompt_id.is_empty() {
+            return None;
+        }
+        let question = prompt.question.clone().unwrap_or_default();
+        let choices = if prompt.options.is_empty() {
+            prompt.choices.clone()
+        } else {
+            prompt.options.clone()
+        };
+        Some(Self {
+            id: prompt.prompt_id.clone(),
+            session_id: Some(session_id.to_string()),
+            question,
+            choices,
+            prompt_id: Some(prompt.prompt_id.clone()),
+            execution_generation: prompt.execution_generation.or(fallback_gen),
         })
     }
 
@@ -119,6 +195,7 @@ pub enum ApprovalChoice {
     Once,
     Always,
     Deny,
+    Session,
 }
 
 impl ApprovalChoice {
@@ -128,11 +205,20 @@ impl ApprovalChoice {
             ApprovalChoice::Once => "once",
             ApprovalChoice::Always => "always",
             ApprovalChoice::Deny => "deny",
+            ApprovalChoice::Session => "session",
         }
     }
 }
 
-/// Which surface a message-only failure belongs to.
+#[derive(Debug, Clone, Default)]
+pub struct ReconnectCursor {
+    pub runtime_session_id: Option<String>,
+    pub stored_session_id: Option<String>,
+    pub replay_epoch: Option<String>,
+    pub last_sequence: Option<u64>,
+    pub execution_generation: Option<i64>,
+    pub in_flight_prompts: std::collections::HashSet<String>,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Usage,
@@ -258,7 +344,11 @@ pub enum BackendEvent {
         stored_id: String,
         session_id: String,
         messages: Vec<serde_json::Value>,
+        messages_omitted: bool,
+        prompts: Vec<hermes_api::gateway::CanonicalPendingPrompt>,
+        execution_generation: Option<i64>,
     },
+    CardResolved(String),
     SessionDeleted(String),
     SessionUpdated(String),
     Skills(Vec<Skill>),
@@ -828,6 +918,7 @@ async fn worker(
 ) {
     let mut host = host;
     let mut backoff = RECONNECT_MIN;
+    let mut cursor = ReconnectCursor::default();
 
     loop {
         let (authed, notes) = hermes_api::authenticate(&host).await;
@@ -867,10 +958,151 @@ async fn worker(
         let _ = events.send(BackendEvent::Connection(ConnectionState::Open));
         refresh(&client, &rest, &events).await;
 
+        // Reconnect catch-up...
+        let mut session: Option<String> = None;
+        if let Some(sid) = cursor.runtime_session_id.clone() {
+            let profile = host.profile.clone();
+            if cursor
+                .replay_epoch
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                match gateway::resume_session_with_options(&client, &sid, profile.as_deref(), false)
+                    .await
+                {
+                    Ok(resumed) => {
+                        session = Some(resumed.session_id.clone());
+                        cursor.runtime_session_id = Some(resumed.session_id.clone());
+                        cursor.stored_session_id = Some(resumed.durable_id().to_string());
+                        cursor.replay_epoch = resumed.replay_epoch.clone();
+                        cursor.last_sequence = resumed.last_sequence.map(|v| v as u64);
+                        cursor.execution_generation = resumed.execution_generation;
+                        cursor.in_flight_prompts.clear();
+                        let _ = events.send(BackendEvent::SessionResumed {
+                            stored_id: resumed.durable_id().to_string(),
+                            session_id: resumed.session_id,
+                            messages: resumed.messages,
+                            messages_omitted: false,
+                            prompts: resumed.prompts,
+                            execution_generation: resumed.execution_generation,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = events.send(BackendEvent::Error(err.to_string()));
+                    }
+                }
+            } else {
+                let epoch = cursor.replay_epoch.clone().unwrap();
+                let last_seq = cursor.last_sequence.unwrap_or(0);
+                let since_result =
+                    gateway::session_events_since(&client, &sid, last_seq, &epoch).await;
+                let need_full = match &since_result {
+                    Err(_) => true,
+                    Ok(since) => since.snapshot_required || since.truncated,
+                };
+                if need_full {
+                    match gateway::resume_session_with_options(
+                        &client,
+                        &sid,
+                        profile.as_deref(),
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(resumed) => {
+                            session = Some(resumed.session_id.clone());
+                            cursor.runtime_session_id = Some(resumed.session_id.clone());
+                            cursor.stored_session_id = Some(resumed.durable_id().to_string());
+                            cursor.replay_epoch = resumed.replay_epoch.clone();
+                            cursor.last_sequence = resumed.last_sequence.map(|v| v as u64);
+                            cursor.execution_generation = resumed.execution_generation;
+                            cursor.in_flight_prompts.clear();
+                            let _ = events.send(BackendEvent::SessionResumed {
+                                stored_id: resumed.durable_id().to_string(),
+                                session_id: resumed.session_id,
+                                messages: resumed.messages,
+                                messages_omitted: false,
+                                prompts: resumed.prompts,
+                                execution_generation: resumed.execution_generation,
+                            });
+                        }
+                        Err(err) => {
+                            let _ = events.send(BackendEvent::Error(err.to_string()));
+                        }
+                    }
+                } else if let Ok(since) = since_result {
+                    let events_to_apply = collect_since_events(&since.events, &epoch, last_seq);
+                    for ev in events_to_apply {
+                        if let Some(seq) = ev.seq {
+                            let cur = cursor.last_sequence.unwrap_or(0);
+                            if seq > cur {
+                                cursor.last_sequence = Some(seq);
+                            }
+                        }
+                        route_event(&events, ev);
+                    }
+                    // advance cursor.last_sequence from since
+                    if let Some(ls) = since.last_sequence {
+                        let cur = cursor.last_sequence.unwrap_or(0);
+                        if ls > cur {
+                            cursor.last_sequence = Some(ls);
+                        }
+                    }
+                    if let Some(ls) = since.latest_seq {
+                        let cur = cursor.last_sequence.unwrap_or(0);
+                        if ls > cur {
+                            cursor.last_sequence = Some(ls);
+                        }
+                    }
+                    if let Some(ep) = since.replay_epoch.clone().or(since.epoch.clone()) {
+                        cursor.replay_epoch = Some(ep);
+                    }
+                    // attach as live subscriber, replace cards from prompts[]
+                    match gateway::resume_session_with_options(
+                        &client,
+                        &sid,
+                        profile.as_deref(),
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(resumed) => {
+                            session = Some(resumed.session_id.clone());
+                            cursor.runtime_session_id = Some(resumed.session_id.clone());
+                            cursor.stored_session_id = Some(resumed.durable_id().to_string());
+                            cursor.replay_epoch =
+                                resumed.replay_epoch.clone().or(cursor.replay_epoch.clone());
+                            if let Some(ls) = resumed.last_sequence.map(|v| v as u64) {
+                                let cur = cursor.last_sequence.unwrap_or(0);
+                                if ls > cur {
+                                    cursor.last_sequence = Some(ls);
+                                }
+                            }
+                            cursor.execution_generation =
+                                resumed.execution_generation.or(cursor.execution_generation);
+                            cursor.in_flight_prompts.clear();
+                            let _ = events.send(BackendEvent::SessionResumed {
+                                stored_id: resumed.durable_id().to_string(),
+                                session_id: resumed.session_id,
+                                messages: resumed.messages,
+                                messages_omitted: true,
+                                prompts: resumed.prompts,
+                                execution_generation: cursor.execution_generation,
+                            });
+                        }
+                        Err(err) => {
+                            let _ = events.send(BackendEvent::Error(err.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut event_rx = client.subscribe();
         let mut state_rx = client.state_changes();
         let mut request_rx = client.take_server_requests();
-        let mut session: Option<String> = None;
         let mut session_profile = host.profile.clone();
 
         loop {
@@ -881,11 +1113,13 @@ async fn worker(
                         Command::Refresh => refresh(&client, &rest, &events).await,
                         Command::NewSession => {
                             session = None;
+                            cursor = ReconnectCursor::default();
                             let _ = events.send(BackendEvent::MessageComplete);
                         }
                         Command::SwitchProfile(name) => {
                             session_profile = Some(name);
                             session = None;
+                            cursor = ReconnectCursor::default();
                             let _ = events.send(BackendEvent::MessageComplete);
                         }
                         Command::Interrupt => {
@@ -896,30 +1130,177 @@ async fn worker(
                         }
                         Command::Approve { request, choice } => {
                             let wire = choice.as_wire();
-                            client.respond(&request.id, json!({ "choice": wire }));
-                            // The queue that actually gates the tool is keyed by
-                            // request_id; the frame above only unblocks the turn.
-                            if let Some(request_id) = &request.request_id {
-                                let _ = client
-                                    .request_value_with_timeout(
-                                        "approval.respond",
-                                        json!({
-                                            "session_id": session,
-                                            "choice": wire,
-                                            "request_id": request_id,
-                                        }),
-                                        Duration::from_secs(20),
-                                    )
-                                    .await;
+                            if let Some(pid) = request.prompt_id.clone() {
+                                if !cursor.in_flight_prompts.insert(pid.clone()) {
+                                    continue;
+                                }
+                                // canonical path
+                                let sid: Option<String> = request.session_id.clone().or_else(|| session.clone());
+                                let exec_gen = request.execution_generation.or(cursor.execution_generation);
+                                match (sid, exec_gen) {
+                                    (Some(session_id), Some(execution_generation)) => {
+                                        match hermes_api::gateway::approval_respond_canonical(
+                                            &client,
+                                            &session_id,
+                                            execution_generation,
+                                            &pid,
+                                            wire,
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => {
+                                                let status = result.status.as_str();
+                                                if status == "resolved" || status == "already_resolved" {
+                                                    cursor.in_flight_prompts.remove(&pid);
+                                                    let _ = events.send(BackendEvent::CardResolved(pid.clone()));
+                                                    let _ = events.send(BackendEvent::Notice(format!("approval: {wire}")));
+                                                } else {
+                                                    let _ = events.send(BackendEvent::Notice(format!(
+                                                        "approval: {}",
+                                                        result.reason.unwrap_or_else(|| status.to_string())
+                                                    )));
+                                                }
+                                            }
+                                            Err(err) => {
+                                                cursor.in_flight_prompts.remove(&pid);
+                                                if hermes_api::gateway::is_stale_generation_error(&err) {
+                                                    let _ = events.send(BackendEvent::Notice("stale generation; refreshing".into()));
+                                                    // refresh prompts
+                                                    if let Some(sid) = session.clone() {
+                                                        let profile = session_profile.clone();
+                                                        if let Ok(resumed) = hermes_api::gateway::resume_session_with_options(
+                                                            &client,
+                                                            &sid,
+                                                            profile.as_deref(),
+                                                            true,
+                                                        )
+                                                        .await
+                                                        {
+                                                            cursor.replay_epoch = resumed.replay_epoch.clone().or(cursor.replay_epoch.clone());
+                                                            cursor.last_sequence = resumed.last_sequence.map(|v| v as u64).or(cursor.last_sequence);
+                                                            cursor.execution_generation = resumed.execution_generation.or(cursor.execution_generation);
+                                                            cursor.in_flight_prompts.clear();
+                                                            let _ = events.send(BackendEvent::SessionResumed {
+                                                                stored_id: resumed.durable_id().to_string(),
+                                                                session_id: resumed.session_id,
+                                                                messages: resumed.messages,
+                                                                messages_omitted: true,
+                                                                prompts: resumed.prompts,
+                                                                execution_generation: cursor.execution_generation,
+                                                            });
+                                                        }
+                                                    }
+                                                } else if hermes_api::gateway::is_permission_denied_error(&err) {
+                                                    let _ = events.send(BackendEvent::Notice(
+                                                        "permission denied; resume session to re-attach".into(),
+                                                    ));
+                                                } else {
+                                                    let _ = events.send(BackendEvent::Error(err.to_string()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        cursor.in_flight_prompts.remove(&pid);
+                                        let _ = events.send(BackendEvent::Error("missing session or generation".into()));
+                                    }
+                                }
+                            } else {
+                                // legacy path
+                                client.respond(&request.id, json!({ "choice": wire }));
+                                if let Some(request_id) = &request.request_id {
+                                    let _ = client
+                                        .request_value_with_timeout(
+                                            "approval.respond",
+                                            json!({
+                                                "session_id": session,
+                                                "choice": wire,
+                                                "request_id": request_id,
+                                            }),
+                                            Duration::from_secs(20),
+                                        )
+                                        .await;
+                                }
+                                let _ = events.send(BackendEvent::Notice(format!(
+                                    "approval: {wire}"
+                                )));
                             }
-                            let _ = events.send(BackendEvent::Notice(format!(
-                                "approval: {wire}"
-                            )));
                         }
                         Command::Answer { request, answer } => {
-                            client.respond(&request.id, request.answer(&answer));
+                            if let Some(pid) = request.prompt_id.clone() {
+                                if !cursor.in_flight_prompts.insert(pid.clone()) {
+                                    continue;
+                                }
+                                let sid: Option<String> = request.session_id.clone().or_else(|| session.clone());
+                                let exec_gen = request.execution_generation.or(cursor.execution_generation);
+                                match (sid, exec_gen) {
+                                    (Some(session_id), Some(execution_generation)) => {
+                                        match hermes_api::gateway::clarify_respond_canonical(
+                                            &client,
+                                            &session_id,
+                                            execution_generation,
+                                            &pid,
+                                            &answer,
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => {
+                                                let status = result.status.as_str();
+                                                if status == "resolved" || status == "already_resolved" {
+                                                    cursor.in_flight_prompts.remove(&pid);
+                                                    let _ = events.send(BackendEvent::CardResolved(pid.clone()));
+                                                } else {
+                                                    let _ = events.send(BackendEvent::Notice(format!(
+                                                        "clarify: {}",
+                                                        result.reason.unwrap_or_else(|| status.to_string())
+                                                    )));
+                                                }
+                                            }
+                                            Err(err) => {
+                                                cursor.in_flight_prompts.remove(&pid);
+                                                if hermes_api::gateway::is_stale_generation_error(&err) {
+                                                    let _ = events.send(BackendEvent::Notice("stale generation; refreshing".into()));
+                                                    if let Some(sid) = session.clone() {
+                                                        let profile = session_profile.clone();
+                                                        if let Ok(resumed) = hermes_api::gateway::resume_session_with_options(
+                                                            &client,
+                                                            &sid,
+                                                            profile.as_deref(),
+                                                            true,
+                                                        )
+                                                        .await
+                                                        {
+                                                            cursor.replay_epoch = resumed.replay_epoch.clone().or(cursor.replay_epoch.clone());
+                                                            cursor.last_sequence = resumed.last_sequence.map(|v| v as u64).or(cursor.last_sequence);
+                                                            cursor.execution_generation = resumed.execution_generation.or(cursor.execution_generation);
+                                                            cursor.in_flight_prompts.clear();
+                                                            let _ = events.send(BackendEvent::SessionResumed {
+                                                                stored_id: resumed.durable_id().to_string(),
+                                                                session_id: resumed.session_id,
+                                                                messages: resumed.messages,
+                                                                messages_omitted: true,
+                                                                prompts: resumed.prompts,
+                                                                execution_generation: cursor.execution_generation,
+                                                            });
+                                                        }
+                                                    }
+                                                } else {
+                                                    let _ = events.send(BackendEvent::Error(err.to_string()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        cursor.in_flight_prompts.remove(&pid);
+                                        let _ = events.send(BackendEvent::Error("missing session or generation".into()));
+                                    }
+                                }
+                            } else {
+                                client.respond(&request.id, request.answer(&answer));
+                            }
                         }
                         Command::Decline { id, session_id } => {
+                            // canonical? Decline is called with id only currently; if id is a prompt id in cards?
                             let _ = session_id;
                             client.respond(&id, json!({ "answers": {}, "outcome": "cancelled" }));
                         }
@@ -998,6 +1379,8 @@ async fn worker(
                                 match gateway::create_session(&client, session_profile.as_deref()).await {
                                     Ok(created) => {
                                         session = Some(created.session_id.clone());
+                                        cursor.runtime_session_id = Some(created.session_id.clone());
+                                        cursor.stored_session_id = created.stored_session_id.clone();
                                         let _ = events.send(BackendEvent::SessionReady {
                                             session_id: created.session_id,
                                             profile: session_profile.clone(),
@@ -1669,19 +2052,29 @@ async fn worker(
                             let _ = events.send(BackendEvent::Notice(message));
                         }
                         Command::ResumeSession { id } => {
-                            match gateway::resume_session(
+                            match gateway::resume_session_with_options(
                                 &client,
                                 &id,
                                 session_profile.as_deref(),
+                                false,
                             )
                             .await
                             {
                                 Ok(resumed) => {
                                     session = Some(resumed.session_id.clone());
+                                    cursor.runtime_session_id = Some(resumed.session_id.clone());
+                                    cursor.stored_session_id = Some(resumed.durable_id().to_string());
+                                    cursor.replay_epoch = resumed.replay_epoch.clone();
+                                    cursor.last_sequence = resumed.last_sequence.map(|v| v as u64);
+                                    cursor.execution_generation = resumed.execution_generation;
+                                    cursor.in_flight_prompts.clear();
                                     let _ = events.send(BackendEvent::SessionResumed {
-                                        stored_id: resumed.resumed.clone(),
+                                        stored_id: resumed.durable_id().to_string(),
                                         session_id: resumed.session_id,
                                         messages: resumed.messages,
+                                        messages_omitted: false,
+                                        prompts: resumed.prompts,
+                                        execution_generation: cursor.execution_generation,
                                     });
                                 }
                                 Err(err) => {
@@ -2079,6 +2472,8 @@ async fn worker(
                                 match gateway::create_session(&client, session_profile.as_deref()).await {
                                     Ok(created) => {
                                         session = Some(created.session_id.clone());
+                                        cursor.runtime_session_id = Some(created.session_id.clone());
+                                        cursor.stored_session_id = created.stored_session_id.clone();
                                         let _ = events.send(BackendEvent::SessionReady {
                                             session_id: created.session_id.clone(),
                                             profile: session_profile.clone(),
@@ -2112,6 +2507,12 @@ async fn worker(
                 }
                 event = event_rx.recv() => {
                     let Ok(event) = event else { continue };
+                    if let Some(seq) = event.seq {
+                        let cur = cursor.last_sequence.unwrap_or(0);
+                        if seq > cur {
+                            cursor.last_sequence = Some(seq);
+                        }
+                    }
                     route_event(&events, event);
                 }
                 request = request_rx.recv() => {
@@ -2472,6 +2873,18 @@ fn route_event(events: &mpsc::UnboundedSender<BackendEvent>, event: GatewayEvent
                 let _ = events.send(BackendEvent::Notice(text.to_string()));
             }
         }
+        "approval.cancelled" => {
+            if let Some(ids) = event.payload.get("request_ids").and_then(Value::as_array) {
+                for id in ids {
+                    if let Some(s) = id.as_str() {
+                        let _ = events.send(BackendEvent::CardResolved(s.to_string()));
+                    }
+                }
+            }
+            if let Some(id) = event.payload.get("prompt_id").and_then(Value::as_str) {
+                let _ = events.send(BackendEvent::CardResolved(id.to_string()));
+            }
+        }
         _ => {}
     }
 }
@@ -2556,6 +2969,32 @@ pub async fn probe(host: &HostConfig) -> Vec<String> {
 
     client.close();
     report
+}
+
+fn collect_since_events(
+    raw_events: &[Value],
+    expected_epoch: &str,
+    after_seq: u64,
+) -> Vec<GatewayEvent> {
+    let mut events_to_apply: Vec<GatewayEvent> = Vec::new();
+    for raw in raw_events {
+        if let Some((ev, ev_epoch)) = gateway::decode_since_event(raw) {
+            if let Some(ep) = ev_epoch.as_ref()
+                && ep != expected_epoch
+            {
+                continue;
+            }
+            let Some(seq) = ev.seq else {
+                continue;
+            };
+            if seq <= after_seq {
+                continue;
+            }
+            events_to_apply.push(ev);
+        }
+    }
+    events_to_apply.sort_by_key(|e| e.seq.unwrap_or(0));
+    events_to_apply
 }
 
 #[cfg(test)]
@@ -2712,5 +3151,96 @@ mod tests {
         webp.extend_from_slice(b"VP8 ");
         assert_eq!(image_mime(&webp), Some("image/webp"));
         assert_eq!(image_mime(b"GIF89a"), None);
+    }
+
+    #[test]
+    fn canonical_prompts_build_requests_including_session_choice() {
+        let approval_prompt = hermes_api::gateway::CanonicalPendingPrompt {
+            kind: "approval".into(),
+            prompt_id: "synthapprovalid000000000000000001".into(),
+            execution_generation: Some(3),
+            command: Some("SYNTHETIC command".into()),
+            description: Some("SYNTHETIC description".into()),
+            choices: vec![
+                "once".into(),
+                "deny".into(),
+                "session".into(),
+                "always".into(),
+            ],
+            ..Default::default()
+        };
+        let req = ApprovalRequest::from_canonical_prompt(
+            "synth-session-0000000000000001",
+            None,
+            &approval_prompt,
+        )
+        .unwrap();
+        assert_eq!(req.id, "synthapprovalid000000000000000001");
+        assert_eq!(
+            req.prompt_id.as_deref(),
+            Some("synthapprovalid000000000000000001")
+        );
+        assert_eq!(req.execution_generation, Some(3));
+        assert!(req.choices.iter().any(|c| c == "session"));
+        assert_eq!(ApprovalChoice::Session.as_wire(), "session");
+
+        let clarify_prompt = hermes_api::gateway::CanonicalPendingPrompt {
+            kind: "clarify".into(),
+            prompt_id: "synthclarifyid0000000000000000001".into(),
+            execution_generation: None,
+            question: Some("SYNTHETIC clarify question?".into()),
+            options: vec!["yes".into(), "no".into()],
+            ..Default::default()
+        };
+        let clarify = ClarifyRequest::from_canonical_prompt(
+            "synth-session-0000000000000001",
+            Some(5),
+            &clarify_prompt,
+        )
+        .unwrap();
+        assert_eq!(
+            clarify.prompt_id.as_deref(),
+            Some("synthclarifyid0000000000000000001")
+        );
+        assert_eq!(clarify.execution_generation, Some(5));
+        assert_eq!(clarify.choices, vec!["yes", "no"]);
+    }
+
+    #[test]
+    fn collect_since_events_filters_by_epoch_and_dedups_sequence() {
+        let events = vec![
+            serde_json::json!({
+                "type": "tool.complete",
+                "seq": 10,
+                "replay_epoch": "synth-epoch-a",
+                "payload": { "tool_name": "read_file", "result": "stale" }
+            }),
+            serde_json::json!({
+                "type": "tool.complete",
+                "seq": 13,
+                "replay_epoch": "synth-epoch-b",
+                "payload": { "tool_name": "read_file", "result": "wrong epoch" }
+            }),
+            serde_json::json!({
+                "type": "tool.complete",
+                "seq": 12,
+                "replay_epoch": "synth-epoch-a",
+                "payload": { "tool_name": "read_file", "result": "SYNTHETIC body" }
+            }),
+            serde_json::json!({
+                "type": "tool.start",
+                "seq": 11,
+                "replay_epoch": "synth-epoch-a",
+                "payload": { "tool_name": "read_file" }
+            }),
+        ];
+        let out = collect_since_events(&events, "synth-epoch-a", 10);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].seq, Some(11));
+        assert_eq!(out[1].seq, Some(12));
+        assert_eq!(
+            out[1].payload.get("result").and_then(Value::as_str),
+            Some("SYNTHETIC body")
+        );
     }
 }
