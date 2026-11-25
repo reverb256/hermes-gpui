@@ -28,6 +28,35 @@ use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions
 use gpui_ce_elements::editable_text::actions::{DEFAULT_INPUT_CONTEXT, default_bindings};
 use hermes_api::HostConfig;
 
+const HELP_TEXT: &str = "\
+Hermes desktop client
+
+Usage: hermes-desktop [OPTIONS]
+
+Options:
+      --version                 Print version and exit
+  -h, --help                    Print this help and exit
+      --status-json             Print a read-only status snapshot as JSON and exit
+      status --json             Same as --status-json
+      --install-omarchy-hooks   Install the Omarchy theme-set hook and exit
+      --diagnostics             Print local support diagnostics and exit
+      --probe                   Headless host check (REST, WS, session) and exit
+      --toggle                  Toggle the running window instead of showing it
+
+With no options, the desktop window opens.\n";
+
+fn version_text() -> String {
+    format!("hermes-desktop {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn wants_help(args: &[String]) -> bool {
+    has_flag(args, "--help") || has_flag(args, "-h")
+}
+
 fn main() {
     // The hub device socket uses wss://; install a provider before rustls is
     // asked to infer one from a feature graph that can contain both providers.
@@ -42,6 +71,16 @@ fn main() {
 
     let host = HostConfig::from_env();
     let args: Vec<String> = std::env::args().collect();
+
+    // CLI metadata is answered before any host contact or GUI launch.
+    if has_flag(&args, "--version") {
+        println!("{}", version_text());
+        return;
+    }
+    if wants_help(&args) {
+        print!("{HELP_TEXT}");
+        return;
+    }
 
     // Read-only snapshot for the Omarchy bar widget.
     if args.iter().any(|arg| arg == "--status-json")
@@ -126,4 +165,55 @@ fn main() {
 
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_owned()).collect()
+    }
+
+    #[test]
+    fn version_text_uses_cargo_package_version() {
+        assert_eq!(
+            version_text(),
+            format!("hermes-desktop {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn help_text_lists_every_cli_flag() {
+        for flag in [
+            "--version",
+            "--help",
+            "--status-json",
+            "status --json",
+            "--install-omarchy-hooks",
+            "--diagnostics",
+            "--probe",
+            "--toggle",
+        ] {
+            assert!(HELP_TEXT.contains(flag), "help text is missing {flag}");
+        }
+    }
+
+    #[test]
+    fn version_flag_matches_exactly() {
+        assert!(has_flag(
+            &args(&["hermes-desktop", "--version"]),
+            "--version"
+        ));
+        assert!(!has_flag(&args(&["hermes-desktop", "-v"]), "--version"));
+        assert!(!has_flag(&args(&["hermes-desktop"]), "--version"));
+    }
+
+    #[test]
+    fn help_flag_matches_long_and_short_forms() {
+        assert!(wants_help(&args(&["hermes-desktop", "--help"])));
+        assert!(wants_help(&args(&["hermes-desktop", "-h"])));
+        assert!(!wants_help(&args(&["hermes-desktop"])));
+        assert!(!wants_help(&args(&["hermes-desktop", "--status-json"])));
+    }
 }
